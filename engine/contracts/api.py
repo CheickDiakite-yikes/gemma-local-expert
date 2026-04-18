@@ -71,6 +71,23 @@ class ApprovalAction(str, Enum):
     EDIT = "edit"
 
 
+class AgentRunStatus(str, Enum):
+    RUNNING = "running"
+    AWAITING_APPROVAL = "awaiting_approval"
+    COMPLETED = "completed"
+    BLOCKED = "blocked"
+    FAILED = "failed"
+
+
+class AgentStepStatus(str, Enum):
+    PLANNED = "planned"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    AWAITING_APPROVAL = "awaiting_approval"
+    BLOCKED = "blocked"
+    FAILED = "failed"
+
+
 class ResponsePreferences(StrictModel):
     style: ResponseStyle = ResponseStyle.CONCISE
     citations: bool = True
@@ -217,6 +234,7 @@ class ApprovalState(StrictModel):
     id: str
     conversation_id: str
     turn_id: str
+    run_id: str | None = None
     tool_name: str
     reason: str
     status: str
@@ -257,6 +275,54 @@ class ExportResult(StrictModel):
     export_id: str
     destination_path: str
     status: str
+
+
+class AgentRunStep(StrictModel):
+    id: str
+    kind: str
+    title: str
+    status: AgentStepStatus = AgentStepStatus.PLANNED
+    detail: str | None = None
+    references: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class AgentRun(StrictModel):
+    id: str
+    conversation_id: str
+    turn_id: str
+    goal: str
+    scope_root: str
+    status: AgentRunStatus = AgentRunStatus.RUNNING
+    plan_steps: list[AgentRunStep] = Field(default_factory=list)
+    executed_steps: list[AgentRunStep] = Field(default_factory=list)
+    result_summary: str | None = None
+    artifact_ids: list[str] = Field(default_factory=list)
+    approval_id: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class SystemCapabilities(StrictModel):
+    assistant_backend: str
+    assistant_model: str
+    embedding_backend: str
+    embedding_model: str
+    specialist_backend: str
+    vision_model: str
+    tracking_backend: str
+    tracking_model: str
+    medical_model: str
+    workspace_root: str
+    tesseract_available: bool
+    ffmpeg_available: bool
+    assistant_model_available: bool
+    embedding_model_available: bool
+    vision_model_available: bool
+    tracking_model_available: bool
+    medical_model_available: bool
+    low_memory_profile: bool
 
 
 class ToolDescriptor(StrictModel):

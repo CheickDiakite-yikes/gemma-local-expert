@@ -8,7 +8,9 @@ const state = {
   draftMessages: [],
   pendingAttachments: [],
   transcripts: new Map(),
+  agentRuns: new Map(),
   approvals: new Map(),
+  capabilities: null,
   medicalSessions: new Map(),
   processFeed: [],
   statusDetail: "Ready for the next turn.",
@@ -89,6 +91,53 @@ function setActiveMessages(messages) {
   state.transcripts.set(state.activeConversationId, messages);
 }
 
+function runsForConversation(conversationId) {
+  return state.agentRuns.get(conversationId) || [];
+}
+
+function upsertAgentRun(conversationId, run) {
+  if (!conversationId || !run?.id) {
+    return null;
+  }
+  const runs = [...runsForConversation(conversationId)];
+  const index = runs.findIndex((entry) => entry.id === run.id);
+  if (index === -1) {
+    runs.push(run);
+  } else {
+    runs[index] = run;
+  }
+  runs.sort((left, right) => String(left.created_at || "").localeCompare(String(right.created_at || "")));
+  state.agentRuns.set(conversationId, runs);
+  hydrateAgentRunsIntoMessages(conversationId);
+  return run;
+}
+
+function hydrateAgentRunsIntoMessages(conversationId) {
+  const messages = state.transcripts.get(conversationId);
+  if (!messages) {
+    return;
+  }
+  const runsByTurn = new Map(
+    runsForConversation(conversationId)
+      .filter((run) => run?.turn_id)
+      .map((run) => [run.turn_id, run]),
+  );
+  for (const message of messages) {
+    message.agentRun = message.turnId ? runsByTurn.get(message.turnId) || null : null;
+  }
+}
+
+function capabilitySummary(capabilities) {
+  if (!capabilities) {
+    return "Capabilities unavailable.";
+  }
+  const binaryBits = [];
+  binaryBits.push(capabilities.tesseract_available ? "tesseract" : "no tesseract");
+  binaryBits.push(capabilities.ffmpeg_available ? "ffmpeg" : "no ffmpeg");
+  const profile = capabilities.low_memory_profile ? "low-memory profile" : "full profile";
+  return `${capabilities.assistant_backend} / ${capabilities.embedding_backend} / ${capabilities.specialist_backend} / ${capabilities.tracking_backend} • ${binaryBits.join(" • ")} • ${profile}`;
+}
+
 function updateStatus(kind, label, detail = null) {
   elements.statusPill.textContent = label;
   elements.statusRuntimeCopy.textContent = detail || label;
@@ -137,9 +186,18 @@ function mergeMessageProcess(message, entry) {
 function renderStatusMenu() {
   elements.statusButton.setAttribute("aria-expanded", String(state.statusMenuOpen));
   elements.statusMenu.hidden = !state.statusMenuOpen;
+  const capabilityMarkup = state.capabilities
+    ? `
+      <div class="process-capabilities">
+        <strong>Engine capabilities</strong>
+        <p>${escapeHtml(capabilitySummary(state.capabilities))}</p>
+      </div>
+    `
+    : "";
 
   if (!state.processFeed.length) {
     elements.processList.innerHTML = `
+      ${capabilityMarkup}
       <div class="process-empty">
         <strong>Idle</strong>
         <span>The engine is waiting for the next turn.</span>
@@ -161,6 +219,9 @@ function renderStatusMenu() {
       `,
     )
     .join("");
+  if (capabilityMarkup) {
+    elements.processList.innerHTML = capabilityMarkup + elements.processList.innerHTML;
+  }
 }
 
 function toggleStatusMenu(forceOpen) {
@@ -482,6 +543,79 @@ function renderApprovalPreview(approval) {
   `;
 }
 
+function renderApprovalEditor(approval) {
+  if (!approval?.payload || approval.status !== "pending") {
+    return "";
+  }
+
+  const { payload } = approval;
+  if (approval.tool_name === "create_task") {
+    return `
+      <section class="approval-editor" data-approval-editor="${approval.id}">
+        <div class="approval-editor-header">
+          <strong>Refine before approval</strong>
+          <span>Adjust the saved task before it is written locally.</span>
+        </div>
+        <label class="approval-field">
+          <span>Title</span>
+          <input data-approval-field="title" type="text" value="${escapeHtml(payload.title || "")}" />
+        </label>
+        <label class="approval-field">
+          <span>Details</span>
+          <textarea data-approval-field="details" rows="6">${escapeHtml(payload.details || "")}</textarea>
+        </label>
+        <label class="approval-field">
+          <span>Status</span>
+          <select data-approval-field="status">
+            ${["open", "in_progress", "blocked", "done"]
+              .map(
+                (status) =>
+                  `<option value="${status}"${payload.status === status ? " selected" : ""}>${escapeHtml(humanizeRunStatus(status))}</option>`,
+              )
+              .join("")}
+          </select>
+        </label>
+      </section>
+    `;
+  }
+
+  if (["create_note", "create_checklist", "log_observation"].includes(approval.tool_name)) {
+    const helperCopy =
+      approval.tool_name === "create_checklist"
+        ? "Adjust the saved checklist title or items before it is written locally."
+        : "Adjust the saved draft before it is written locally.";
+    return `
+      <section class="approval-editor" data-approval-editor="${approval.id}">
+        <div class="approval-editor-header">
+          <strong>Refine before approval</strong>
+          <span>${escapeHtml(helperCopy)}</span>
+        </div>
+        <label class="approval-field">
+          <span>Title</span>
+          <input data-approval-field="title" type="text" value="${escapeHtml(payload.title || "")}" />
+        </label>
+        <label class="approval-field">
+          <span>${approval.tool_name === "create_checklist" ? "Checklist content" : "Content"}</span>
+          <textarea data-approval-field="content" rows="${approval.tool_name === "create_checklist" ? "8" : "6"}">${escapeHtml(payload.content || "")}</textarea>
+        </label>
+      </section>
+    `;
+  }
+
+  return `
+    <section class="approval-editor" data-approval-editor="${approval.id}">
+      <div class="approval-editor-header">
+        <strong>Refine before approval</strong>
+        <span>Advanced payload editing for this action.</span>
+      </div>
+      <label class="approval-field approval-field-code">
+        <span>Payload JSON</span>
+        <textarea data-approval-json rows="8">${escapeHtml(JSON.stringify(payload, null, 2))}</textarea>
+      </label>
+    </section>
+  `;
+}
+
 function renderApprovalResult(result) {
   if (!result) {
     return "";
@@ -503,6 +637,73 @@ function renderApprovalResult(result) {
   }
 
   return `<div class="approval-result">${resultBits.join(" · ")}</div>`;
+}
+
+function humanizeRunStatus(status) {
+  return String(status || "running")
+    .split("_")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function renderAgentRunMarkup(run, approval) {
+  if (!run) {
+    return "";
+  }
+
+  const steps = (run.executed_steps?.length ? run.executed_steps : run.plan_steps || []).slice(-6);
+  const stepMarkup = steps.length
+    ? `
+      <div class="agent-run-steps">
+        ${steps
+          .map(
+            (step) => `
+              <div class="agent-run-step is-${escapeHtml(step.status || "planned")}">
+                <div class="agent-run-step-header">
+                  <strong>${escapeHtml(step.title || step.kind || "Step")}</strong>
+                  <span>${escapeHtml(humanizeRunStatus(step.status || "planned"))}</span>
+                </div>
+                ${step.detail ? `<p>${escapeHtml(step.detail)}</p>` : ""}
+                ${
+                  step.references?.length
+                    ? `<div class="agent-run-step-refs">${step.references
+                        .slice(0, 3)
+                        .map((reference) => `<span>${escapeHtml(reference)}</span>`)
+                        .join("")}</div>`
+                    : ""
+                }
+              </div>
+            `,
+          )
+          .join("")}
+      </div>
+    `
+    : "";
+
+  const approvalNote =
+    approval?.status === "pending"
+      ? `<p class="agent-run-note">Waiting for approval before the workspace run can finish the durable action.</p>`
+      : "";
+  const artifactNote =
+    run.artifact_ids?.length
+      ? `<p class="agent-run-note">Artifacts linked: ${escapeHtml(String(run.artifact_ids.length))}</p>`
+      : "";
+
+  return `
+    <section class="agent-run-card is-${escapeHtml(run.status || "running")}">
+      <div class="agent-run-header">
+        <span class="agent-run-kicker">Workspace agent</span>
+        <span class="agent-run-status">${escapeHtml(humanizeRunStatus(run.status || "running"))}</span>
+      </div>
+      <h4>${escapeHtml(clip(run.goal || "Workspace run", 96))}</h4>
+      <p class="agent-run-scope">Scope: <code>${escapeHtml(run.scope_root || ".")}</code></p>
+      ${stepMarkup}
+      ${run.result_summary ? `<p class="agent-run-summary">${escapeHtml(run.result_summary)}</p>` : ""}
+      ${artifactNote}
+      ${approvalNote}
+    </section>
+  `;
 }
 
 function renderConversations() {
@@ -703,6 +904,7 @@ function renderMessages() {
     const assetGallery = renderAssetMarkup(message.assets || []);
     const processLine = renderProcessMarkup(message.process || []);
     const toolResultCard = renderToolResultMarkup(message.toolResult);
+    const agentRunCard = renderAgentRunMarkup(message.agentRun, message.approval);
 
     row.innerHTML = `
       <div class="message-card">
@@ -710,6 +912,7 @@ function renderMessages() {
           <span>${formatRole(message.role)}</span>
         </div>
         ${processLine}
+        ${agentRunCard}
         ${renderMessageContent(message)}
         ${toolResultCard}
         ${assetGallery}
@@ -753,6 +956,7 @@ function renderApprovalMarkup(approval) {
         <h4>${escapeHtml(humanizeToolName(approval.tool_name))}</h4>
         <p>${escapeHtml(approval.reason)}</p>
       </div>
+      ${renderApprovalEditor(approval)}
       ${renderApprovalPreview(approval)}
       <div class="approval-status is-${escapeHtml(approval.status)}">Status: ${escapeHtml(approval.status)}</div>
       ${renderApprovalResult(approval.result)}
@@ -761,12 +965,52 @@ function renderApprovalMarkup(approval) {
   `;
 }
 
+function collectApprovalEdit(container, approval) {
+  const editor = container.querySelector(`[data-approval-editor="${approval.id}"]`);
+  if (!editor) {
+    return {};
+  }
+
+  const jsonField = editor.querySelector("[data-approval-json]");
+  if (jsonField) {
+    try {
+      const parsed = JSON.parse(jsonField.value);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed;
+      }
+      addSystemMessage("Approval edit must be a JSON object.");
+      return null;
+    } catch (error) {
+      addSystemMessage("Approval edit is not valid JSON yet.");
+      return null;
+    }
+  }
+
+  const editedPayload = {};
+  for (const field of editor.querySelectorAll("[data-approval-field]")) {
+    const name = field.dataset.approvalField;
+    if (!name) {
+      continue;
+    }
+    editedPayload[name] = field.value;
+  }
+  return editedPayload;
+}
+
 function wireApprovalActions(container, approval) {
   const buttons = container.querySelectorAll("[data-approval-action]");
   for (const button of buttons) {
     button.addEventListener("click", async () => {
       const action = button.dataset.approvalAction;
-      await submitApprovalDecision(approval.id, action);
+      let editedPayload = {};
+      if (action === "approve") {
+        const collected = collectApprovalEdit(container, approval);
+        if (collected === null) {
+          return;
+        }
+        editedPayload = collected;
+      }
+      await submitApprovalDecision(approval.id, action, editedPayload);
     });
   }
 }
@@ -934,10 +1178,43 @@ async function refreshConversations() {
   render();
 }
 
+async function loadCapabilities() {
+  try {
+    state.capabilities = await requestJson("/v1/system/capabilities");
+    if (!state.capabilities.ffmpeg_available || !state.capabilities.tesseract_available) {
+      addSystemMessage(
+        `Capability check: ${capabilitySummary(state.capabilities)}. Some local media features may degrade gracefully.`,
+      );
+    }
+  } catch (error) {
+    state.capabilities = null;
+  }
+}
+
+async function refreshAgentRuns(conversationId) {
+  if (!conversationId) {
+    return [];
+  }
+  const runs = await requestJson(`/v1/conversations/${conversationId}/runs`);
+  state.agentRuns.set(conversationId, runs);
+  hydrateAgentRunsIntoMessages(conversationId);
+  render();
+  return runs;
+}
+
 async function openConversation(conversationId) {
   state.activeConversationId = conversationId;
   if (!state.transcripts.has(conversationId)) {
-    const transcript = await requestJson(`/v1/conversations/${conversationId}/messages`);
+    const [transcript, runs] = await Promise.all([
+      requestJson(`/v1/conversations/${conversationId}/messages`),
+      requestJson(`/v1/conversations/${conversationId}/runs`),
+    ]);
+    state.agentRuns.set(conversationId, runs);
+    const runsByTurn = new Map(
+      runs
+        .filter((run) => run?.turn_id)
+        .map((run) => [run.turn_id, run]),
+    );
     state.transcripts.set(
       conversationId,
       transcript.map((message) => ({
@@ -951,8 +1228,11 @@ async function openConversation(conversationId) {
         proposedTool: message.approval?.tool_name || null,
         process: [],
         toolResult: message.approval?.result || null,
+        agentRun: message.turn_id ? runsByTurn.get(message.turn_id) || null : null,
       })),
     );
+  } else {
+    await refreshAgentRuns(conversationId);
   }
   render();
 }
@@ -968,6 +1248,7 @@ async function createConversation(title) {
   state.activeConversationId = conversation.id;
   state.conversations = [conversation, ...state.conversations];
   state.transcripts.set(conversation.id, []);
+  state.agentRuns.set(conversation.id, []);
   render();
   return conversation;
 }
@@ -1020,6 +1301,16 @@ function updateConversationPreview(conversationId, fallbackText) {
     ...conversation,
     last_message_preview: fallbackText || conversation.last_message_preview,
   };
+}
+
+function syncRunFromEvent(conversationId, assistantMessage, payload) {
+  const run = payload?.run || null;
+  if (!run) {
+    return null;
+  }
+  const stored = upsertAgentRun(conversationId, run);
+  assistantMessage.agentRun = stored;
+  return stored;
 }
 
 async function uploadAttachment(attachment) {
@@ -1528,6 +1819,7 @@ function handleStreamEvent(event) {
     recordProcessEvent("retrieval", "Grounding from local sources", detail);
     updateStatus("thinking", "Grounding", detail);
   } else if (event.type === "turn.status") {
+    syncRunFromEvent(event.conversation_id, assistantMessage, event.payload);
     mergeMessageProcess(assistantMessage, event.payload);
     recordProcessEvent(event.payload.kind || "turn", event.payload.label || "Working", event.payload.detail || "");
     updateStatus("thinking", event.payload.label || "Working", event.payload.detail || "");
@@ -1540,6 +1832,7 @@ function handleStreamEvent(event) {
     updateConversationPreview(event.conversation_id, assistantMessage.content);
     updateStatus("ready", "Ready", "Response complete.");
   } else if (event.type === "tool.proposed") {
+    syncRunFromEvent(event.conversation_id, assistantMessage, event.payload);
     assistantMessage.proposedTool = event.payload.tool_name;
     const detail = `Prepared ${humanizeToolName(event.payload.tool_name)}.`;
     mergeMessageProcess(assistantMessage, {
@@ -1549,6 +1842,7 @@ function handleStreamEvent(event) {
     });
     recordProcessEvent("tool", "Prepared local action", detail);
   } else if (event.type === "tool.started") {
+    syncRunFromEvent(event.conversation_id, assistantMessage, event.payload);
     assistantMessage.proposedTool = event.payload.tool_name;
     const detail = `Running ${humanizeToolName(event.payload.tool_name)} inside the local engine.`;
     mergeMessageProcess(assistantMessage, {
@@ -1559,6 +1853,7 @@ function handleStreamEvent(event) {
     recordProcessEvent("tool", "Running local helper", detail);
     updateStatus("thinking", "Processing", detail);
   } else if (event.type === "tool.completed") {
+    syncRunFromEvent(event.conversation_id, assistantMessage, event.payload);
     assistantMessage.toolResult = event.payload.result || null;
     assistantMessage.assets = mergeAssets(assistantMessage.assets, event.payload.assets || []);
     const detail = event.payload.result?.message || `Finished ${humanizeToolName(event.payload.tool_name)}.`;
@@ -1569,8 +1864,11 @@ function handleStreamEvent(event) {
     });
     recordProcessEvent("tool", "Local helper complete", detail);
   } else if (event.type === "approval.required") {
-    assistantMessage.approval = event.payload;
-    state.approvals.set(event.payload.id, event.payload);
+    syncRunFromEvent(event.conversation_id, assistantMessage, event.payload);
+    const approvalPayload = { ...event.payload };
+    delete approvalPayload.run;
+    assistantMessage.approval = approvalPayload;
+    state.approvals.set(approvalPayload.id, approvalPayload);
     const detail = "A durable action is ready for review and approval.";
     mergeMessageProcess(assistantMessage, {
       kind: "tool",
@@ -1588,12 +1886,12 @@ function handleStreamEvent(event) {
   render();
 }
 
-async function submitApprovalDecision(approvalId, action) {
+async function submitApprovalDecision(approvalId, action, editedPayload = {}) {
   const approval = await requestJson(`/v1/approvals/${approvalId}/decisions`, {
     method: "POST",
     body: JSON.stringify({
       action,
-      edited_payload: {},
+      edited_payload: editedPayload,
     }),
   });
 
@@ -1603,6 +1901,9 @@ async function submitApprovalDecision(approvalId, action) {
     if (message.approval && message.approval.id === approvalId) {
       message.approval = approval;
     }
+  }
+  if (state.activeConversationId) {
+    await refreshAgentRuns(state.activeConversationId);
   }
   render();
 }
@@ -1785,6 +2086,7 @@ async function bootstrap() {
   resizeComposer();
   updateStatus("ready", "Ready", "Ready for the next turn.");
   try {
+    await loadCapabilities();
     await refreshConversations();
   } catch (error) {
     updateStatus("error", "Offline", "The local engine is unavailable.");

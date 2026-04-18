@@ -17,6 +17,7 @@ def test_prompt_builder_adds_teaching_guidance_for_how_to_turns() -> None:
         assets=[],
         context_assets=[],
         specialist_analysis=None,
+        workspace_summary=None,
         route=RouteDecision(),
         policy=PolicyDecision(),
         model_selection=ModelRouteSelection(

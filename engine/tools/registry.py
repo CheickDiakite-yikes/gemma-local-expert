@@ -24,6 +24,21 @@ class ToolRegistry:
                 requires_confirmation=True,
                 namespace="medical",
             ),
+            "workspace_search": ToolDescriptor(
+                name="workspace_search",
+                requires_confirmation=False,
+                namespace="agent",
+            ),
+            "workspace_read_files": ToolDescriptor(
+                name="workspace_read_files",
+                requires_confirmation=False,
+                namespace="agent",
+            ),
+            "workspace_summarize": ToolDescriptor(
+                name="workspace_summarize",
+                requires_confirmation=False,
+                namespace="agent",
+            ),
             "generate_heatmap_overlay": ToolDescriptor(
                 name="generate_heatmap_overlay",
                 requires_confirmation=False,

@@ -697,6 +697,76 @@ a {
   gap: 8px;
 }
 
+.approval-editor {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(7, 9, 12, 0.26);
+}
+
+.approval-editor-header strong,
+.approval-editor-header span {
+  display: block;
+}
+
+.approval-editor-header strong {
+  font-size: 0.76rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.58);
+  margin-bottom: 6px;
+}
+
+.approval-editor-header span {
+  color: rgba(255, 255, 255, 0.72);
+  line-height: 1.45;
+}
+
+.approval-field {
+  display: grid;
+  gap: 8px;
+}
+
+.approval-field span {
+  font-size: 0.74rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.54);
+}
+
+.approval-field input,
+.approval-field textarea,
+.approval-field select {
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 15px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(5, 7, 10, 0.88);
+  color: var(--text);
+  font: inherit;
+  line-height: 1.45;
+}
+
+.approval-field textarea {
+  min-height: 112px;
+  resize: vertical;
+}
+
+.approval-field input:focus,
+.approval-field textarea:focus,
+.approval-field select:focus {
+  outline: none;
+  border-color: rgba(216, 170, 78, 0.4);
+  box-shadow: 0 0 0 1px rgba(216, 170, 78, 0.22);
+}
+
+.approval-field-code textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.82rem;
+}
+
 .approval-json {
   margin: 0;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -1257,6 +1327,150 @@ a {
   .attachment-draft {
     width: 100%;
   }
+}
+
+.process-capabilities {
+  padding: 14px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.03);
+  margin-bottom: 12px;
+}
+
+.process-capabilities strong {
+  display: block;
+  font-size: 0.84rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.6);
+  margin-bottom: 8px;
+}
+
+.process-capabilities p {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.78);
+  line-height: 1.45;
+}
+
+.agent-run-card {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 24px;
+  padding: 18px 18px 16px;
+  margin-bottom: 14px;
+}
+
+.agent-run-card.is-awaiting_approval {
+  border-color: rgba(242, 188, 80, 0.48);
+  background: rgba(242, 188, 80, 0.08);
+}
+
+.agent-run-card.is-completed {
+  border-color: rgba(104, 176, 120, 0.42);
+}
+
+.agent-run-card.is-blocked,
+.agent-run-card.is-failed {
+  border-color: rgba(220, 110, 110, 0.42);
+  background: rgba(220, 110, 110, 0.08);
+}
+
+.agent-run-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.agent-run-kicker {
+  font-size: 0.78rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.56);
+}
+
+.agent-run-status {
+  font-size: 0.84rem;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.agent-run-card h4 {
+  margin: 0 0 8px;
+  font-size: 1.02rem;
+}
+
+.agent-run-scope,
+.agent-run-summary,
+.agent-run-note {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.76);
+  line-height: 1.5;
+}
+
+.agent-run-scope code {
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.agent-run-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.agent-run-step {
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 18px;
+  padding: 12px 14px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.agent-run-step.is-completed {
+  border-color: rgba(104, 176, 120, 0.28);
+}
+
+.agent-run-step.is-blocked,
+.agent-run-step.is-failed {
+  border-color: rgba(220, 110, 110, 0.3);
+}
+
+.agent-run-step-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.agent-run-step-header strong {
+  font-size: 0.96rem;
+}
+
+.agent-run-step-header span {
+  font-size: 0.8rem;
+  color: rgba(255, 255, 255, 0.58);
+}
+
+.agent-run-step p {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.72);
+  line-height: 1.45;
+}
+
+.agent-run-step-refs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.agent-run-step-refs span {
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.66);
+  font-size: 0.76rem;
 }
 
 @media (min-width: 1081px) {

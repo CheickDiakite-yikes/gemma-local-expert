@@ -22,6 +22,11 @@ class PolicyService:
     def evaluate(self, turn: ConversationTurnRequest, route: RouteDecision) -> PolicyDecision:
         decision = PolicyDecision()
 
+        if route.agent_run:
+            decision.warnings.append(
+                "Workspace agent actions are limited to the configured local workspace scope."
+            )
+
         if route.specialist_model == "medgemma":
             if not self.medical_mode_enabled:
                 decision.blocked = True

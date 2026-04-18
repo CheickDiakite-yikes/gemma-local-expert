@@ -53,6 +53,12 @@ The desktop shell owns:
 - streaming display
 - speech capture and playback surface
 
+Current implementation note:
+
+- the web chat shell is the primary tested demo surface today
+- Apple shell code exists, but the web shell is the reference client for the
+  current agent-run and approval UX
+
 ## Recommended implementation stack
 
 ### Desktop shell
@@ -105,14 +111,16 @@ Why:
 
 ```mermaid
 flowchart LR
-    UI["Desktop Shell (SwiftUI)"] -->|HTTP / WebSocket on 127.0.0.1| API["Local Engine API"]
+    UI["Client Shell (Web-first today, native later)"] -->|HTTP / WebSocket on 127.0.0.1| API["Local Engine API"]
     UI --> SPEECH["Speech Helper (WhisperKit / TTS)"]
     API --> ORCH["Orchestrator"]
     ORCH --> ROUTER["Router + Policy"]
+    ORCH --> AGENT["Workspace Agent"]
     ROUTER --> RETR["Retrieval"]
     ROUTER --> TOOLS["Tool Runtime"]
     ROUTER --> MODELS["Model Adapters"]
     ORCH --> STORE["Persistence + Audit"]
+    AGENT --> STORE
     RETR --> STORE
     TOOLS --> STORE
 ```
@@ -142,6 +150,7 @@ Responsibilities:
 - expose the local typed API
 - manage model lifecycles
 - run orchestration and routing
+- run bounded workspace-agent plans
 - execute retrieval and ingestion jobs
 - own all durable writes
 - maintain audit and approval state
@@ -210,8 +219,8 @@ contracts/
   exports/
 docs/
 engine/
+  agent/
   api/
-  app/
   orchestrator/
   routing/
   policy/
@@ -493,6 +502,7 @@ Input:
 
 Events:
 
+- `turn.status`
 - `assistant.delta`
 - `assistant.message.completed`
 - `citation.added`
@@ -502,6 +512,37 @@ Events:
 - `approval.required`
 - `warning`
 - `error`
+
+For workspace-agent turns, stream payloads may also include:
+
+- `run_id`
+- `run_status`
+- a structured `run` snapshot
+- a structured `step` snapshot when relevant
+
+#### `GET /v1/conversations/{conversation_id}/runs`
+
+List durable workspace-agent runs attached to a conversation.
+
+Returns:
+
+- `list[AgentRun]`
+
+#### `GET /v1/runs/{run_id}`
+
+Read a single durable workspace-agent run.
+
+Returns:
+
+- `AgentRun`
+
+#### `GET /v1/system/capabilities`
+
+Return truthful runtime capability state for the current local environment.
+
+Returns:
+
+- `SystemCapabilities`
 
 #### `POST /v1/knowledge-packs/import`
 
@@ -618,6 +659,49 @@ These are the canonical DTOs. Use Pydantic in the engine and export the OpenAPI 
     "label": "Kenya trip checklist",
     "score": 0.88
   }
+}
+```
+
+### `AgentRun`
+
+```json
+{
+  "id": "run_123",
+  "conversation_id": "conv_123",
+  "turn_id": "turn_456",
+  "goal": "Prepare a briefing from the relevant workspace files.",
+  "scope_root": "/workspace/docs",
+  "status": "awaiting_approval",
+  "plan_steps": [],
+  "executed_steps": [],
+  "result_summary": "Awaiting approval to run `create_note` from workspace findings.",
+  "artifact_ids": [],
+  "approval_id": "approval_123"
+}
+```
+
+### `SystemCapabilities`
+
+```json
+{
+  "assistant_backend": "mock",
+  "assistant_model": "gemma-4-e4b-it",
+  "embedding_backend": "hash",
+  "embedding_model": "embeddinggemma-300m",
+  "specialist_backend": "ocr",
+  "vision_model": "paligemma-2",
+  "tracking_backend": "ffmpeg",
+  "tracking_model": "sam3.1",
+  "medical_model": "medgemma-1.5-4b",
+  "workspace_root": "/workspace",
+  "tesseract_available": true,
+  "ffmpeg_available": true,
+  "assistant_model_available": false,
+  "embedding_model_available": false,
+  "vision_model_available": false,
+  "tracking_model_available": false,
+  "medical_model_available": false,
+  "low_memory_profile": true
 }
 ```
 
@@ -936,8 +1020,9 @@ Assistant turn streaming should be event-based.
 
 Required event types:
 
+- `turn.status`
 - `assistant.delta`
-- `assistant.completed`
+- `assistant.message.completed`
 - `citation.added`
 - `tool.proposed`
 - `tool.started`

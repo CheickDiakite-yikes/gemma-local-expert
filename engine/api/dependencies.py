@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from fastapi import Request
 
 from engine.audit.service import AuditService
+from engine.agent.service import WorkspaceAgentService
 from engine.config.settings import Settings
 from engine.models.gateway import ModelGateway
 from engine.models.runtime import AssistantRuntime
@@ -34,6 +35,7 @@ class ServiceContainer:
     video_runtime: VideoRuntime
     prompt_builder: PromptBuilder
     tool_runtime: ToolRuntime
+    workspace_agent: WorkspaceAgentService
     audit: AuditService
     orchestrator: OrchestratorService
 

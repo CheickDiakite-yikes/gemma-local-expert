@@ -11,6 +11,7 @@ class RouteDecision:
     needs_retrieval: bool = False
     specialist_model: str | None = None
     proposed_tool: str | None = None
+    agent_run: bool = False
     reasons: list[str] = field(default_factory=list)
 
 
@@ -32,6 +33,39 @@ class RouterService:
         ]
         has_visual_context = bool(image_assets)
         has_video_context = bool(video_assets)
+        agentic_workspace_request = (
+            not has_visual_context
+            and not has_video_context
+            and any(
+                phrase in lowered
+                for phrase in {
+                    "search this workspace",
+                    "search the workspace",
+                    "search this project",
+                    "search the project",
+                    "search this repo",
+                    "search the repo",
+                    "find files about",
+                    "find files in",
+                    "look through the workspace",
+                    "review the workspace",
+                    "scan the workspace",
+                    "summarize documents in",
+                    "summarize documents from",
+                    "summarise documents in",
+                    "prepare a brief from",
+                    "prepare a briefing from",
+                    "from the workspace",
+                    "from this workspace",
+                    "from the project",
+                    "in this folder",
+                    "in the workspace",
+                }
+            )
+        )
+        if agentic_workspace_request:
+            decision.agent_run = True
+            decision.reasons.append("Turn matches the workspace-scoped agent path.")
 
         if medical_image_assets:
             decision.specialist_model = "medgemma"
@@ -135,8 +169,10 @@ class RouterService:
             for token in {"source", "sources", "document", "documents", "library", "reference"}
         )
 
-        if turn.enabled_knowledge_pack_ids or (
+        if not decision.agent_run and (
+            turn.enabled_knowledge_pack_ids or (
             explicit_retrieval and (not has_visual_context and not has_video_context or image_safe_retrieval)
+            )
         ):
             decision.needs_retrieval = True
             decision.reasons.append("Turn benefits from local retrieval before synthesis.")

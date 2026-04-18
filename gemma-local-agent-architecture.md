@@ -213,6 +213,36 @@ General speech:
 
 One orchestrator. Many bounded specialists. Minimal hidden magic.
 
+## Current implemented agent run model
+
+The repo now implements a concrete version of that principle:
+
+- one conversational front door
+- one orchestrator per turn
+- one optional bounded workspace run inside that turn
+- typed local tools for durable writes
+- explicit approval before risky writes
+
+The workspace run is intentionally constrained.
+
+It can:
+
+- inspect the configured workspace root
+- search text-like files
+- read bounded excerpts
+- synthesize structured findings
+- prepare a durable note, checklist, or task for approval
+
+It cannot:
+
+- execute arbitrary shell commands
+- escape the configured workspace root
+- become an always-on autonomous computer-use agent
+
+That is the right shape for this product right now. It gives you real agentic
+behavior over local files without turning the system into an opaque swarm or an
+unsafe shell controller.
+
 ## System layers
 
 ### 1. Experience layer

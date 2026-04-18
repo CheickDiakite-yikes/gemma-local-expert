@@ -157,12 +157,14 @@ flowchart LR
     Client --> API["Local Engine API<br/>FastAPI on 127.0.0.1"]
     API --> Orchestrator["Orchestrator"]
     Orchestrator --> Router["Router + Policy"]
+    Orchestrator --> Agent["Workspace Agent Service"]
     Orchestrator --> Prompt["Prompt Builder"]
     Router --> Retrieval["Retrieval Service"]
     Router --> Vision["Vision Runtime"]
     Router --> Video["Video Runtime"]
     Router --> Tools["Tool Runtime"]
     Orchestrator --> Runtime["Assistant Runtime"]
+    Agent --> Store["SQLite Store + Assets + Audit"]
     Retrieval --> Store["SQLite Store + Assets + Audit"]
     Tools --> Store
     Vision --> Store
@@ -206,6 +208,7 @@ flowchart LR
 user turn
   -> conversation route
   -> policy evaluation
+  -> optional bounded workspace agent run
   -> optional retrieval
   -> optional image or video specialist
   -> optional tool proposal
@@ -214,6 +217,337 @@ user turn
   -> transcript persistence
   -> audit trail
 ```
+
+## Agentic Architecture
+
+Field Assistant Engine is agentic, but in a bounded and inspectable way.
+
+It does not run a hidden swarm of autonomous workers. It runs a single local
+controller loop per turn, with optional retrieval, optional specialist analysis,
+an optional bounded workspace-agent run, optional tool planning, and explicit
+approval before higher-trust actions.
+
+### The actual control loop
+
+```mermaid
+flowchart TD
+    A["Incoming turn"] --> B["Persist user message"]
+    B --> C["Recover recent conversation context"]
+    C --> D["Recover recent media context"]
+    D --> E["Router decides:<br/>retrieval?<br/>specialist?<br/>tool?<br/>workspace run?"]
+    E --> F["Policy decides:<br/>blocked?<br/>warning?<br/>approval?"]
+    F --> G["ModelGateway selects models"]
+    G --> H["Optional workspace-agent plan + bounded step execution"]
+    H --> I["Optional retrieval"]
+    I --> J["Optional vision or video specialist"]
+    J --> K["Optional tool planning"]
+    K --> L{"Approval required?"}
+    L -- Yes --> M["Create durable approval record"]
+    L -- No --> N["Execute local tool"]
+    M --> O["PromptBuilder assembles turn context"]
+    N --> O
+    O --> P["Assistant runtime generates final answer"]
+    P --> Q["Persist assistant message and artifacts"]
+    Q --> R["Emit stream events to client"]
+```
+
+### This is agentic without being swarm-first
+
+The system behaves like an agent because it can:
+
+- carry conversation state across turns
+- reuse recent media context without forcing re-upload every turn
+- decide when retrieval is needed
+- decide when to call a visual or video specialist
+- decide when a bounded workspace run is the right first move
+- decide when a tool should be proposed
+- wait for approval before durable actions
+- execute a local tool and fold the result back into the answer
+- generate derived artifacts such as contact sheets or overlays
+
+The system stays bounded because it does **not**:
+
+- run arbitrary shell commands on the user’s machine
+- read or write outside the configured workspace root during a workspace run
+- silently chain together open-ended autonomous subagents
+- execute durable writes without a typed tool path
+- bypass medical gates with a prompt-only trick
+- pretend metadata fallback is the same as real specialist inference
+
+### Decision stack
+
+Every turn currently goes through a concrete stack:
+
+1. **Conversation state recovery**  
+   The orchestrator loads recent messages from SQLite and recovers the most
+   recent attached media when the current turn is a follow-up.
+
+2. **Routing**  
+   The router decides three main things:
+   - whether local retrieval is needed
+   - whether a specialist model path is needed
+   - whether the turn implies a tool action
+   - whether the turn should start a bounded workspace run
+
+3. **Policy**  
+   Policy can:
+   - block a turn
+   - attach warnings
+   - require approval for a tool or workflow
+
+4. **Model selection**  
+   The model gateway maps the route to:
+   - the assistant model
+   - an optional specialist image model
+   - an optional video tracking model
+   - an optional tool planner model when `FunctionGemma` is enabled
+
+5. **Grounding and specialist work**  
+   A bounded workspace run, retrieval, vision, or video analysis may run before
+   final drafting.
+
+6. **Tool planning and execution**  
+   A tool payload may be created, approved, and executed locally.
+
+7. **Final drafting**  
+   PromptBuilder combines:
+   - conversation history
+   - router notes
+   - local sources
+   - specialist analysis
+   - tool results
+   into the final assistant generation request.
+
+### Router truth table
+
+The router is deliberately simple and legible.
+
+| Input pattern | Route effect | Current behavior |
+| --- | --- | --- |
+| user asks to search this workspace, review this project, summarize docs in this folder, or prepare a brief from workspace files | `agent_run = true` | runs the bounded workspace agent before the final answer |
+| user asks to find, search, compare, summarize from local material | `needs_retrieval = true` | retrieves local chunks before answering |
+| image attached and the request asks to inspect, extract, describe, summarize, segment, or overlay | `specialist_model = paligemma` | runs image specialist path or OCR/metadata fallback |
+| image attached with medical care context, or explicit medical mode | `specialist_model = medgemma` | blocked unless explicit medical session exists |
+| video attached and user asks to detect, track, monitor, inspect, or analyze site/tool/process behavior | `specialist_model = sam3` | runs local video review or fallback path |
+| request sounds like checklist/task/note/report/message/export intent | `proposed_tool = ...` | tool payload is planned before drafting |
+| no strong retrieval/specialist/tool signal | plain assistant route | assistant answers from context without extra subsystems |
+
+### Current model-selection logic
+
+The current model gateway is intentionally explicit:
+
+- assistant text always routes through the configured assistant model
+- image routes choose between `PaliGemma`-style vision and `MedGemma`
+- video routes choose the tracking backend and tracking model
+- `FunctionGemma` is optional and currently behind `FIELD_ASSISTANT_ENABLE_FUNCTION_GEMMA`
+
+That means the architecture is already prepared for a fuller specialist stack
+without forcing every turn through every model.
+
+### State and memory layers
+
+This project has multiple kinds of memory, and each one has a different job.
+
+```text
++------------------------------------------------------------------+
+| Conversation Memory                                              |
+|------------------------------------------------------------------|
+| recent user/assistant turns                                      |
+| role-tagged transcript messages                                  |
+| recent image/video context reused for follow-ups                 |
++------------------------------------------------------------------+
+| Retrieval Memory                                                 |
+|------------------------------------------------------------------|
+| knowledge packs                                                  |
+| chunked documents                                                |
+| lexical scores                                                   |
+| embedding scores                                                 |
++------------------------------------------------------------------+
+| Action Memory                                                    |
+|------------------------------------------------------------------|
+| approval records                                                 |
+| executed tool results                                            |
+| notes, tasks, checklists, exports                                |
++------------------------------------------------------------------+
+| Audit and Asset Memory                                           |
+|------------------------------------------------------------------|
+| uploaded assets                                                  |
+| derived artifacts                                                |
+| audit events                                                     |
+| medical session state                                            |
++------------------------------------------------------------------+
+```
+
+This separation matters. It prevents the project from collapsing everything
+into “chat memory,” which is where many local agent demos become opaque.
+
+### Tool lifecycle
+
+Tool use is not an afterthought bolted on after the model speaks. It is part of
+the turn controller.
+
+```text
+user request
+  -> router proposes tool
+  -> tool runtime plans typed payload
+  -> policy checks whether approval is required
+  -> if approval required:
+       create durable approval record
+       wait for user decision
+       then execute
+  -> if approval not required:
+       execute immediately
+  -> feed tool result back into final assistant answer
+```
+
+### Workspace agent run model
+
+The workspace agent is the main new agentic layer in the current repo.
+
+It is intentionally narrow:
+
+- it is attached to a normal conversation turn, not a separate mode
+- it persists a durable `AgentRun`
+- it is limited to the configured workspace root
+- it may inspect directories, search files, read bounded excerpts, and
+  synthesize findings
+- it may not execute arbitrary shell commands
+- it may prepare durable writes, but those still route through typed tools and
+  approval gates
+
+Each run stores:
+
+- `goal`
+- `scope_root`
+- `status`
+- `plan_steps`
+- `executed_steps`
+- `result_summary`
+- `artifact_ids`
+- `approval_id`
+- timestamps
+
+The lifecycle is:
+
+```text
+conversation turn
+  -> router marks it as workspace-agent eligible
+  -> orchestrator creates AgentRun
+  -> workspace agent plans bounded steps
+  -> read-only steps auto-run
+  -> if a durable output is needed:
+       create approval
+       pause run in awaiting_approval
+       execute approved tool
+       finalize run
+  -> persist final run summary
+```
+
+Current run statuses:
+
+- `running`
+- `awaiting_approval`
+- `completed`
+- `blocked`
+- `failed`
+
+Current step statuses:
+
+- `planned`
+- `running`
+- `completed`
+- `awaiting_approval`
+- `blocked`
+- `failed`
+
+The current workspace run is strong at:
+
+- searching the repo or field workspace for relevant text-like files
+- summarizing local notes and prep documents
+- preparing briefing-style durable outputs from the workspace
+
+It is not yet a general autonomous shell agent.
+
+The current ToolRuntime is still heuristic in places, but it is already doing
+real work:
+
+- turning specialist output into checklist items
+- turning image or receipt analysis into notes and tasks
+- creating durable entities in SQLite
+- generating local overlay assets for image workflows
+
+### Specialist handoffs
+
+The orchestrator currently supports three specialist classes:
+
+1. **Image specialist**
+   Used for screenshots, forms, labels, pictures, scans, and heatmap-style
+   image requests.
+
+2. **Medical image specialist**
+   Used only inside explicit medical workflows with an actual medical session.
+
+3. **Video specialist**
+   Used for tracking, detection, monitoring, mining-site review, and clip
+   analysis.
+
+Each specialist can either:
+
+- run with a real local model backend
+- fall back to OCR or FFmpeg-style evidence extraction
+- or fall back to metadata-only reporting
+
+That fallback chain is intentional. It keeps the product useful on weaker local
+machines.
+
+### Streaming phases and UI contract
+
+The agentic loop is exposed to the client as stream events rather than hidden
+behind a spinner.
+
+Current event types include:
+
+| Event type | Meaning |
+| --- | --- |
+| `turn.status` | the orchestrator is reporting a phase like routing, retrieval, vision, video, tool, or compose |
+| `citation.added` | a grounded source chunk was attached to the turn |
+| `tool.proposed` | a tool candidate and payload were planned |
+| `approval.required` | the system created a durable approval record |
+| `tool.started` | a non-gated tool has begun execution |
+| `tool.completed` | the tool finished and may have produced assets |
+| `assistant.delta` | streaming assistant text |
+| `assistant.message.completed` | final assistant message is complete |
+| `warning` | policy or backend warning to surface honestly |
+
+This is important for UX. It allows the chat shell to show process, reasoning
+stages, and approvals without exposing raw chain-of-thought.
+
+For workspace-agent turns, `turn.status`, `tool.proposed`, `tool.started`,
+`tool.completed`, and `approval.required` may also carry:
+
+- `run_id`
+- `run_status`
+- a structured `run` snapshot
+- a structured `step` snapshot when relevant
+
+That is what powers the persisted run cards in the web shell.
+
+### Current limits of the agent layer
+
+The current agent layer is strong enough to be useful, but it still has clear
+limits:
+
+- tool planning is mostly heuristic unless `FunctionGemma` is explicitly enabled
+- the planner/executor loop is bounded and short-lived, not a long-running
+  mission executor
+- camera watch mode is still earlier than clip upload review
+- some specialist outputs are evidence summaries rather than full semantic
+  understanding
+- the product still favors bounded single-turn control over broader autonomous
+  mission execution
+
+That is a feature right now, not a defect. It keeps the system explainable and
+safe while the evaluation surface grows.
 
 ## User Flows
 
@@ -336,6 +670,7 @@ data/
   migrations/          SQLite schema migrations
 docs/                  Implementation-facing planning docs
 engine/
+  agent/               Bounded workspace-agent planning and execution
   api/                 FastAPI app, dependency container, HTTP routes
   audit/               Audit logging service
   config/              Settings and environment loading
@@ -369,8 +704,11 @@ The FastAPI app mounts:
 
 - `/` for a basic root response
 - `/v1/system/health` for health
+- `/v1/system/capabilities` for truthful runtime capability reporting
 - `/v1/system/tools` for tool descriptors
 - `/v1/conversations` for sessions and transcript flow
+- `/v1/conversations/{conversation_id}/runs` for persisted workspace runs
+- `/v1/runs/{run_id}` for a specific workspace run
 - `/v1/assets` for uploads and asset content
 - `/v1/knowledge-packs` for imports
 - `/v1/ingest` for ingestion
@@ -394,10 +732,11 @@ It supports:
 - transcript rendering
 - streaming assistant output
 - citations
+- workspace-agent run cards with step timelines
 - image upload
 - video upload
 - camera workspace and native capture fallback
-- approval cards
+- editable approval cards for pending durable writes
 - durable approval rehydration
 - mobile-friendly layout
 
@@ -449,6 +788,7 @@ Current tool registry:
 - `export_brief`
 - `medical_case_summary`
 - `generate_heatmap_overlay`
+- bounded workspace-agent helper descriptors for search, read, and summarize
 
 Not every tool is approval-gated, but durable writes are.
 
@@ -507,7 +847,14 @@ uv run python scripts/run_local_eval.py routing
 uv run python scripts/run_local_eval.py retrieval
 ```
 
-### 8. Export the OpenAPI snapshot
+### 8. Run workspace-agent smoke flows
+
+```bash
+uv run python scripts/smoke_workspace_agent.py --mode summarize
+uv run python scripts/smoke_workspace_agent.py --mode brief
+```
+
+### 9. Export the OpenAPI snapshot
 
 ```bash
 uv run python scripts/export_openapi.py

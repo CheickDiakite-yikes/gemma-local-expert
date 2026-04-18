@@ -132,3 +132,17 @@ def test_video_monitoring_turn_routes_to_tracking_specialist() -> None:
 
     assert route.specialist_model == "sam3"
     assert route.needs_retrieval is False
+
+
+def test_workspace_agent_turn_routes_to_agent_path() -> None:
+    router = RouterService(ToolRegistry())
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.RESEARCH,
+        text="Search this workspace and summarize the field prep docs.",
+    )
+
+    route = router.decide(request)
+
+    assert route.agent_run is True
+    assert route.needs_retrieval is False

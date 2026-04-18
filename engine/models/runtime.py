@@ -26,6 +26,7 @@ class AssistantGenerationRequest:
     assistant_model_source: str | None
     specialist_model_name: str | None
     specialist_analysis_text: str | None
+    workspace_summary_text: str | None
     max_tokens: int
     temperature: float
     top_p: float
@@ -51,7 +52,10 @@ class MockAssistantRuntime:
     def generate(self, request: AssistantGenerationRequest) -> AssistantGenerationResult:
         lines = []
 
-        if request.specialist_analysis_text:
+        if request.workspace_summary_text:
+            lines.append("I used the bounded workspace-agent findings for this turn.")
+            lines.append(request.workspace_summary_text)
+        elif request.specialist_analysis_text:
             lines.append("I used the available specialist image context for this turn.")
             lines.append(request.specialist_analysis_text)
         elif request.citations:

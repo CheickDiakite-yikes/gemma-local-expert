@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import shutil
+
 from fastapi import APIRouter, Depends
 
 from engine.api.dependencies import ServiceContainer, get_container
-from engine.contracts.api import ToolDescriptor
+from engine.contracts.api import SystemCapabilities, ToolDescriptor
+from engine.models.sources import resolve_local_model_source
 
 router = APIRouter(tags=["system"])
 
@@ -28,6 +31,62 @@ async def health(container: ServiceContainer = Depends(get_container)) -> dict[s
         "embedding_backend": container.settings.embedding_backend,
         "embedding_model": container.settings.default_embedding_model,
     }
+
+
+@router.get("/v1/system/capabilities", response_model=SystemCapabilities)
+async def capabilities(
+    container: ServiceContainer = Depends(get_container),
+) -> SystemCapabilities:
+    settings = container.settings
+    return SystemCapabilities(
+        assistant_backend=settings.assistant_backend,
+        assistant_model=settings.default_assistant_model,
+        embedding_backend=settings.embedding_backend,
+        embedding_model=settings.default_embedding_model,
+        specialist_backend=settings.specialist_backend,
+        vision_model=settings.default_vision_model,
+        tracking_backend=settings.tracking_backend,
+        tracking_model=settings.default_tracking_model,
+        medical_model=settings.default_medical_model,
+        workspace_root=settings.workspace_root,
+        tesseract_available=shutil.which("tesseract") is not None,
+        ffmpeg_available=shutil.which("ffmpeg") is not None,
+        assistant_model_available=(
+            resolve_local_model_source(
+                settings.assistant_model_source, settings.default_assistant_model
+            )
+            is not None
+        ),
+        embedding_model_available=(
+            resolve_local_model_source(
+                settings.embedding_model_source, settings.default_embedding_model
+            )
+            is not None
+        ),
+        vision_model_available=(
+            resolve_local_model_source(
+                settings.vision_model_source, settings.default_vision_model
+            )
+            is not None
+        ),
+        tracking_model_available=(
+            resolve_local_model_source(
+                settings.tracking_model_source, settings.default_tracking_model
+            )
+            is not None
+        ),
+        medical_model_available=(
+            resolve_local_model_source(
+                settings.medical_model_source, settings.default_medical_model
+            )
+            is not None
+        ),
+        low_memory_profile=(
+            settings.default_assistant_model == "gemma-4-e2b-it-4bit"
+            and settings.specialist_backend == "ocr"
+            and settings.embedding_backend == "hash"
+        ),
+    )
 
 
 @router.get("/v1/system/tools", response_model=list[ToolDescriptor])

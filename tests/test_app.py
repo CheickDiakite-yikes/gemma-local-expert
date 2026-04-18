@@ -409,6 +409,146 @@ def test_heatmap_overlay_tool_generates_asset_and_persists_on_assistant_message(
     assert assistant_message["assets"][0]["id"] == generated_asset["id"]
 
 
+def test_capabilities_endpoint_reports_runtime_truth(tmp_path: Path) -> None:
+    settings = Settings(
+        database_path=str(tmp_path / "test-capabilities.db"),
+        workspace_root=str(tmp_path),
+    )
+    client = TestClient(create_app(settings))
+
+    response = client.get("/v1/system/capabilities")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["assistant_backend"] == settings.assistant_backend
+    assert payload["workspace_root"] == str(tmp_path)
+    assert "tesseract_available" in payload
+    assert "ffmpeg_available" in payload
+
+
+def test_workspace_agent_turn_persists_completed_run(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    (workspace_root / "field-prep.md").write_text(
+        "Field prep checklist\nPack oral rehydration salts\nPack batteries\n",
+        encoding="utf-8",
+    )
+    (workspace_root / "contacts.txt").write_text(
+        "Translator contact sheet and village visit route.\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings(
+        database_path=str(tmp_path / "test-agent.db"),
+        workspace_root=str(workspace_root),
+    )
+    client = TestClient(create_app(settings))
+    conversation = client.post(
+        "/v1/conversations",
+        json={"title": "Workspace", "mode": "research"},
+    ).json()
+
+    response = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Search this workspace and summarize the field prep docs.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+
+    assert response.status_code == 200
+    assert "workspace-agent findings" in response.text or "Workspace scope" in response.text
+
+    runs_response = client.get(f"/v1/conversations/{conversation['id']}/runs")
+    assert runs_response.status_code == 200
+    runs = runs_response.json()
+    assert len(runs) == 1
+    assert runs[0]["status"] == "completed"
+    assert runs[0]["executed_steps"]
+    assert runs[0]["result_summary"]
+
+
+def test_workspace_agent_briefing_requires_approval_and_completes_after_decision(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    (workspace_root / "trip.md").write_text(
+        "Trip prep\nPack oral rehydration salts\nPack translator contact sheets\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings(
+        database_path=str(tmp_path / "test-agent-approval.db"),
+        workspace_root=str(workspace_root),
+    )
+    client = TestClient(create_app(settings))
+    conversation = client.post(
+        "/v1/conversations",
+        json={"title": "Workspace Brief", "mode": "field"},
+    ).json()
+
+    response = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "field",
+            "text": "Prepare a briefing from the relevant workspace files.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+
+    assert response.status_code == 200
+    lines = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+    approval_event = next(line for line in lines if line["type"] == "approval.required")
+    approval_id = approval_event["payload"]["id"]
+    run_id = approval_event["payload"]["run_id"]
+
+    runs_response = client.get(f"/v1/conversations/{conversation['id']}/runs")
+    assert runs_response.status_code == 200
+    runs = runs_response.json()
+    assert runs[0]["id"] == run_id
+    assert runs[0]["status"] == "awaiting_approval"
+
+    decision_response = client.post(
+        f"/v1/approvals/{approval_id}/decisions",
+        json={
+            "action": "approve",
+            "edited_payload": {
+                "title": "Edited workspace briefing",
+                "content": (
+                    "Workspace briefing\n"
+                    "- Pack oral rehydration salts\n"
+                    "- Carry translator contact sheets\n"
+                    "- Confirm the village route before departure\n"
+                ),
+            },
+        },
+    )
+    assert decision_response.status_code == 200
+    approval = decision_response.json()
+    assert approval["payload"]["title"] == "Edited workspace briefing"
+
+    run_response = client.get(f"/v1/runs/{run_id}")
+    assert run_response.status_code == 200
+    run = run_response.json()
+    assert run["status"] == "completed"
+    assert run["approval_id"] == approval_id
+
+    notes_response = client.get("/v1/notes")
+    assert notes_response.status_code == 200
+    notes = notes_response.json()
+    assert notes
+    assert notes[0]["title"] == "Edited workspace briefing"
+    assert "Confirm the village route before departure" in notes[0]["content"]
+
+
 def _tiny_png_bytes() -> bytes:
     return (
         b"\x89PNG\r\n\x1a\n"

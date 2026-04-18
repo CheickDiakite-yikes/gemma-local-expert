@@ -13,6 +13,7 @@ class Settings(BaseModel):
     api_version: str = "v1"
     database_path: str = "data/field-assistant.db"
     asset_storage_dir: str = "data/uploads"
+    workspace_root: str = os.getcwd()
 
     default_assistant_model: str = "gemma-4-e4b-it"
     assistant_model_source: str | None = None
@@ -50,6 +51,9 @@ class Settings(BaseModel):
     embedding_backend: str = "hash"
     embedding_dimensions: int = 128
     embedding_max_length: int = 512
+    agent_max_steps: int = 6
+    agent_max_file_reads: int = 6
+    agent_max_context_chars: int = 6000
 
 
 def load_settings() -> Settings:
@@ -57,6 +61,9 @@ def load_settings() -> Settings:
         environment=os.getenv("FIELD_ASSISTANT_ENV", "development"),
         database_path=os.getenv("FIELD_ASSISTANT_DB_PATH", "data/field-assistant.db"),
         asset_storage_dir=os.getenv("FIELD_ASSISTANT_ASSET_STORAGE_DIR", "data/uploads"),
+        workspace_root=os.path.abspath(
+            os.getenv("FIELD_ASSISTANT_WORKSPACE_ROOT", os.getcwd())
+        ),
         default_assistant_model=os.getenv(
             "FIELD_ASSISTANT_ASSISTANT_MODEL_NAME", "gemma-4-e4b-it"
         ),
@@ -120,6 +127,11 @@ def load_settings() -> Settings:
         embedding_backend=os.getenv("FIELD_ASSISTANT_EMBEDDING_BACKEND", "hash"),
         embedding_dimensions=int(os.getenv("FIELD_ASSISTANT_EMBEDDING_DIMENSIONS", "128")),
         embedding_max_length=int(os.getenv("FIELD_ASSISTANT_EMBEDDING_MAX_LENGTH", "512")),
+        agent_max_steps=int(os.getenv("FIELD_ASSISTANT_AGENT_MAX_STEPS", "6")),
+        agent_max_file_reads=int(os.getenv("FIELD_ASSISTANT_AGENT_MAX_FILE_READS", "6")),
+        agent_max_context_chars=int(
+            os.getenv("FIELD_ASSISTANT_AGENT_MAX_CONTEXT_CHARS", "6000")
+        ),
         enable_function_gemma=os.getenv(
             "FIELD_ASSISTANT_ENABLE_FUNCTION_GEMMA", "false"
         ).lower()

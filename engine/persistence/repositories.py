@@ -10,6 +10,9 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from engine.contracts.api import (
+    AgentRun,
+    AgentRunStatus,
+    AgentRunStep,
     ApprovalDecision,
     ApprovalState,
     AssetAnalysisStatus,
@@ -39,6 +42,8 @@ from engine.contracts.api import (
 )
 from engine.ingestion.chunking import DocumentChunker, TextChunk
 from engine.retrieval.embeddings import EmbeddingProvider
+
+_UNSET = object()
 
 
 @dataclass(slots=True)
@@ -118,11 +123,18 @@ class PersistenceStore(Protocol):
         tool_name: str,
         reason: str,
         payload: dict[str, Any] | None = None,
+        run_id: str | None = None,
     ) -> ApprovalState: ...
 
     def get_approval(self, approval_id: str) -> ApprovalState | None: ...
 
-    def resolve_approval(self, approval_id: str, decision: ApprovalDecision) -> ApprovalState: ...
+    def resolve_approval(
+        self,
+        approval_id: str,
+        decision: ApprovalDecision,
+        *,
+        payload: dict[str, Any] | None = None,
+    ) -> ApprovalState: ...
 
     def finalize_approval(
         self, approval_id: str, status: str, result: dict[str, Any] | None = None
@@ -131,6 +143,38 @@ class PersistenceStore(Protocol):
     def create_medical_session(self, conversation_id: str) -> MedicalSession: ...
 
     def create_export(self, request: ExportRequest) -> ExportResult: ...
+
+    def create_agent_run(
+        self,
+        conversation_id: str,
+        turn_id: str,
+        goal: str,
+        scope_root: str,
+        *,
+        status: AgentRunStatus = AgentRunStatus.RUNNING,
+        plan_steps: list[AgentRunStep] | None = None,
+        executed_steps: list[AgentRunStep] | None = None,
+        result_summary: str | None = None,
+        artifact_ids: list[str] | None = None,
+        approval_id: str | None = None,
+    ) -> AgentRun: ...
+
+    def get_agent_run(self, run_id: str) -> AgentRun | None: ...
+
+    def list_agent_runs(self, conversation_id: str) -> list[AgentRun]: ...
+
+    def update_agent_run(
+        self,
+        run_id: str,
+        *,
+        scope_root: str | object = _UNSET,
+        status: AgentRunStatus | str | object = _UNSET,
+        plan_steps: list[AgentRunStep] | object = _UNSET,
+        executed_steps: list[AgentRunStep] | object = _UNSET,
+        result_summary: str | None | object = _UNSET,
+        artifact_ids: list[str] | object = _UNSET,
+        approval_id: str | None | object = _UNSET,
+    ) -> AgentRun: ...
 
     def create_note(self, title: str, content: str, kind: str = "note") -> Note: ...
 
@@ -775,11 +819,13 @@ class SQLiteStore:
         tool_name: str,
         reason: str,
         payload: dict[str, Any] | None = None,
+        run_id: str | None = None,
     ) -> ApprovalState:
         approval = ApprovalState(
             id=new_id("approval"),
             conversation_id=conversation_id,
             turn_id=turn_id,
+            run_id=run_id,
             tool_name=tool_name,
             reason=reason,
             status="pending",
@@ -789,13 +835,14 @@ class SQLiteStore:
             self._connection.execute(
                 """
                 INSERT INTO approvals (
-                    id, conversation_id, turn_id, tool_name, reason, status, payload_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    id, conversation_id, turn_id, run_id, tool_name, reason, status, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     approval.id,
                     approval.conversation_id,
                     approval.turn_id,
+                    approval.run_id,
                     approval.tool_name,
                     approval.reason,
                     approval.status,
@@ -809,7 +856,7 @@ class SQLiteStore:
     def get_approval(self, approval_id: str) -> ApprovalState | None:
         row = self._fetchone(
             """
-            SELECT id, conversation_id, turn_id, tool_name, reason, status, payload_json, result_json
+            SELECT id, conversation_id, turn_id, run_id, tool_name, reason, status, payload_json, result_json
             FROM approvals
             WHERE id = ?
             """,
@@ -817,20 +864,27 @@ class SQLiteStore:
         )
         return self._row_to_approval(row) if row else None
 
-    def resolve_approval(self, approval_id: str, decision: ApprovalDecision) -> ApprovalState:
+    def resolve_approval(
+        self,
+        approval_id: str,
+        decision: ApprovalDecision,
+        *,
+        payload: dict[str, Any] | None = None,
+    ) -> ApprovalState:
         approval = self.get_approval(approval_id)
         if approval is None:
             raise KeyError(approval_id)
 
         status = "approved" if decision.action == "approve" else decision.action.value
+        next_payload = approval.payload if payload is None else payload
         with self._lock:
             self._connection.execute(
-                "UPDATE approvals SET status = ? WHERE id = ?",
-                (status, approval_id),
+                "UPDATE approvals SET status = ?, payload_json = ? WHERE id = ?",
+                (status, json.dumps(next_payload), approval_id),
             )
             self._connection.commit()
 
-        return approval.model_copy(update={"status": status})
+        return approval.model_copy(update={"status": status, "payload": next_payload})
 
     def finalize_approval(
         self, approval_id: str, status: str, result: dict[str, Any] | None = None
@@ -899,6 +953,198 @@ class SQLiteStore:
             )
             self._connection.commit()
         return export
+
+    def create_agent_run(
+        self,
+        conversation_id: str,
+        turn_id: str,
+        goal: str,
+        scope_root: str,
+        *,
+        status: AgentRunStatus = AgentRunStatus.RUNNING,
+        plan_steps: list[AgentRunStep] | None = None,
+        executed_steps: list[AgentRunStep] | None = None,
+        result_summary: str | None = None,
+        artifact_ids: list[str] | None = None,
+        approval_id: str | None = None,
+    ) -> AgentRun:
+        now = utc_now()
+        run = AgentRun(
+            id=new_id("run"),
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            goal=goal,
+            scope_root=scope_root,
+            status=status,
+            plan_steps=plan_steps or [],
+            executed_steps=executed_steps or [],
+            result_summary=result_summary,
+            artifact_ids=artifact_ids or [],
+            approval_id=approval_id,
+            created_at=now,
+            updated_at=now,
+        )
+        with self._lock:
+            self._connection.execute(
+                """
+                INSERT INTO agent_runs (
+                    id,
+                    conversation_id,
+                    turn_id,
+                    goal,
+                    scope_root,
+                    status,
+                    plan_steps_json,
+                    executed_steps_json,
+                    result_summary,
+                    artifact_ids_json,
+                    approval_id,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run.id,
+                    run.conversation_id,
+                    run.turn_id,
+                    run.goal,
+                    run.scope_root,
+                    run.status.value,
+                    json.dumps([step.model_dump(mode="json") for step in run.plan_steps]),
+                    json.dumps([step.model_dump(mode="json") for step in run.executed_steps]),
+                    run.result_summary,
+                    json.dumps(run.artifact_ids),
+                    run.approval_id,
+                    run.created_at.isoformat(),
+                    run.updated_at.isoformat(),
+                ),
+            )
+            self._connection.commit()
+        return run
+
+    def get_agent_run(self, run_id: str) -> AgentRun | None:
+        row = self._fetchone(
+            """
+            SELECT
+                id,
+                conversation_id,
+                turn_id,
+                goal,
+                scope_root,
+                status,
+                plan_steps_json,
+                executed_steps_json,
+                result_summary,
+                artifact_ids_json,
+                approval_id,
+                created_at,
+                updated_at
+            FROM agent_runs
+            WHERE id = ?
+            """,
+            (run_id,),
+        )
+        return self._row_to_agent_run(row) if row else None
+
+    def list_agent_runs(self, conversation_id: str) -> list[AgentRun]:
+        rows = self._fetchall(
+            """
+            SELECT
+                id,
+                conversation_id,
+                turn_id,
+                goal,
+                scope_root,
+                status,
+                plan_steps_json,
+                executed_steps_json,
+                result_summary,
+                artifact_ids_json,
+                approval_id,
+                created_at,
+                updated_at
+            FROM agent_runs
+            WHERE conversation_id = ?
+            ORDER BY created_at ASC
+            """,
+            (conversation_id,),
+        )
+        return [self._row_to_agent_run(row) for row in rows]
+
+    def update_agent_run(
+        self,
+        run_id: str,
+        *,
+        scope_root: str | object = _UNSET,
+        status: AgentRunStatus | str | object = _UNSET,
+        plan_steps: list[AgentRunStep] | object = _UNSET,
+        executed_steps: list[AgentRunStep] | object = _UNSET,
+        result_summary: str | None | object = _UNSET,
+        artifact_ids: list[str] | object = _UNSET,
+        approval_id: str | None | object = _UNSET,
+    ) -> AgentRun:
+        run = self.get_agent_run(run_id)
+        if run is None:
+            raise KeyError(run_id)
+
+        next_scope_root = run.scope_root if scope_root is _UNSET else str(scope_root)
+        next_status = (
+            run.status
+            if status is _UNSET
+            else (status if isinstance(status, AgentRunStatus) else AgentRunStatus(status))
+        )
+        next_plan_steps = run.plan_steps if plan_steps is _UNSET else list(plan_steps)
+        next_executed_steps = (
+            run.executed_steps if executed_steps is _UNSET else list(executed_steps)
+        )
+        next_result_summary = (
+            run.result_summary if result_summary is _UNSET else result_summary
+        )
+        next_artifact_ids = run.artifact_ids if artifact_ids is _UNSET else list(artifact_ids)
+        next_approval_id = run.approval_id if approval_id is _UNSET else approval_id
+        updated_at = utc_now()
+
+        with self._lock:
+            self._connection.execute(
+                """
+                UPDATE agent_runs
+                SET
+                    scope_root = ?,
+                    status = ?,
+                    plan_steps_json = ?,
+                    executed_steps_json = ?,
+                    result_summary = ?,
+                    artifact_ids_json = ?,
+                    approval_id = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    next_scope_root,
+                    next_status.value,
+                    json.dumps([step.model_dump(mode="json") for step in next_plan_steps]),
+                    json.dumps([step.model_dump(mode="json") for step in next_executed_steps]),
+                    next_result_summary,
+                    json.dumps(next_artifact_ids),
+                    next_approval_id,
+                    updated_at.isoformat(),
+                    run_id,
+                ),
+            )
+            self._connection.commit()
+
+        return run.model_copy(
+            update={
+                "scope_root": next_scope_root,
+                "status": next_status,
+                "plan_steps": next_plan_steps,
+                "executed_steps": next_executed_steps,
+                "result_summary": next_result_summary,
+                "artifact_ids": next_artifact_ids,
+                "approval_id": next_approval_id,
+                "updated_at": updated_at,
+            }
+        )
 
     def create_note(self, title: str, content: str, kind: str = "note") -> Note:
         note = Note(
@@ -1156,11 +1402,32 @@ class SQLiteStore:
             id=row["id"],
             conversation_id=row["conversation_id"],
             turn_id=row["turn_id"],
+            run_id=row["run_id"] if "run_id" in row.keys() else None,
             tool_name=row["tool_name"],
             reason=row["reason"],
             status=row["status"],
             payload=json.loads(row["payload_json"] or "{}"),
             result=json.loads(row["result_json"]) if row["result_json"] else None,
+        )
+
+    def _row_to_agent_run(self, row: sqlite3.Row) -> AgentRun:
+        return AgentRun(
+            id=row["id"],
+            conversation_id=row["conversation_id"],
+            turn_id=row["turn_id"],
+            goal=row["goal"],
+            scope_root=row["scope_root"],
+            status=AgentRunStatus(row["status"]),
+            plan_steps=[AgentRunStep.model_validate(item) for item in json.loads(row["plan_steps_json"] or "[]")],
+            executed_steps=[
+                AgentRunStep.model_validate(item)
+                for item in json.loads(row["executed_steps_json"] or "[]")
+            ],
+            result_summary=row["result_summary"],
+            artifact_ids=json.loads(row["artifact_ids_json"] or "[]"),
+            approval_id=row["approval_id"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
         )
 
     def _row_to_asset_summary(self, row: sqlite3.Row) -> AssetSummary:
@@ -1238,7 +1505,7 @@ class SQLiteStore:
         placeholders = ", ".join("?" for _ in turn_ids)
         rows = self._fetchall(
             f"""
-            SELECT id, conversation_id, turn_id, tool_name, reason, status, payload_json, result_json
+            SELECT id, conversation_id, turn_id, run_id, tool_name, reason, status, payload_json, result_json
             FROM approvals
             WHERE turn_id IN ({placeholders})
             ORDER BY created_at ASC
@@ -1256,9 +1523,15 @@ class SQLiteStore:
 
     def _lexical_score(self, query: str, label: str, text: str) -> float:
         tokens = self._tokenize(query)
-        haystack = f"{label} {text}".lower()
-        overlap = sum(1 for token in tokens if token in haystack)
-        return float(overlap or 0.0)
+        query_text = query.lower()
+        label_text = label.lower()
+        body_text = text.lower()
+
+        label_overlap = sum(1 for token in tokens if token in label_text)
+        body_overlap = sum(1 for token in tokens if token in body_text)
+        exact_label_phrase = 1.0 if label_text and label_text in query_text else 0.0
+
+        return float((label_overlap * 2.0) + body_overlap + (exact_label_phrase * 3.0))
 
     def _cosine_similarity(self, left: list[float], right: list[float]) -> float:
         if len(left) != len(right):

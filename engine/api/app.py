@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from engine.agent.service import WorkspaceAgentService
 from engine.api.dependencies import ServiceContainer
 from engine.api.routes import (
     approvals,
@@ -16,6 +17,7 @@ from engine.api.routes import (
     library,
     medical,
     notes,
+    runs,
     system,
     tasks,
     translate,
@@ -116,6 +118,12 @@ def build_container(settings: Settings | None = None) -> ServiceContainer:
         store,
         asset_storage_dir=resolved_settings.asset_storage_dir,
     )
+    workspace_agent = WorkspaceAgentService(
+        workspace_root=resolved_settings.workspace_root,
+        max_steps=resolved_settings.agent_max_steps,
+        max_file_reads=resolved_settings.agent_max_file_reads,
+        max_context_chars=resolved_settings.agent_max_context_chars,
+    )
     audit = AuditService(store)
     orchestrator = OrchestratorService(
         settings=resolved_settings,
@@ -129,6 +137,7 @@ def build_container(settings: Settings | None = None) -> ServiceContainer:
         video_runtime=video_runtime,
         prompt_builder=prompt_builder,
         tool_runtime=tool_runtime,
+        workspace_agent=workspace_agent,
         audit=audit,
     )
     return ServiceContainer(
@@ -144,6 +153,7 @@ def build_container(settings: Settings | None = None) -> ServiceContainer:
         video_runtime=video_runtime,
         prompt_builder=prompt_builder,
         tool_runtime=tool_runtime,
+        workspace_agent=workspace_agent,
         audit=audit,
         orchestrator=orchestrator,
     )
@@ -161,6 +171,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(library.router)
     app.include_router(notes.router)
     app.include_router(tasks.router)
+    app.include_router(runs.router)
     app.include_router(translate.router)
     app.include_router(approvals.router)
     app.include_router(medical.router)

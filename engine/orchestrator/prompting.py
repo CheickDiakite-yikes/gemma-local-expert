@@ -29,6 +29,7 @@ class PromptBuilder:
         assets: list[AssetSummary],
         context_assets: list[AssetSummary],
         specialist_analysis: str | None,
+        workspace_summary: str | None,
         route: RouteDecision,
         policy: PolicyDecision,
         model_selection: ModelRouteSelection,
@@ -46,6 +47,7 @@ class PromptBuilder:
                     model_selection,
                     results,
                     specialist_analysis,
+                    workspace_summary,
                     tool_result,
                 ),
             }
@@ -62,6 +64,7 @@ class PromptBuilder:
                     assets,
                     context_assets,
                     specialist_analysis,
+                    workspace_summary,
                     route,
                     policy,
                     results,
@@ -80,6 +83,7 @@ class PromptBuilder:
         model_selection: ModelRouteSelection,
         results: list[SearchResultItem],
         specialist_analysis: str | None,
+        workspace_summary: str | None,
         tool_result: dict[str, object] | None,
     ) -> str:
         lines = [
@@ -103,6 +107,10 @@ class PromptBuilder:
             lines.append(
                 f"The router detected a possible tool action: {route.proposed_tool}. "
                 "Do not claim the tool already ran unless approval and execution happened."
+            )
+        if route.agent_run:
+            lines.append(
+                "A bounded workspace agent gathered local file findings for this turn. Use those findings directly and do not imply arbitrary shell access."
             )
         if policy.approval_required:
             lines.append(
@@ -132,6 +140,10 @@ class PromptBuilder:
                 "Specialist visual analysis is provided in the user context. Prefer it over "
                 "guessing from attachment metadata."
             )
+        if workspace_summary:
+            lines.append(
+                "Workspace-agent findings are provided in the user context. Prefer them over unsupported guesses about repository contents."
+            )
         lines.append(
             f"Primary assistant model route: {model_selection.assistant_model}."
         )
@@ -143,6 +155,7 @@ class PromptBuilder:
         assets: list[AssetSummary],
         context_assets: list[AssetSummary],
         specialist_analysis: str | None,
+        workspace_summary: str | None,
         route: RouteDecision,
         policy: PolicyDecision,
         results: list[SearchResultItem],
@@ -161,6 +174,9 @@ class PromptBuilder:
 
         if specialist_analysis:
             sections.append("Specialist visual analysis:\n" + specialist_analysis)
+
+        if workspace_summary:
+            sections.append("Workspace agent findings:\n" + workspace_summary)
 
         if route.reasons:
             sections.append("Router notes:\n- " + "\n- ".join(route.reasons))

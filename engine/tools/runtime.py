@@ -151,6 +151,42 @@ class ToolRuntime:
             "message": "No executor is implemented for this tool yet.",
         }
 
+    def merge_edited_payload(
+        self,
+        tool_name: str,
+        base_payload: dict[str, object],
+        edited_payload: dict[str, object] | None,
+    ) -> dict[str, object]:
+        merged = dict(base_payload)
+        if not edited_payload:
+            return merged
+
+        if tool_name in {"create_note", "create_checklist", "log_observation"}:
+            title = self._edited_text(edited_payload.get("title"), max_chars=120)
+            content = self._edited_text(edited_payload.get("content"), max_chars=12000)
+            kind = self._edited_kind(tool_name, edited_payload.get("kind"))
+            if title is not None:
+                merged["title"] = title
+            if content is not None:
+                merged["content"] = content
+            if kind is not None:
+                merged["kind"] = kind
+            return merged
+
+        if tool_name == "create_task":
+            title = self._edited_text(edited_payload.get("title"), max_chars=120)
+            details = self._edited_text(edited_payload.get("details"), max_chars=12000)
+            status = self._edited_task_status(edited_payload.get("status"))
+            if title is not None:
+                merged["title"] = title
+            if details is not None:
+                merged["details"] = details
+            if status is not None:
+                merged["status"] = status
+            return merged
+
+        return merged
+
     def _title_from_request(self, text: str, *, fallback: str) -> str:
         cleaned = re.sub(r"^(create|make|build|write|log)\s+(a|an|the)?\s*", "", text, flags=re.I)
         cleaned = cleaned.strip().rstrip(".")
@@ -159,6 +195,35 @@ class ToolRuntime:
         if len(cleaned) > 80:
             cleaned = cleaned[:77].rstrip() + "..."
         return cleaned[:1].upper() + cleaned[1:]
+
+    def _edited_text(self, value: object, *, max_chars: int) -> str | None:
+        if value is None:
+            return None
+        text = str(value).replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not text:
+            return None
+        return text[:max_chars]
+
+    def _edited_kind(self, tool_name: str, value: object) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip().lower()
+        allowed_by_tool = {
+            "create_note": {"note", "observation"},
+            "create_checklist": {"checklist"},
+            "log_observation": {"observation"},
+        }
+        if normalized in allowed_by_tool.get(tool_name, set()):
+            return normalized
+        return None
+
+    def _edited_task_status(self, value: object) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip().lower()
+        if normalized in {"open", "in_progress", "blocked", "done"}:
+            return normalized
+        return None
 
     def _build_checklist_content(
         self,
@@ -237,6 +302,11 @@ class ToolRuntime:
         specialist_analysis_text: str | None,
     ) -> str:
         if specialist_analysis_text:
+            if any(
+                keyword in turn.text.lower()
+                for keyword in {"brief", "briefing", "workspace", "report"}
+            ):
+                return specialist_analysis_text.strip()
             lines = self._normalized_specialist_lines(specialist_analysis_text)
             if lines:
                 return "\n".join(f"- {line}" for line in lines[:8])
