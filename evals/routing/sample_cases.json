@@ -1,0 +1,50 @@
+[
+  {
+    "id": "route_research_retrieval",
+    "text": "Summarize the Kenya trip checklist and daily debrief guidance.",
+    "mode": "research",
+    "asset_ids": [],
+    "enabled_knowledge_pack_ids": [],
+    "expected": {
+      "needs_retrieval": true,
+      "specialist_model": null,
+      "proposed_tool": null
+    }
+  },
+  {
+    "id": "route_translation",
+    "text": "Translate this sign from Swahili to English.",
+    "mode": "field",
+    "asset_ids": ["asset_sign"],
+    "enabled_knowledge_pack_ids": [],
+    "expected": {
+      "needs_retrieval": false,
+      "specialist_model": "translategemma",
+      "proposed_tool": null
+    }
+  },
+  {
+    "id": "route_visual_extraction",
+    "text": "Extract fields from this form photo.",
+    "mode": "field",
+    "asset_ids": ["asset_form"],
+    "enabled_knowledge_pack_ids": [],
+    "expected": {
+      "needs_retrieval": false,
+      "specialist_model": "paligemma",
+      "proposed_tool": null
+    }
+  },
+  {
+    "id": "route_write_tool",
+    "text": "Create a checklist for tomorrow's village visits.",
+    "mode": "field",
+    "asset_ids": [],
+    "enabled_knowledge_pack_ids": [],
+    "expected": {
+      "needs_retrieval": false,
+      "specialist_model": null,
+      "proposed_tool": "create_checklist"
+    }
+  }
+]

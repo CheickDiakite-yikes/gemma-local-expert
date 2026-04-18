@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <title>Field Assistant Chat</title>
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <link rel="stylesheet" href="./styles.css" />
+    <script defer src="./app.js"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+          <div>
+            <p class="eyebrow">Field Assistant</p>
+            <h1>Field Assistant</h1>
+          </div>
+          <button class="primary-button" id="new-chat-button" type="button">
+            New
+          </button>
+        </div>
+
+        <section class="sidebar-section">
+          <p class="section-label">Sessions</p>
+          <div class="conversation-list" id="conversation-list"></div>
+        </section>
+
+        <section class="sidebar-footer">
+          <p>Local retrieval, approvals, and multimodal work in one quiet surface.</p>
+          <a href="/v1/system/health" target="_blank" rel="noreferrer">System health</a>
+        </section>
+      </aside>
+
+      <div class="backdrop" id="sidebar-backdrop"></div>
+
+      <main class="chat-pane">
+        <header class="chat-header">
+          <div class="header-left">
+            <button class="icon-button" id="sidebar-toggle" type="button" aria-label="Toggle sessions">
+              ☰
+            </button>
+            <div class="title-block">
+              <p class="eyebrow">Local workspace</p>
+              <h2 id="conversation-title">New conversation</h2>
+            </div>
+          </div>
+          <div class="header-actions">
+            <div class="status-wrap">
+              <button class="status-trigger" id="status-button" type="button" aria-expanded="false">
+                <span class="status-dot" id="status-dot"></span>
+                <span class="status-trigger-label" id="status-pill">Ready</span>
+                <span class="status-trigger-caret">▾</span>
+              </button>
+              <div class="status-menu" id="status-menu" hidden>
+                <section class="status-menu-section">
+                  <p class="section-label">Surface</p>
+                  <div class="status-stack">
+                    <div class="status-line">
+                      <span>Experience</span>
+                      <strong>Unified local assistant</strong>
+                    </div>
+                    <div class="status-line">
+                      <span>Current state</span>
+                      <strong id="status-runtime-copy">Ready for the next turn.</strong>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="status-menu-section">
+                  <p class="section-label">Current Turn</p>
+                  <div class="process-list" id="process-list"></div>
+                </section>
+              </div>
+            </div>
+          </div>
+        </header>
+
+        <section class="message-region">
+          <div class="message-scroll" id="message-scroll">
+            <div class="empty-state" id="empty-state">
+              <p class="eyebrow">Grounded local work</p>
+              <h3>One calm place for chat, image review, document work, and field actions.</h3>
+              <p>
+                Ask for a checklist, a how-to walkthrough, a medical review with guardrails, or a derived image analysis.
+              </p>
+            </div>
+            <div class="conversation-messages" id="message-list"></div>
+          </div>
+        </section>
+
+        <form class="composer" id="composer">
+          <input id="file-input" type="file" accept="image/*,video/*,.pdf,.txt,.md" multiple hidden />
+          <input
+            id="camera-capture-input"
+            type="file"
+            accept="image/*,video/*"
+            capture="environment"
+            hidden
+          />
+          <div class="attachment-strip" id="attachment-strip"></div>
+          <section class="camera-sheet" id="camera-sheet" hidden>
+            <div class="camera-sheet-header">
+              <div>
+                <p class="eyebrow">Local camera</p>
+                <h3>Live review workspace</h3>
+              </div>
+              <button class="icon-button camera-close" id="camera-close-button" type="button" aria-label="Close camera">
+                ×
+              </button>
+            </div>
+            <div class="camera-rail">
+              <div class="camera-rail-line">
+                <span>Mode</span>
+                <strong id="camera-mode-label">Live review</strong>
+              </div>
+              <div class="camera-rail-line">
+                <span>Cadence</span>
+                <strong id="camera-cadence-label">Manual</strong>
+              </div>
+              <div class="camera-rail-line">
+                <span>Output</span>
+                <strong id="camera-output-label">Attach frames or clips</strong>
+              </div>
+            </div>
+            <div class="camera-stage">
+              <video
+                id="camera-preview"
+                class="camera-preview"
+                playsinline
+                autoplay
+                muted
+              ></video>
+              <div class="camera-overlay" id="camera-overlay">
+                <span class="camera-status-pill" id="camera-status-pill">Camera idle</span>
+                <p class="camera-status-copy" id="camera-status-copy">
+                  Open the camera to record a local clip or use the native capture flow.
+                </p>
+              </div>
+            </div>
+            <div class="camera-actions camera-actions-utility">
+              <button class="camera-action secondary" id="camera-live-button" type="button">
+                Open live
+              </button>
+              <button class="camera-action secondary" id="camera-watch-button" type="button">
+                Start watch
+              </button>
+              <button class="camera-action secondary" id="camera-native-button" type="button">
+                Native capture
+              </button>
+            </div>
+            <div class="camera-actions camera-actions-primary">
+              <button class="camera-action secondary" id="camera-snapshot-button" type="button">
+                Capture frame
+              </button>
+              <button class="camera-action primary" id="camera-analyze-button" type="button">
+                Analyze frame
+              </button>
+              <button class="camera-action secondary" id="camera-stop-button" type="button" hidden>
+                Stop
+              </button>
+              <button class="camera-action primary" id="camera-record-button" type="button">
+                Start recording
+              </button>
+              <button class="camera-action primary" id="camera-use-button" type="button" hidden>
+                Use clip
+              </button>
+              <button class="camera-action secondary" id="camera-retake-button" type="button" hidden>
+                Retake
+              </button>
+            </div>
+            <div class="camera-monitor-strip" id="camera-monitor-strip"></div>
+          </section>
+          <div class="composer-row">
+            <button class="icon-button" id="attachment-button" type="button" aria-label="Attachments">
+              ＋
+            </button>
+            <button class="icon-button" id="camera-button" type="button" aria-label="Camera capture">
+              ◌
+            </button>
+            <textarea
+              id="composer-input"
+              rows="1"
+              placeholder="Ask the local assistant"
+            ></textarea>
+            <button class="icon-button" id="voice-button" type="button" aria-label="Voice coming later">
+              ◉
+            </button>
+            <button class="send-button" id="send-button" type="submit">Send</button>
+          </div>
+        </form>
+      </main>
+    </div>
+  </body>
+</html>

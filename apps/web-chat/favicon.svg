@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Field Assistant">
+  <defs>
+    <linearGradient id="a" x1="0%" x2="100%" y1="0%" y2="100%">
+      <stop offset="0%" stop-color="#f0bc58" />
+      <stop offset="100%" stop-color="#d68645" />
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="18" fill="#0b0f14" />
+  <circle cx="46" cy="18" r="6" fill="#69d28b" />
+  <path
+    d="M18 18h12c9.389 0 17 7.611 17 17s-7.611 17-17 17H18z"
+    fill="url(#a)"
+  />
+  <path d="M18 18v34" fill="none" stroke="#f7f4ec" stroke-linecap="round" stroke-width="5" />
+  <path d="M18 34h18" fill="none" stroke="#1d1408" stroke-linecap="round" stroke-width="5" />
+</svg>

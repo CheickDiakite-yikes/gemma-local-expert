@@ -1,0 +1,20 @@
+[
+  {
+    "id": "retrieve_checklist",
+    "query": "trip checklist batteries water purification",
+    "enabled_knowledge_pack_ids": [],
+    "expected_top_label": "Kenya Trip Checklist"
+  },
+  {
+    "id": "retrieve_ors",
+    "query": "oral rehydration safe water dehydration",
+    "enabled_knowledge_pack_ids": [],
+    "expected_top_label": "ORS Guidance"
+  },
+  {
+    "id": "retrieve_hybrid_dehydrated",
+    "query": "watch for dehydrated weakness while giving tiny sips",
+    "enabled_knowledge_pack_ids": [],
+    "expected_top_label": "ORS Guidance"
+  }
+]

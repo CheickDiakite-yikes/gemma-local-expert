@@ -1,0 +1,70 @@
+[
+  {
+    "file_name": "field_supply_board.png",
+    "title": "Village Visit Supply Board",
+    "care_context": "general",
+    "suggested_prompts": [
+      "Summarize the visible supply situation.",
+      "What items look low or urgent?"
+    ],
+    "follow_up_prompts": [
+      "Which two items should we prioritize before departure?",
+      "Quote the action note in your own words."
+    ],
+    "task_prompts": [
+      "Create a checklist for the shortages shown in this board.",
+      "Create a task to restock the urgent items from this image."
+    ]
+  },
+  {
+    "file_name": "community_whiteboard_plan.png",
+    "title": "Tuesday Field Route Whiteboard",
+    "care_context": "general",
+    "suggested_prompts": [
+      "Summarize the schedule shown here.",
+      "What are the key stops and reminders?"
+    ],
+    "follow_up_prompts": [
+      "What happens before the school lesson?",
+      "What needs to be picked up later in the day?"
+    ],
+    "task_prompts": [
+      "Create a checklist from this whiteboard plan.",
+      "Create a task for the reminder items on the board."
+    ]
+  },
+  {
+    "file_name": "mission_market_receipt.png",
+    "title": "Mission Market Receipt",
+    "care_context": "general",
+    "suggested_prompts": [
+      "Extract the visible items and total from this receipt.",
+      "Summarize the expenses shown."
+    ],
+    "follow_up_prompts": [
+      "Which purchase looks related to the translator reminder?",
+      "What is the final total including the fee?"
+    ],
+    "task_prompts": [
+      "Create a note summarizing the purchases from this receipt.",
+      "Create a task to reimburse the market expenses shown here."
+    ]
+  },
+  {
+    "file_name": "clinic_triage_card.png",
+    "title": "Clinic Triage Card",
+    "care_context": "medical",
+    "suggested_prompts": [
+      "Summarize the visible medical information conservatively.",
+      "What escalation note is visible on this card?"
+    ],
+    "follow_up_prompts": [
+      "What are the vitals shown?",
+      "What details should be carried into a clinician handoff?"
+    ],
+    "task_prompts": [
+      "Create a medical case summary task based on the visible card details.",
+      "Create a note with the visible triage details for clinician handoff."
+    ]
+  }
+]

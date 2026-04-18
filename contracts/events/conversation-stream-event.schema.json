@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://field-assistant.local/contracts/conversation-stream-event.schema.json",
+  "title": "ConversationStreamEvent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["type", "conversation_id", "turn_id", "payload"],
+  "properties": {
+    "type": {
+      "type": "string",
+      "enum": [
+        "assistant.delta",
+        "assistant.message.completed",
+        "citation.added",
+        "tool.proposed",
+        "tool.started",
+        "tool.completed",
+        "approval.required",
+        "warning",
+        "error"
+      ]
+    },
+    "conversation_id": {
+      "type": "string"
+    },
+    "turn_id": {
+      "type": "string"
+    },
+    "payload": {
+      "type": "object"
+    }
+  }
+}
