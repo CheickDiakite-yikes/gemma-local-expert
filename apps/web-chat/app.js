@@ -10,6 +10,8 @@ const state = {
   transcripts: new Map(),
   agentRuns: new Map(),
   approvals: new Map(),
+  approvalDrafts: new Map(),
+  runPanels: new Map(),
   capabilities: null,
   medicalSessions: new Map(),
   processFeed: [],
@@ -28,6 +30,12 @@ const state = {
     status: "idle",
     error: null,
   },
+};
+
+const STORAGE_KEYS = {
+  approvalDrafts: "field-assistant.approval-drafts.v1",
+  runPanels: "field-assistant.run-panels.v1",
+  activeConversation: "field-assistant.active-conversation.v1",
 };
 
 const elements = {
@@ -83,6 +91,87 @@ function activeMessages() {
   return state.transcripts.get(state.activeConversationId) ?? [];
 }
 
+function canUseStorage() {
+  try {
+    return typeof window !== "undefined" && Boolean(window.localStorage);
+  } catch (error) {
+    return false;
+  }
+}
+
+function loadStoredRecord(key) {
+  if (!canUseStorage()) {
+    return {};
+  }
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch (error) {
+    return {};
+  }
+}
+
+function saveStoredRecord(key, value) {
+  if (!canUseStorage()) {
+    return;
+  }
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch (error) {
+    // Ignore local storage write failures.
+  }
+}
+
+function loadPersistedUiState() {
+  state.approvalDrafts = new Map(Object.entries(loadStoredRecord(STORAGE_KEYS.approvalDrafts)));
+  state.runPanels = new Map(
+    Object.entries(loadStoredRecord(STORAGE_KEYS.runPanels)).map(([key, value]) => [key, Boolean(value)]),
+  );
+  if (canUseStorage()) {
+    state.activeConversationId = window.localStorage.getItem(STORAGE_KEYS.activeConversation) || null;
+  }
+}
+
+function persistApprovalDrafts() {
+  saveStoredRecord(STORAGE_KEYS.approvalDrafts, Object.fromEntries(state.approvalDrafts));
+}
+
+function persistRunPanels() {
+  saveStoredRecord(STORAGE_KEYS.runPanels, Object.fromEntries(state.runPanels));
+}
+
+function persistActiveConversation() {
+  if (!canUseStorage()) {
+    return;
+  }
+  try {
+    if (state.activeConversationId) {
+      window.localStorage.setItem(STORAGE_KEYS.activeConversation, state.activeConversationId);
+    } else {
+      window.localStorage.removeItem(STORAGE_KEYS.activeConversation);
+    }
+  } catch (error) {
+    // Ignore local storage write failures.
+  }
+}
+
+function stableSerialize(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableSerialize(item)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableSerialize(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
 function setActiveMessages(messages) {
   if (!state.activeConversationId) {
     state.draftMessages = messages;
@@ -136,6 +225,131 @@ function capabilitySummary(capabilities) {
   binaryBits.push(capabilities.ffmpeg_available ? "ffmpeg" : "no ffmpeg");
   const profile = capabilities.low_memory_profile ? "low-memory profile" : "full profile";
   return `${capabilities.assistant_backend} / ${capabilities.embedding_backend} / ${capabilities.specialist_backend} / ${capabilities.tracking_backend} • ${binaryBits.join(" • ")} • ${profile}`;
+}
+
+function approvalDraftFor(approvalId) {
+  return state.approvalDrafts.get(approvalId) || null;
+}
+
+function approvalEditableFields(approval) {
+  switch (approval?.tool_name) {
+    case "create_task":
+      return ["title", "details", "status"];
+    case "create_note":
+    case "create_checklist":
+    case "log_observation":
+      return ["title", "content"];
+    default:
+      return null;
+  }
+}
+
+function approvalMergedPayload(approval, overridePayload = undefined) {
+  const basePayload = approval?.payload || {};
+  if (overridePayload === undefined || overridePayload === null) {
+    return basePayload;
+  }
+
+  const editableFields = approvalEditableFields(approval);
+  if (!editableFields) {
+    return overridePayload;
+  }
+
+  return {
+    ...basePayload,
+    ...overridePayload,
+  };
+}
+
+function approvalComparablePayload(approval, overridePayload = undefined) {
+  const resolvedPayload = approvalMergedPayload(approval, overridePayload);
+  const editableFields = approvalEditableFields(approval);
+  if (!editableFields) {
+    return resolvedPayload;
+  }
+
+  const comparablePayload = {};
+  for (const field of editableFields) {
+    if (Object.prototype.hasOwnProperty.call(resolvedPayload, field)) {
+      comparablePayload[field] = resolvedPayload[field];
+    }
+  }
+  return comparablePayload;
+}
+
+function approvalEffectivePayload(approval, overridePayload = undefined) {
+  if (!approval?.payload) {
+    return {};
+  }
+  if (overridePayload !== undefined) {
+    return approvalMergedPayload(approval, overridePayload);
+  }
+  if (approval.status === "pending") {
+    const draftPayload = approvalDraftFor(approval.id);
+    if (draftPayload) {
+      return approvalMergedPayload(approval, draftPayload);
+    }
+  }
+  return approval.payload;
+}
+
+function approvalHasDraftChanges(approval, overridePayload = undefined) {
+  if (!approval?.payload) {
+    return false;
+  }
+  const comparableBase = approvalComparablePayload(approval, approval.payload);
+  const comparableEffective = approvalComparablePayload(
+    approval,
+    overridePayload === undefined ? approvalDraftFor(approval.id) || approval.payload : overridePayload,
+  );
+  return stableSerialize(comparableEffective) !== stableSerialize(comparableBase);
+}
+
+function saveApprovalDraft(approvalId, payload) {
+  state.approvalDrafts.set(approvalId, payload);
+  persistApprovalDrafts();
+}
+
+function clearApprovalDraft(approvalId) {
+  if (!state.approvalDrafts.has(approvalId)) {
+    return;
+  }
+  state.approvalDrafts.delete(approvalId);
+  persistApprovalDrafts();
+}
+
+function pruneResolvedApprovalDrafts(messages) {
+  let changed = false;
+  for (const message of messages || []) {
+    if (
+      message.approval?.id &&
+      message.approval.status !== "pending" &&
+      state.approvalDrafts.has(message.approval.id)
+    ) {
+      state.approvalDrafts.delete(message.approval.id);
+      changed = true;
+    }
+  }
+  if (changed) {
+    persistApprovalDrafts();
+  }
+}
+
+function runPanelPreference(runId) {
+  return state.runPanels.get(runId);
+}
+
+function isRunExpanded(run) {
+  const saved = runPanelPreference(run.id);
+  if (typeof saved === "boolean") {
+    return saved;
+  }
+  return run.status !== "completed";
+}
+
+function setRunExpanded(runId, expanded) {
+  state.runPanels.set(runId, Boolean(expanded));
+  persistRunPanels();
 }
 
 function updateStatus(kind, label, detail = null) {
@@ -514,12 +728,11 @@ function renderMessageContent(message) {
   return `<div class="message-content${richTextRoles.has(message.role) ? " rich-text" : ""}">${body}</div>`;
 }
 
-function renderApprovalPreview(approval) {
-  if (!approval?.payload) {
+function renderApprovalPreview(approval, overridePayload = undefined) {
+  const payload = approvalEffectivePayload(approval, overridePayload);
+  if (!payload || !Object.keys(payload).length) {
     return "";
   }
-
-  const { payload } = approval;
   const previewTitle = payload.title
     ? `<div class="approval-preview-title">${escapeHtml(payload.title)}</div>`
     : "";
@@ -548,13 +761,20 @@ function renderApprovalEditor(approval) {
     return "";
   }
 
-  const { payload } = approval;
+  const payload = approvalEffectivePayload(approval);
+  const isDirty = approvalHasDraftChanges(approval, payload);
   if (approval.tool_name === "create_task") {
     return `
       <section class="approval-editor" data-approval-editor="${approval.id}">
         <div class="approval-editor-header">
-          <strong>Refine before approval</strong>
-          <span>Adjust the saved task before it is written locally.</span>
+          <div>
+            <strong>Refine before approval</strong>
+            <span>Adjust the saved task before it is written locally.</span>
+          </div>
+          <div class="approval-editor-controls">
+            <span class="approval-editor-state${isDirty ? " is-dirty" : ""}" data-approval-draft-state>${isDirty ? "Saved locally" : "Original draft"}</span>
+            <button class="approval-editor-reset" data-approval-reset type="button"${isDirty ? "" : " disabled"}>Reset</button>
+          </div>
         </div>
         <label class="approval-field">
           <span>Title</span>
@@ -587,8 +807,14 @@ function renderApprovalEditor(approval) {
     return `
       <section class="approval-editor" data-approval-editor="${approval.id}">
         <div class="approval-editor-header">
-          <strong>Refine before approval</strong>
-          <span>${escapeHtml(helperCopy)}</span>
+          <div>
+            <strong>Refine before approval</strong>
+            <span>${escapeHtml(helperCopy)}</span>
+          </div>
+          <div class="approval-editor-controls">
+            <span class="approval-editor-state${isDirty ? " is-dirty" : ""}" data-approval-draft-state>${isDirty ? "Saved locally" : "Original draft"}</span>
+            <button class="approval-editor-reset" data-approval-reset type="button"${isDirty ? "" : " disabled"}>Reset</button>
+          </div>
         </div>
         <label class="approval-field">
           <span>Title</span>
@@ -605,8 +831,14 @@ function renderApprovalEditor(approval) {
   return `
     <section class="approval-editor" data-approval-editor="${approval.id}">
       <div class="approval-editor-header">
-        <strong>Refine before approval</strong>
-        <span>Advanced payload editing for this action.</span>
+        <div>
+          <strong>Refine before approval</strong>
+          <span>Advanced payload editing for this action.</span>
+        </div>
+        <div class="approval-editor-controls">
+          <span class="approval-editor-state${isDirty ? " is-dirty" : ""}" data-approval-draft-state>${isDirty ? "Saved locally" : "Original draft"}</span>
+          <button class="approval-editor-reset" data-approval-reset type="button"${isDirty ? "" : " disabled"}>Reset</button>
+        </div>
       </div>
       <label class="approval-field approval-field-code">
         <span>Payload JSON</span>
@@ -647,15 +879,22 @@ function humanizeRunStatus(status) {
     .join(" ");
 }
 
+function runStepProgress(run) {
+  const plannedCount = run.plan_steps?.length || run.executed_steps?.length || 0;
+  const executedCount = run.executed_steps?.length || 0;
+  return `${executedCount}/${plannedCount || executedCount || 0} steps`;
+}
+
 function renderAgentRunMarkup(run, approval) {
   if (!run) {
     return "";
   }
 
   const steps = (run.executed_steps?.length ? run.executed_steps : run.plan_steps || []).slice(-6);
+  const expanded = isRunExpanded(run);
   const stepMarkup = steps.length
     ? `
-      <div class="agent-run-steps">
+      <div class="agent-run-steps"${expanded ? "" : ' hidden'}>
         ${steps
           .map(
             (step) => `
@@ -689,12 +928,21 @@ function renderAgentRunMarkup(run, approval) {
     run.artifact_ids?.length
       ? `<p class="agent-run-note">Artifacts linked: ${escapeHtml(String(run.artifact_ids.length))}</p>`
       : "";
+  const toggleMarkup = steps.length
+    ? `<button class="agent-run-toggle" data-run-toggle="${run.id}" type="button">${expanded ? "Hide details" : "Show details"}</button>`
+    : "";
 
   return `
     <section class="agent-run-card is-${escapeHtml(run.status || "running")}">
       <div class="agent-run-header">
-        <span class="agent-run-kicker">Workspace agent</span>
-        <span class="agent-run-status">${escapeHtml(humanizeRunStatus(run.status || "running"))}</span>
+        <div>
+          <span class="agent-run-kicker">Workspace agent</span>
+          <div class="agent-run-status-row">
+            <span class="agent-run-status">${escapeHtml(humanizeRunStatus(run.status || "running"))}</span>
+            <span class="agent-run-progress">${escapeHtml(runStepProgress(run))}</span>
+          </div>
+        </div>
+        ${toggleMarkup}
       </div>
       <h4>${escapeHtml(clip(run.goal || "Workspace run", 96))}</h4>
       <p class="agent-run-scope">Scope: <code>${escapeHtml(run.scope_root || ".")}</code></p>
@@ -927,11 +1175,18 @@ function renderMessages() {
     if (message.approval) {
       wireApprovalActions(row, message.approval);
     }
+    if (message.agentRun) {
+      wireRunCardActions(row, message.agentRun);
+    }
   }
 
   queueMicrotask(() => {
-    elements.messageScroll.scrollTop = elements.messageScroll.scrollHeight;
+    elements.messageScroll.scrollTop = messages.length ? elements.messageScroll.scrollHeight : 0;
   });
+}
+
+function renderApprovalPreviewSlot(approval) {
+  return `<div data-approval-preview-slot>${renderApprovalPreview(approval)}</div>`;
 }
 
 function renderApprovalMarkup(approval) {
@@ -957,15 +1212,15 @@ function renderApprovalMarkup(approval) {
         <p>${escapeHtml(approval.reason)}</p>
       </div>
       ${renderApprovalEditor(approval)}
-      ${renderApprovalPreview(approval)}
-      <div class="approval-status is-${escapeHtml(approval.status)}">Status: ${escapeHtml(approval.status)}</div>
+      ${renderApprovalPreviewSlot(approval)}
+      <div class="approval-status is-${escapeHtml(approval.status)}" data-approval-status>Status: ${escapeHtml(approval.status)}</div>
       ${renderApprovalResult(approval.result)}
       ${actions}
     </section>
   `;
 }
 
-function collectApprovalEdit(container, approval) {
+function collectApprovalEdit(container, approval, { silent = false } = {}) {
   const editor = container.querySelector(`[data-approval-editor="${approval.id}"]`);
   if (!editor) {
     return {};
@@ -978,10 +1233,14 @@ function collectApprovalEdit(container, approval) {
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
         return parsed;
       }
-      addSystemMessage("Approval edit must be a JSON object.");
+      if (!silent) {
+        addSystemMessage("Approval edit must be a JSON object.");
+      }
       return null;
     } catch (error) {
-      addSystemMessage("Approval edit is not valid JSON yet.");
+      if (!silent) {
+        addSystemMessage("Approval edit is not valid JSON yet.");
+      }
       return null;
     }
   }
@@ -997,7 +1256,80 @@ function collectApprovalEdit(container, approval) {
   return editedPayload;
 }
 
+function refreshApprovalCardState(container, approval, collected = undefined) {
+  const currentEdit = collected === undefined ? collectApprovalEdit(container, approval, { silent: true }) : collected;
+  const previewSlot = container.querySelector("[data-approval-preview-slot]");
+  const stateLabel = container.querySelector("[data-approval-draft-state]");
+  const resetButton = container.querySelector("[data-approval-reset]");
+  const approveButton = container.querySelector('[data-approval-action="approve"]');
+  const editor = container.querySelector(`[data-approval-editor="${approval.id}"]`);
+  if (!editor) {
+    return;
+  }
+
+  if (currentEdit === null) {
+    editor.classList.add("has-invalid-draft");
+    if (stateLabel) {
+      stateLabel.textContent = "Draft JSON invalid";
+      stateLabel.classList.add("is-invalid");
+      stateLabel.classList.remove("is-dirty");
+    }
+    if (approveButton) {
+      approveButton.disabled = true;
+    }
+    return;
+  }
+
+  editor.classList.remove("has-invalid-draft");
+  const dirty = approvalHasDraftChanges(approval, currentEdit);
+  if (dirty) {
+    saveApprovalDraft(approval.id, currentEdit);
+  } else {
+    clearApprovalDraft(approval.id);
+  }
+
+  if (previewSlot) {
+    previewSlot.innerHTML = renderApprovalPreview(approval, currentEdit);
+  }
+  if (stateLabel) {
+    stateLabel.textContent = dirty ? "Saved locally" : "Original draft";
+    stateLabel.classList.toggle("is-dirty", dirty);
+    stateLabel.classList.remove("is-invalid");
+  }
+  if (resetButton) {
+    resetButton.disabled = !dirty;
+  }
+  if (approveButton) {
+    approveButton.disabled = false;
+  }
+}
+
 function wireApprovalActions(container, approval) {
+  const editor = container.querySelector(`[data-approval-editor="${approval.id}"]`);
+  if (editor) {
+    for (const field of editor.querySelectorAll("[data-approval-field], [data-approval-json]")) {
+      field.addEventListener("input", () => {
+        refreshApprovalCardState(container, approval);
+      });
+    }
+    const resetButton = editor.querySelector("[data-approval-reset]");
+    if (resetButton) {
+      resetButton.addEventListener("click", () => {
+        clearApprovalDraft(approval.id);
+        render();
+      });
+    }
+    for (const textarea of editor.querySelectorAll("textarea")) {
+      textarea.addEventListener("input", () => {
+        textarea.style.height = "auto";
+        textarea.style.height = `${Math.max(textarea.scrollHeight, 112)}px`;
+      });
+      textarea.style.height = "auto";
+      textarea.style.height = `${Math.max(textarea.scrollHeight, 112)}px`;
+    }
+    refreshApprovalCardState(container, approval);
+  }
+
   const buttons = container.querySelectorAll("[data-approval-action]");
   for (const button of buttons) {
     button.addEventListener("click", async () => {
@@ -1013,6 +1345,17 @@ function wireApprovalActions(container, approval) {
       await submitApprovalDecision(approval.id, action, editedPayload);
     });
   }
+}
+
+function wireRunCardActions(container, run) {
+  const toggle = container.querySelector(`[data-run-toggle="${run.id}"]`);
+  if (!toggle) {
+    return;
+  }
+  toggle.addEventListener("click", () => {
+    setRunExpanded(run.id, !isRunExpanded(run));
+    render();
+  });
 }
 
 function renderCameraSheet() {
@@ -1204,6 +1547,7 @@ async function refreshAgentRuns(conversationId) {
 
 async function openConversation(conversationId) {
   state.activeConversationId = conversationId;
+  persistActiveConversation();
   if (!state.transcripts.has(conversationId)) {
     const [transcript, runs] = await Promise.all([
       requestJson(`/v1/conversations/${conversationId}/messages`),
@@ -1231,8 +1575,10 @@ async function openConversation(conversationId) {
         agentRun: message.turn_id ? runsByTurn.get(message.turn_id) || null : null,
       })),
     );
+    pruneResolvedApprovalDrafts(state.transcripts.get(conversationId));
   } else {
     await refreshAgentRuns(conversationId);
+    pruneResolvedApprovalDrafts(state.transcripts.get(conversationId));
   }
   render();
 }
@@ -1246,6 +1592,7 @@ async function createConversation(title) {
     }),
   });
   state.activeConversationId = conversation.id;
+  persistActiveConversation();
   state.conversations = [conversation, ...state.conversations];
   state.transcripts.set(conversation.id, []);
   state.agentRuns.set(conversation.id, []);
@@ -1895,6 +2242,7 @@ async function submitApprovalDecision(approvalId, action, editedPayload = {}) {
     }),
   });
 
+  clearApprovalDraft(approvalId);
   state.approvals.set(approvalId, approval);
   const messages = activeMessages();
   for (const message of messages) {
@@ -1984,6 +2332,7 @@ function attachEventHandlers() {
   elements.composer.addEventListener("submit", onSubmit);
   elements.newChatButton.addEventListener("click", () => {
     state.activeConversationId = null;
+    persistActiveConversation();
     state.draftMessages = [];
     state.processFeed = [];
     clearPendingAttachments();
@@ -2082,12 +2431,21 @@ function attachEventHandlers() {
 }
 
 async function bootstrap() {
+  loadPersistedUiState();
   attachEventHandlers();
   resizeComposer();
   updateStatus("ready", "Ready", "Ready for the next turn.");
   try {
     await loadCapabilities();
     await refreshConversations();
+    const preferredConversation = state.activeConversationId;
+    if (preferredConversation && state.conversations.some((conversation) => conversation.id === preferredConversation)) {
+      await openConversation(preferredConversation);
+    } else if (state.conversations.length) {
+      await openConversation(state.conversations[0].id);
+    } else {
+      persistActiveConversation();
+    }
   } catch (error) {
     updateStatus("error", "Offline", "The local engine is unavailable.");
     addSystemMessage("The chat shell could not reach the local engine. Start the FastAPI server and reload.");
