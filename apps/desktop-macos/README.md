@@ -1,13 +1,13 @@
 # desktop-macos
 
-This directory is reserved for the native SwiftUI shell.
+This directory is reserved for the fuller native macOS SwiftUI shell.
 
 Planned responsibilities:
 
 - engine lifecycle management
 - chat and library UI
 - voice capture and playback
-- mode switching
+- unified assistant workspace
 - local file pickers and camera input
 - approval prompts
 
