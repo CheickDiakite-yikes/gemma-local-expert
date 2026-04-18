@@ -11,6 +11,22 @@ build/
 dist/
 output/
 .DS_Store
+
+# Local secrets and machine-specific auth material
+.env
+.env.*
+!.env.example
+.envrc
+.npmrc
+.pypirc
+.netrc
+.secrets/
+*.pem
+*.key
+*.p12
+*.cer
+*.mobileprovision
+
 data/*.db
 data/*.db-shm
 data/*.db-wal
