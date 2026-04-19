@@ -94,6 +94,16 @@ class PromptBuilder:
             "Use clean markdown-style formatting when helpful: short headings, flat bullets, and compact sections.",
         ]
 
+        if route.interaction_kind == "conversation":
+            lines.append(
+                "This is ordinary conversation. Answer naturally and directly without operational boilerplate."
+            )
+
+        if route.is_follow_up:
+            lines.append(
+                "This is a follow-up turn. Preserve continuity with the recent conversation instead of restarting from scratch."
+            )
+
         if self._is_teaching_request(user_text):
             lines.append(
                 "The user is asking to learn. Answer like a capable field instructor: begin with a direct orientation, then give short ordered steps, include one practical tip or example, and end with a useful next-step question only if it helps."
@@ -144,6 +154,10 @@ class PromptBuilder:
             lines.append(
                 "Workspace-agent findings are provided in the user context. Prefer them over unsupported guesses about repository contents."
             )
+        if not results and not specialist_analysis and not workspace_summary and not tool_result:
+            lines.append(
+                "If no local sources are provided, you can still answer from general reasoning. Do not mention missing retrieval unless the user explicitly asked for grounded evidence."
+            )
         lines.append(
             f"Primary assistant model route: {model_selection.assistant_model}."
         )
@@ -178,7 +192,7 @@ class PromptBuilder:
         if workspace_summary:
             sections.append("Workspace agent findings:\n" + workspace_summary)
 
-        if route.reasons:
+        if self._should_include_router_notes(route):
             sections.append("Router notes:\n- " + "\n- ".join(route.reasons))
 
         if results:
@@ -234,4 +248,13 @@ class PromptBuilder:
         return any(
             phrase in lowered
             for phrase in {"teach me", "walk me through", "show me how", "how do i", "how to"}
+        )
+
+    def _should_include_router_notes(self, route: RouteDecision) -> bool:
+        return bool(
+            route.agent_run
+            or route.specialist_model
+            or route.proposed_tool
+            or route.needs_retrieval
+            or route.is_follow_up
         )

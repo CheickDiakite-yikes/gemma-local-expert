@@ -79,7 +79,8 @@ def test_orchestrator_uses_specialist_visual_analysis_in_mock_response(tmp_path:
             event for event in events if event.type == StreamEventType.ASSISTANT_MESSAGE_COMPLETED
         ]
         assert completed
-        assert "Visible interface text: Ask ChatGPT" in completed[0].payload["text"]
+        assert "ask chatgpt" in completed[0].payload["text"].lower()
+        assert "available specialist analysis" not in completed[0].payload["text"].lower()
         assert completed[0].payload["models"]["specialist_backend"] == "fake"
     finally:
         container.store.close()
@@ -136,7 +137,110 @@ def test_orchestrator_reuses_recent_image_context_for_follow_up(tmp_path: Path) 
         ]
         assert completed
         assert "oral rehydration salts" in completed[0].payload["text"]
+        assert "available specialist analysis" not in completed[0].payload["text"].lower()
         assert completed[0].payload["models"]["specialist_backend"] == "fake"
+    finally:
+        container.store.close()
+
+
+def test_orchestrator_supports_normal_conversation_without_retrieval_warning(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(database_path=str(tmp_path / "orchestrator-general.db"))
+    container = build_container(settings)
+    try:
+        conversation = container.store.create_conversation(
+            ConversationCreateRequest(title="General", mode=AssistantMode.GENERAL)
+        )
+        request = ConversationTurnRequest(
+            conversation_id=conversation.id,
+            mode=AssistantMode.GENERAL,
+            text="Hey, can we just talk normally for a minute?",
+        )
+
+        events = asyncio.run(_collect_events(container, request))
+        completed = [
+            event for event in events if event.type == StreamEventType.ASSISTANT_MESSAGE_COMPLETED
+        ]
+        assert completed
+        text = completed[0].payload["text"]
+        assert "talk normally" in text.lower()
+        assert "retrieved local sources" not in text.lower()
+    finally:
+        container.store.close()
+
+
+def test_orchestrator_follow_up_turn_keeps_conversation_continuity_with_mock_runtime(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(database_path=str(tmp_path / "orchestrator-follow-up-general.db"))
+    container = build_container(settings)
+    try:
+        conversation = container.store.create_conversation(
+            ConversationCreateRequest(title="General Follow-up", mode=AssistantMode.GENERAL)
+        )
+        first_turn = ConversationTurnRequest(
+            conversation_id=conversation.id,
+            mode=AssistantMode.GENERAL,
+            text="Can we just talk normally here too?",
+        )
+        second_turn = ConversationTurnRequest(
+            conversation_id=conversation.id,
+            mode=AssistantMode.GENERAL,
+            text="What do you mean by that?",
+        )
+
+        asyncio.run(_collect_events(container, first_turn))
+        events = asyncio.run(_collect_events(container, second_turn))
+        completed = [
+            event for event in events if event.type == StreamEventType.ASSISTANT_MESSAGE_COMPLETED
+        ]
+        assert completed
+        assert "keep the conversation natural" in completed[0].payload["text"].lower()
+    finally:
+        container.store.close()
+
+
+def test_orchestrator_workspace_summary_reads_like_assistant_synthesis(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    (workspace_root / "field-prep.md").write_text(
+        "Field prep checklist\nPack oral rehydration salts\nPack backup batteries\n",
+        encoding="utf-8",
+    )
+    (workspace_root / "route-notes.md").write_text(
+        "Village route briefing\nConfirm translator contact sheet before departure.\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings(
+        database_path=str(tmp_path / "orchestrator-workspace.db"),
+        workspace_root=str(workspace_root),
+    )
+    container = build_container(settings)
+    try:
+        conversation = container.store.create_conversation(
+            ConversationCreateRequest(title="Workspace", mode=AssistantMode.RESEARCH)
+        )
+        request = ConversationTurnRequest(
+            conversation_id=conversation.id,
+            mode=AssistantMode.RESEARCH,
+            text="Search this workspace and summarize the field prep docs.",
+        )
+
+        events = asyncio.run(_collect_events(container, request))
+        completed = [
+            event for event in events if event.type == StreamEventType.ASSISTANT_MESSAGE_COMPLETED
+        ]
+        assert completed
+        text = completed[0].payload["text"]
+        assert "I reviewed" in text
+        assert "Key points:" in text
+        assert "Files reviewed:" in text
+        assert "Goal:" not in text
+        assert "Workspace scope:" not in text
     finally:
         container.store.close()
 

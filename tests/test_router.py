@@ -1,4 +1,11 @@
-from engine.contracts.api import AssetCareContext, AssetKind, AssetSummary, AssistantMode, ConversationTurnRequest
+from engine.contracts.api import (
+    AssetCareContext,
+    AssetKind,
+    AssetSummary,
+    AssistantMode,
+    ConversationMessage,
+    ConversationTurnRequest,
+)
 from engine.routing.service import RouterService
 from engine.tools.registry import ToolRegistry
 
@@ -146,3 +153,115 @@ def test_workspace_agent_turn_routes_to_agent_path() -> None:
 
     assert route.agent_run is True
     assert route.needs_retrieval is False
+
+
+def test_general_conversation_stays_on_general_path() -> None:
+    router = RouterService(ToolRegistry())
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.GENERAL,
+        text="Hey, can we just talk normally for a minute?",
+    )
+
+    route = router.decide(request)
+
+    assert route.needs_retrieval is False
+    assert route.specialist_model is None
+    assert route.proposed_tool is None
+    assert route.interaction_kind == "conversation"
+
+
+def test_follow_up_short_turn_is_marked_as_follow_up() -> None:
+    router = RouterService(ToolRegistry())
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.GENERAL,
+        text="What do you mean by that?",
+    )
+
+    route = router.decide(
+        request,
+        history=[
+            ConversationMessage(
+                role="assistant",
+                content="You can talk normally here or switch into local task work.",
+            )
+        ],
+    )
+
+    assert route.is_follow_up is True
+    assert route.interaction_kind == "conversation"
+
+
+def test_field_teaching_request_can_trigger_local_retrieval() -> None:
+    router = RouterService(ToolRegistry())
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.FIELD,
+        text="Teach me how to prepare oral rehydration solution in the field.",
+    )
+
+    route = router.decide(request)
+
+    assert route.interaction_kind == "teaching"
+    assert route.needs_retrieval is True
+
+
+def test_workspace_request_overrides_recent_video_context() -> None:
+    router = RouterService(ToolRegistry())
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.RESEARCH,
+        text="Prepare a briefing from the relevant workspace files.",
+    )
+
+    route = router.decide(
+        request,
+        assets=[
+            AssetSummary(
+                id="asset_video",
+                display_name="mine.mov",
+                source_path="mine.mov",
+                kind=AssetKind.VIDEO,
+                care_context=AssetCareContext.GENERAL,
+            )
+        ],
+        history=[
+            ConversationMessage(role="assistant", content="Reviewed the attached mining clip.")
+        ],
+    )
+
+    assert route.agent_run is True
+    assert route.specialist_model is None
+
+
+def test_topic_reset_overrides_recent_image_context() -> None:
+    router = RouterService(ToolRegistry())
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.GENERAL,
+        text="Also, can we switch topics and just chat normally again for a second?",
+    )
+
+    route = router.decide(
+        request,
+        assets=[
+            AssetSummary(
+                id="asset_image",
+                display_name="board.png",
+                source_path="board.png",
+                kind=AssetKind.IMAGE,
+                care_context=AssetCareContext.GENERAL,
+            )
+        ],
+        history=[
+            ConversationMessage(
+                role="assistant",
+                content="Visible text extracted from the image: Lantern batteries low.",
+            )
+        ],
+    )
+
+    assert route.interaction_kind == "conversation"
+    assert route.specialist_model is None
+    assert route.is_follow_up is False

@@ -5,6 +5,8 @@ from fastapi.testclient import TestClient
 
 from engine.api.app import build_container, create_app
 from engine.config.settings import Settings
+from engine.models.video import VideoAnalysisResult
+from engine.models.vision import VisionAnalysisResult
 
 
 def test_health_endpoint(tmp_path: Path) -> None:
@@ -426,6 +428,131 @@ def test_capabilities_endpoint_reports_runtime_truth(tmp_path: Path) -> None:
     assert "ffmpeg_available" in payload
 
 
+def test_general_conversation_turn_reads_naturally_without_retrieval_disclaimer(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(database_path=str(tmp_path / "test-general-conversation.db"))
+    client = TestClient(create_app(settings))
+    conversation = client.post(
+        "/v1/conversations",
+        json={"title": "General", "mode": "general"},
+    ).json()
+
+    response = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "general",
+            "text": "Hey, can we just talk normally for a minute?",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+        },
+    )
+
+    assert response.status_code == 200
+    assert "talk normally" in response.text.lower()
+    assert "retrieved local sources" not in response.text.lower()
+
+
+def test_long_mixed_conversation_handles_general_follow_up_and_workspace_action(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    (workspace_root / "field-prep.md").write_text(
+        "Field prep checklist\nPack oral rehydration salts\nPack backup batteries\n",
+        encoding="utf-8",
+    )
+    (workspace_root / "route-notes.md").write_text(
+        "Village route briefing\nConfirm translator contact sheet before departure.\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings(
+        database_path=str(tmp_path / "test-long-mixed.db"),
+        workspace_root=str(workspace_root),
+    )
+    client = TestClient(create_app(settings))
+    conversation = client.post(
+        "/v1/conversations",
+        json={"title": "Mixed", "mode": "research"},
+    ).json()
+
+    first = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Hey, can we talk normally while you help me think through field work?",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+        },
+    )
+    assert first.status_code == 200
+    assert "talk normally" in first.text.lower()
+
+    second = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "What do you mean by that?",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+        },
+    )
+    assert second.status_code == 200
+    assert "keep the conversation natural" in second.text.lower()
+
+    third = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Prepare a briefing from the relevant workspace files.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+    assert third.status_code == 200
+    lines = [json.loads(line) for line in third.text.splitlines() if line.strip()]
+    approval_event = next(line for line in lines if line["type"] == "approval.required")
+    approval_id = approval_event["payload"]["id"]
+    approval_content = approval_event["payload"]["payload"]["content"]
+    assert "Key points:" in approval_content
+    assert "Files reviewed:" in approval_content
+    assert "Goal:" not in approval_content
+    assert "Workspace scope:" not in approval_content
+
+    decision = client.post(
+        f"/v1/approvals/{approval_id}/decisions",
+        json={
+            "action": "approve",
+            "edited_payload": {
+                "title": "Reviewed field briefing",
+                "content": "Reviewed field briefing\n- Pack oral rehydration salts\n- Confirm translator contact sheet before departure\n",
+            },
+        },
+    )
+    assert decision.status_code == 200
+
+    transcript = client.get(f"/v1/conversations/{conversation['id']}/messages").json()
+    assert len(transcript) == 6
+    assert [message["role"] for message in transcript] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+    assert transcript[-1]["approval"]["status"] == "executed"
+
+
 def test_workspace_agent_turn_persists_completed_run(tmp_path: Path) -> None:
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
@@ -461,7 +588,10 @@ def test_workspace_agent_turn_persists_completed_run(tmp_path: Path) -> None:
     )
 
     assert response.status_code == 200
-    assert "workspace-agent findings" in response.text or "Workspace scope" in response.text
+    assert "I reviewed" in response.text
+    assert "Key points:" in response.text
+    assert "Goal:" not in response.text
+    assert "Workspace scope:" not in response.text
 
     runs_response = client.get(f"/v1/conversations/{conversation['id']}/runs")
     assert runs_response.status_code == 200
@@ -547,6 +677,157 @@ def test_workspace_agent_briefing_requires_approval_and_completes_after_decision
     assert notes
     assert notes[0]["title"] == "Edited workspace briefing"
     assert "Confirm the village route before departure" in notes[0]["content"]
+
+
+def test_multimodal_conversation_handles_topic_pivots_follow_ups_and_workspace_output(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    (workspace_root / "field-prep.md").write_text(
+        "Field prep checklist\nPack oral rehydration salts\nPack backup batteries\n",
+        encoding="utf-8",
+    )
+    (workspace_root / "route-notes.md").write_text(
+        "Village route briefing\nConfirm translator contact sheet before departure.\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings(
+        database_path=str(tmp_path / "test-multimodal-mixed.db"),
+        workspace_root=str(workspace_root),
+        asset_storage_dir=str(tmp_path / "uploads"),
+        specialist_backend="mock",
+        tracking_backend="mock",
+    )
+    app = create_app(settings)
+
+    class FakeVisionRuntime:
+        backend_name = "fake-vision"
+
+        def analyze(self, request):
+            return VisionAnalysisResult(
+                text=(
+                    "Visible text extracted from the image:\n"
+                    "Lantern batteries low\n"
+                    "Translator phone credits low"
+                ),
+                backend="fake-vision",
+                model_name=request.specialist_model_name,
+                model_source="/tmp/fake-paligemma",
+                available=True,
+            )
+
+    class FakeVideoRuntime:
+        backend_name = "fake-video"
+
+        def analyze(self, request):
+            return VideoAnalysisResult(
+                text=(
+                    "Reviewed the attached mining clip conservatively. "
+                    "I can see workers near excavation equipment and repeated tool handling around the pit edge."
+                ),
+                backend="fake-video",
+                model_name=request.tracking_model_name,
+                model_source="/tmp/fake-sam",
+                available=True,
+            )
+
+    app.state.container.orchestrator.vision_runtime = FakeVisionRuntime()
+    app.state.container.orchestrator.video_runtime = FakeVideoRuntime()
+    client = TestClient(app)
+
+    image_asset = client.post(
+        "/v1/assets/upload",
+        data={"care_context": "general"},
+        files={"file": ("board.png", _tiny_png_bytes(), "image/png")},
+    ).json()["asset"]
+    video_asset = client.post(
+        "/v1/assets/upload",
+        data={"care_context": "general"},
+        files={"file": ("mine.mov", b"fake-video-bytes", "video/quicktime")},
+    ).json()["asset"]
+
+    conversation = client.post(
+        "/v1/conversations",
+        json={"title": "Multimodal Mixed", "mode": "research"},
+    ).json()
+
+    turn_responses: list[str] = []
+    approval_id = None
+    approval_content = None
+
+    turns = [
+        ("Hey, can we just think out loud for a second?", []),
+        ("Teach me how to prepare oral rehydration solution in the field.", []),
+        ("What should I emphasize first to a volunteer with no medical training?", []),
+        ("Describe the attached supply image conservatively.", [image_asset["id"]]),
+        ("Which two shortages matter most before departure?", []),
+        ("Also, can we switch topics and just chat normally again for a second?", []),
+        ("Review the attached mining video conservatively.", [video_asset["id"]]),
+        ("Prepare a briefing from the relevant workspace files and save it as a note.", []),
+    ]
+
+    for text, asset_ids in turns:
+        response = client.post(
+            f"/v1/conversations/{conversation['id']}/turns",
+            json={
+                "conversation_id": conversation["id"],
+                "mode": "research",
+                "text": text,
+                "asset_ids": asset_ids,
+                "enabled_knowledge_pack_ids": [],
+                "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+            },
+        )
+        assert response.status_code == 200
+        turn_responses.append(response.text)
+        if '"type":"approval.required"' in response.text:
+            approval_line = next(
+                json.loads(line)
+                for line in response.text.splitlines()
+                if '"type":"approval.required"' in line
+            )
+            approval_id = approval_line["payload"]["id"]
+            approval_content = approval_line["payload"]["payload"]["content"]
+
+    assert "talk normally" in turn_responses[0].lower()
+    assert "ors guidance" in turn_responses[1].lower()
+    assert "most practical first point" in turn_responses[2].lower()
+    assert "from the image" in turn_responses[3].lower()
+    assert "lantern batteries low" in turn_responses[3].lower()
+    assert "two clearest shortages" in turn_responses[4].lower()
+    assert "translator phone credits" in turn_responses[4].lower()
+    assert any(
+        phrase in turn_responses[5].lower()
+        for phrase in {"talk normally", "normal conversation"}
+    )
+    assert "workers near excavation equipment" in turn_responses[6].lower()
+    assert "available specialist analysis" not in turn_responses[3].lower()
+    assert "available specialist analysis" not in turn_responses[6].lower()
+    assert approval_id is not None
+    assert approval_content is not None
+    assert "Key points:" in approval_content
+    assert "Files reviewed:" in approval_content
+    assert "Goal:" not in approval_content
+    assert "Workspace scope:" not in approval_content
+
+    decision = client.post(
+        f"/v1/approvals/{approval_id}/decisions",
+        json={"action": "approve", "edited_payload": {}},
+    )
+    assert decision.status_code == 200
+
+    transcript = client.get(f"/v1/conversations/{conversation['id']}/messages").json()
+    assert len(transcript) == 16
+    assert transcript[-1]["approval"]["status"] == "executed"
+
+    notes = client.get("/v1/notes").json()
+    assert notes
+    assert "Key points:" in notes[0]["content"]
+    assert "Files reviewed:" in notes[0]["content"]
+    assert "Goal:" not in notes[0]["content"]
+    assert "Workspace scope:" not in notes[0]["content"]
 
 
 def _tiny_png_bytes() -> bytes:

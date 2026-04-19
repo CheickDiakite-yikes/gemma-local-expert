@@ -325,27 +325,120 @@ class WorkspaceAgentService:
         plan: WorkspaceAgentPlan,
         state: WorkspaceAgentState,
     ) -> str:
-        sections = [
-            f"Goal: {plan.goal}",
-            f"Workspace scope: {self._display_scope(Path(plan.scope_root))}",
-        ]
-        if state.top_entries:
-            sections.append("Top-level scope entries:\n- " + "\n- ".join(state.top_entries))
-        if state.read_documents:
-            document_blocks = []
-            for document in state.read_documents[: self.max_file_reads]:
-                cleaned_excerpt = self._compact_excerpt(document.excerpt)
-                document_blocks.append(
-                    f"[{document.relative_path}] score={document.score:.2f}\n{cleaned_excerpt}"
-                )
-            sections.append("Workspace findings:\n" + "\n\n".join(document_blocks))
-        else:
-            sections.append("Workspace findings:\nNo readable candidate files were available.")
+        scope_display = self._display_scope(Path(plan.scope_root))
+        if not state.read_documents:
+            summary = (
+                "I reviewed the allowed workspace scope"
+                + (f" in {scope_display}" if scope_display != "." else "")
+                + ", but I did not find readable files that strongly matched the request."
+            )
+            if state.top_entries:
+                summary += "\n\nVisible scope entries:\n- " + "\n- ".join(state.top_entries[:5])
+            return summary[: self.max_context_chars - 1].rstrip() + "…" if len(summary) > self.max_context_chars else summary
 
-        summary = "\n\n".join(sections).strip()
+        key_points = self._key_points_from_documents(state.read_documents)
+        reviewed_files = [document.relative_path for document in state.read_documents[: self.max_file_reads]]
+        sections = [
+            self._overview_sentence(plan.goal, reviewed_files, scope_display),
+        ]
+        if key_points:
+            sections.append("Key points:\n- " + "\n- ".join(key_points))
+        sections.append("Files reviewed:\n- " + "\n- ".join(reviewed_files))
+
+        summary = "\n\n".join(section.strip() for section in sections if section.strip()).strip()
         if len(summary) <= self.max_context_chars:
             return summary
         return summary[: self.max_context_chars - 1].rstrip() + "…"
+
+    def _overview_sentence(
+        self,
+        goal: str,
+        reviewed_files: list[str],
+        scope_display: str,
+    ) -> str:
+        file_count = len(reviewed_files)
+        goal_phrase = self._goal_phrase(goal)
+        scope_phrase = (
+            f" in {scope_display}"
+            if scope_display not in {".", ""}
+            else " in the workspace"
+        )
+        return (
+            f"I reviewed {file_count} workspace file"
+            f"{'' if file_count == 1 else 's'}{scope_phrase} and pulled together the "
+            f"most relevant points for {goal_phrase}."
+        )
+
+    def _goal_phrase(self, goal: str) -> str:
+        cleaned = re.sub(
+            r"^(please\s+)?(search|find|summarize|prepare|create|write|draft|make|build|review)\s+",
+            "",
+            goal.strip(),
+            flags=re.I,
+        ).strip(" .")
+        if not cleaned:
+            return "the request"
+        lowered = cleaned.lower()
+        if lowered.startswith(("a ", "an ", "the ", "this ", "that ")):
+            return cleaned
+        return f"the request to {cleaned}"
+
+    def _key_points_from_documents(
+        self,
+        documents: list[WorkspaceReadDocument],
+    ) -> list[str]:
+        points: list[str] = []
+        seen: set[str] = set()
+        for document in documents:
+            for point in self._document_points(document):
+                normalized = point.lower()
+                if normalized in seen:
+                    continue
+                seen.add(normalized)
+                points.append(point)
+                if len(points) == 6:
+                    return points
+        return points
+
+    def _document_points(self, document: WorkspaceReadDocument) -> list[str]:
+        lines = [
+            self._clean_summary_line(raw_line)
+            for raw_line in document.excerpt.splitlines()
+        ]
+        lines = [line for line in lines if line]
+        if not lines:
+            return []
+
+        points: list[str] = []
+        body_lines = lines[1:] if len(lines) > 1 else lines
+        candidate_lines = body_lines or lines
+        for line in candidate_lines:
+            if len(line) < 8:
+                continue
+            if self._looks_like_heading(line) and len(candidate_lines) > 1:
+                continue
+            points.append(line)
+            if len(points) == 2:
+                break
+
+        if not points and lines:
+            points.append(lines[0])
+
+        return points
+
+    def _clean_summary_line(self, line: str) -> str:
+        cleaned = line.strip().strip("*").strip()
+        cleaned = re.sub(r"^[\-\u2022]\s*", "", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned)
+        return cleaned.rstrip(" .")
+
+    def _looks_like_heading(self, line: str) -> bool:
+        if ":" in line:
+            return False
+        words = line.split()
+        if len(words) > 6:
+            return False
+        return line == line.title() or line.isupper()
 
     def _resolve_scope_root(self, goal: str) -> Path:
         requested = self._extract_scope_hint(goal)

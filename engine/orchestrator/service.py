@@ -87,7 +87,7 @@ class OrchestratorService:
             asset_ids=attached_asset_ids,
             turn_id=turn_id,
         )
-        route = self.router.decide(turn, assets=routed_assets)
+        route = self.router.decide(turn, assets=routed_assets, history=history)
         if contextual_assets:
             route.reasons.append("Using recent image attachment from conversation context.")
         policy = self.policy.evaluate(turn, route)
@@ -529,6 +529,8 @@ class OrchestratorService:
                 user_text=turn.text,
                 messages=prompt_context.messages,
                 citations=results,
+                interaction_kind=route.interaction_kind,
+                is_follow_up=route.is_follow_up,
                 proposed_tool=planned_tool_name,
                 approval_required=approval_required,
                 tool_result=tool_result,

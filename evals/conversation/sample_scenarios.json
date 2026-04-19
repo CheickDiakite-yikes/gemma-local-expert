@@ -1,0 +1,61 @@
+[
+  {
+    "id": "general_follow_up_conversation",
+    "title": "General Follow-up",
+    "mode": "general",
+    "turns": [
+      {"text": "Hey, can we just talk normally for a minute?"},
+      {"text": "What do you mean by that?"}
+    ],
+    "expected_assistant_turns": 2,
+    "expected_contains": [
+      "talk normally",
+      "keep the conversation natural"
+    ]
+  },
+  {
+    "id": "research_teaching_then_follow_up",
+    "title": "Teaching Follow-up",
+    "mode": "research",
+    "turns": [
+      {"text": "Teach me how to prepare oral rehydration solution in the field."},
+      {"text": "What should I emphasize first to a volunteer with no medical training?"}
+    ],
+    "expected_assistant_turns": 2,
+    "expected_contains": [
+      "ORS Guidance",
+      "Most relevant source"
+    ]
+  },
+  {
+    "id": "mixed_multimodal_workspace_conversation",
+    "title": "Mixed Multimodal Workspace",
+    "mode": "research",
+    "turns": [
+      {"text": "Hey, can we just think out loud for a second?"},
+      {"text": "Teach me how to prepare oral rehydration solution in the field."},
+      {"text": "What should I emphasize first to a volunteer with no medical training?"},
+      {"text": "Describe the attached supply image conservatively.", "assets": ["image"]},
+      {"text": "Which two shortages matter most before departure?"},
+      {"text": "Also, can we switch topics and just chat normally again for a second?"},
+      {"text": "Review the attached mining video conservatively.", "assets": ["video"]},
+      {"text": "Prepare a briefing from the relevant workspace files."}
+    ],
+    "approve_last_tool": true,
+    "expected_assistant_turns": 8,
+    "expected_contains": [
+      "talk normally",
+      "ORS Guidance",
+      "Lantern batteries low",
+      "workers near excavation equipment"
+    ],
+    "expected_approval_contains": [
+      "Key points:",
+      "Files reviewed:"
+    ],
+    "expected_note_contains": [
+      "Key points:",
+      "Files reviewed:"
+    ]
+  }
+]
