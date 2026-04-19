@@ -11,6 +11,7 @@ const state = {
   agentRuns: new Map(),
   approvals: new Map(),
   approvalDrafts: new Map(),
+  approvalPanels: new Map(),
   runPanels: new Map(),
   capabilities: null,
   medicalSessions: new Map(),
@@ -34,6 +35,7 @@ const state = {
 
 const STORAGE_KEYS = {
   approvalDrafts: "field-assistant.approval-drafts.v1",
+  approvalPanels: "field-assistant.approval-panels.v1",
   runPanels: "field-assistant.run-panels.v2",
   activeConversation: "field-assistant.active-conversation.v1",
 };
@@ -128,6 +130,9 @@ function saveStoredRecord(key, value) {
 
 function loadPersistedUiState() {
   state.approvalDrafts = new Map(Object.entries(loadStoredRecord(STORAGE_KEYS.approvalDrafts)));
+  state.approvalPanels = new Map(
+    Object.entries(loadStoredRecord(STORAGE_KEYS.approvalPanels)).map(([key, value]) => [key, Boolean(value)]),
+  );
   state.runPanels = new Map(
     Object.entries(loadStoredRecord(STORAGE_KEYS.runPanels)).map(([key, value]) => [key, Boolean(value)]),
   );
@@ -138,6 +143,10 @@ function loadPersistedUiState() {
 
 function persistApprovalDrafts() {
   saveStoredRecord(STORAGE_KEYS.approvalDrafts, Object.fromEntries(state.approvalDrafts));
+}
+
+function persistApprovalPanels() {
+  saveStoredRecord(STORAGE_KEYS.approvalPanels, Object.fromEntries(state.approvalPanels));
 }
 
 function persistRunPanels() {
@@ -310,6 +319,240 @@ function approvalDraftStateText({ dirty = false, invalid = false } = {}) {
     return "JSON needs fixing";
   }
   return dirty ? "Local edits" : "Original";
+}
+
+function approvalPanelKey(approvalId, section) {
+  return `${approvalId}:${section}`;
+}
+
+function approvalPanelPreference(approvalId, section) {
+  return state.approvalPanels.get(approvalPanelKey(approvalId, section));
+}
+
+function isApprovalSectionExpanded(approval, section) {
+  const saved = approvalPanelPreference(approval.id, section);
+  if (typeof saved === "boolean") {
+    return saved;
+  }
+  return false;
+}
+
+function setApprovalSectionExpanded(approvalId, section, expanded) {
+  state.approvalPanels.set(approvalPanelKey(approvalId, section), Boolean(expanded));
+  persistApprovalPanels();
+}
+
+function approvalStatusLabel(status) {
+  switch (status) {
+    case "pending":
+      return "Ready to save";
+    case "executed":
+      return "Saved locally";
+    case "rejected":
+      return "Skipped";
+    case "failed":
+      return "Save failed";
+    default:
+      return humanizeRunStatus(status || "pending");
+  }
+}
+
+function approvalStatusKicker(status) {
+  switch (status) {
+    case "pending":
+      return "Review draft";
+    case "executed":
+      return "Saved";
+    case "rejected":
+      return "Not saved";
+    case "failed":
+      return "Needs attention";
+    default:
+      return "Action update";
+  }
+}
+
+function approvalSurfaceTitle(toolName) {
+  switch (toolName) {
+    case "create_note":
+      return "Save note";
+    case "create_checklist":
+      return "Save checklist";
+    case "create_task":
+      return "Save task";
+    case "log_observation":
+      return "Save observation";
+    default:
+      return humanizeToolName(toolName);
+  }
+}
+
+function approvalSurfaceNoun(toolName) {
+  switch (toolName) {
+    case "create_note":
+      return "note";
+    case "create_checklist":
+      return "checklist";
+    case "create_task":
+      return "task";
+    case "log_observation":
+      return "observation";
+    default:
+      return "draft";
+  }
+}
+
+function approvalReasonCopy(approval) {
+  if (!approval) {
+    return "";
+  }
+  if (approval.status === "executed") {
+    return "The local write completed and the result is now saved in this workspace.";
+  }
+  if (approval.status === "rejected") {
+    return "The draft was reviewed but not saved locally.";
+  }
+  if (approval.status === "failed") {
+    return "The local write did not finish cleanly.";
+  }
+  switch (approval.tool_name) {
+    case "create_checklist":
+      return "Review or refine the checklist before it is saved locally.";
+    case "create_task":
+      return "Review or refine the task before it is saved locally.";
+    case "log_observation":
+      return "Review or refine the observation before it is saved locally.";
+    case "create_note":
+      return "Review or refine the note before it is saved locally.";
+    default:
+      return "Review this local draft before it is saved.";
+  }
+}
+
+function stripMarkdownToText(text) {
+  return String(text || "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, " ")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^>\s?/gm, "")
+    .replace(/^[-*+]\s+\[(?: |x)\]\s+/gim, "")
+    .replace(/^[-*+]\s+/gm, "")
+    .replace(/^\d+\.\s+/gm, "")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/\*([^*]+)\*/g, "$1")
+    .replace(/[_~]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function clipCopy(text, size = 180) {
+  const normalized = String(text || "").trim();
+  if (!normalized) {
+    return "";
+  }
+  return normalized.length > size ? `${normalized.slice(0, size - 1).trimEnd()}...` : normalized;
+}
+
+function approvalMeaningfulLines(text) {
+  return String(text || "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => stripMarkdownToText(line))
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter(
+      (line) =>
+        !/^(goal|workspace scope|top-level scope entries|workspace findings|related docs|related local docs|date|status):/i.test(
+          line,
+        ),
+    )
+    .filter((line) => !/^\[[^\]]+\]\s+score=/i.test(line));
+}
+
+function approvalLooksLikeInventoryLine(line) {
+  return (
+    /^\.?[\w/-]+\/?$/.test(line) ||
+    /^[\w./-]+\.(md|txt|json|png|jpe?g|webp|pdf)$/i.test(line) ||
+    /^\[[^\]]+\](\([^)]+\))?$/i.test(line)
+  );
+}
+
+function approvalPayloadExcerpt(approval, payload) {
+  if (!payload) {
+    return "";
+  }
+  const source = payload.content || payload.details || "";
+  if (source) {
+    const meaningful = approvalMeaningfulLines(source);
+    const filtered = meaningful.filter((line) => !approvalLooksLikeInventoryLine(line));
+    const preferred =
+      filtered.find((line) => line.length >= 48 && /[.?!]$/.test(line)) ||
+      filtered.find((line) => line.length >= 48) ||
+      filtered.find((line) => line.length >= 24) ||
+      filtered.slice(0, 2).join(" ");
+    const normalized = preferred || stripMarkdownToText(source);
+    return clipCopy(normalized, 190);
+  }
+  const keys = Object.keys(payload);
+  if (!keys.length) {
+    return "";
+  }
+  return `Contains ${keys.length} saved field${keys.length === 1 ? "" : "s"} for this ${approvalSurfaceNoun(approval.tool_name)}.`;
+}
+
+function approvalPayloadMeta(approval, payload) {
+  const bits = [];
+  if (approval?.tool_name === "create_task" && payload?.status) {
+    bits.push(`Status: ${humanizeRunStatus(payload.status)}`);
+  }
+  if (payload?.content) {
+    const lineCount = String(payload.content)
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean).length;
+    if (lineCount > 1) {
+      bits.push(`${lineCount} lines`);
+    }
+    if (approval?.tool_name === "create_checklist") {
+      const itemCount = String(payload.content)
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => /^[-*+]\s+/.test(line) || /^\d+\.\s+/.test(line)).length;
+      if (itemCount) {
+        bits.push(`${itemCount} items`);
+      }
+    }
+  }
+  return bits;
+}
+
+function approvalSummaryText(approval, overridePayload = undefined) {
+  if (!approval) {
+    return "";
+  }
+  const payload = approvalEffectivePayload(approval, overridePayload);
+  const title = payload?.title ? clipCopy(payload.title, 72) : "";
+  const subject = title ? `"${title}"` : `this ${approvalSurfaceNoun(approval.tool_name)}`;
+  const excerpt = approvalPayloadExcerpt(approval, payload);
+  let lead = "";
+  switch (approval.status) {
+    case "executed":
+      lead = `Saved ${subject} locally.`;
+      break;
+    case "rejected":
+      lead = `Skipped ${subject}.`;
+      break;
+    case "failed":
+      lead = `Could not save ${subject}.`;
+      break;
+    default:
+      lead = `Ready to save ${subject}.`;
+      break;
+  }
+  return [lead, excerpt].filter(Boolean).join(" ");
 }
 
 function saveApprovalDraft(approvalId, payload) {
@@ -743,22 +986,21 @@ function renderApprovalPreview(approval, overridePayload = undefined) {
   const previewTitle = payload.title
     ? `<div class="approval-preview-title">${escapeHtml(payload.title)}</div>`
     : "";
-  let previewBody = "";
-
-  if (payload.kind === "checklist" && payload.content) {
-    previewBody = `<div class="approval-preview-body rich-text">${renderMarkdownBlocks(payload.content)}</div>`;
-  } else if (payload.content) {
-    previewBody = `<div class="approval-preview-body rich-text">${renderMarkdownBlocks(payload.content)}</div>`;
-  } else if (payload.details) {
-    previewBody = `<div class="approval-preview-body rich-text"><p>${renderPlainText(payload.details)}</p></div>`;
-  } else {
-    previewBody = `<pre class="approval-json">${escapeHtml(JSON.stringify(payload, null, 2))}</pre>`;
-  }
+  const previewSummary = approvalPayloadExcerpt(approval, payload);
+  const meta = approvalPayloadMeta(approval, payload)
+    .map((bit) => `<span>${escapeHtml(bit)}</span>`)
+    .join("");
+  const helperCopy =
+    approval.status === "pending"
+      ? "Open Edit to inspect or refine the full draft before saving."
+      : "This is the saved draft summary for the completed action.";
 
   return `
     <section class="approval-preview">
       ${previewTitle}
-      ${previewBody}
+      ${previewSummary ? `<p class="approval-preview-summary">${escapeHtml(previewSummary)}</p>` : ""}
+      ${meta ? `<div class="approval-preview-meta">${meta}</div>` : ""}
+      <p class="approval-preview-note">${escapeHtml(helperCopy)}</p>
     </section>
   `;
 }
@@ -875,7 +1117,7 @@ function renderApprovalResult(result) {
     resultBits.push(`<strong>${escapeHtml(result.title)}</strong>`);
   }
   if (result.status) {
-    resultBits.push(`Status: ${escapeHtml(result.status)}`);
+    resultBits.push(`${escapeHtml(humanizeRunStatus(result.status))}`);
   }
 
   if (!resultBits.length) {
@@ -1268,7 +1510,7 @@ function renderMessages() {
       )
       .join("");
 
-    const toolChip = message.proposedTool
+    const toolChip = message.proposedTool && !message.approval
       ? `<span class="tool-chip">Prepared ${escapeHtml(message.proposedTool)}</span>`
       : "";
 
@@ -1318,26 +1560,69 @@ function renderApprovalMarkup(approval) {
     return "";
   }
 
+  const previewExpanded = isApprovalSectionExpanded(approval, "preview");
+  const editorExpanded = approval.status === "pending" ? isApprovalSectionExpanded(approval, "editor") : false;
+  const sectionControls = `
+    <div class="approval-view-switch">
+      <button
+        class="approval-view-toggle${previewExpanded ? " is-active" : ""}"
+        data-approval-section-toggle="preview"
+        data-approval-id="${approval.id}"
+        type="button"
+      >
+        Draft
+      </button>
+      ${
+        approval.status === "pending"
+          ? `
+        <button
+          class="approval-view-toggle${editorExpanded ? " is-active" : ""}"
+          data-approval-section-toggle="editor"
+          data-approval-id="${approval.id}"
+          type="button"
+        >
+          Edit
+        </button>
+      `
+          : ""
+      }
+    </div>
+  `;
+
   const actions =
     approval.status === "pending"
       ? `
         <div class="approval-actions">
-          <button class="approval-action approve" data-approval-action="approve" data-approval-id="${approval.id}" type="button">Approve</button>
-          <button class="approval-action reject" data-approval-action="reject" data-approval-id="${approval.id}" type="button">Reject</button>
+          <button class="approval-action approve" data-approval-action="approve" data-approval-id="${approval.id}" type="button">Save locally</button>
+          <button class="approval-action reject" data-approval-action="reject" data-approval-id="${approval.id}" type="button">Not now</button>
         </div>
       `
       : "";
 
   return `
-    <section class="approval-card">
+    <section class="approval-card is-${escapeHtml(approval.status)}">
       <div class="approval-header">
-        <span class="approval-kicker">${approval.status === "pending" ? "Approval needed" : "Action update"}</span>
-        <h4>${escapeHtml(humanizeToolName(approval.tool_name))}</h4>
-        <p>${escapeHtml(approval.reason)}</p>
+        <span class="approval-kicker">${approvalStatusKicker(approval.status)}</span>
+        <h4>${escapeHtml(approvalSurfaceTitle(approval.tool_name))}</h4>
+        <p>${escapeHtml(approvalReasonCopy(approval))}</p>
       </div>
-      ${renderApprovalEditor(approval)}
-      ${renderApprovalPreviewSlot(approval)}
-      <div class="approval-status is-${escapeHtml(approval.status)}" data-approval-status>Status: ${escapeHtml(approval.status)}</div>
+      <div class="approval-toolbar">
+        <div class="approval-status is-${escapeHtml(approval.status)}" data-approval-status>${escapeHtml(approvalStatusLabel(approval.status))}</div>
+        ${sectionControls}
+      </div>
+      <p class="approval-summary">${escapeHtml(approvalSummaryText(approval))}</p>
+      <div class="approval-section approval-section-preview"${previewExpanded ? "" : " hidden"}>
+        ${renderApprovalPreviewSlot(approval)}
+      </div>
+      ${
+        approval.status === "pending"
+          ? `
+        <div class="approval-section approval-section-editor"${editorExpanded ? "" : " hidden"}>
+          ${renderApprovalEditor(approval)}
+        </div>
+      `
+          : ""
+      }
       ${renderApprovalResult(approval.result)}
       ${actions}
     </section>
@@ -1408,6 +1693,7 @@ function refreshApprovalCardState(container, approval, collected = undefined) {
   const dirty = approvalHasDraftChanges(approval, currentEdit);
   if (dirty) {
     saveApprovalDraft(approval.id, currentEdit);
+    setApprovalSectionExpanded(approval.id, "editor", true);
   } else {
     clearApprovalDraft(approval.id);
   }
@@ -1428,12 +1714,24 @@ function refreshApprovalCardState(container, approval, collected = undefined) {
   }
 }
 
+function resizeApprovalTextareas(container) {
+  for (const textarea of container.querySelectorAll(".approval-editor textarea")) {
+    const minHeight = textarea.dataset.approvalJson !== undefined ? 132 : 96;
+    const maxHeight = window.innerWidth <= 640 ? 220 : 280;
+    textarea.style.height = "auto";
+    const nextHeight = Math.min(Math.max(textarea.scrollHeight, minHeight), maxHeight);
+    textarea.style.height = `${nextHeight}px`;
+    textarea.classList.toggle("is-overflowing", textarea.scrollHeight > maxHeight + 4);
+  }
+}
+
 function wireApprovalActions(container, approval) {
   const editor = container.querySelector(`[data-approval-editor="${approval.id}"]`);
   if (editor) {
     for (const field of editor.querySelectorAll("[data-approval-field], [data-approval-json]")) {
       field.addEventListener("input", () => {
         refreshApprovalCardState(container, approval);
+        resizeApprovalTextareas(container);
       });
     }
     const resetButton = editor.querySelector("[data-approval-reset]");
@@ -1443,15 +1741,19 @@ function wireApprovalActions(container, approval) {
         render();
       });
     }
-    for (const textarea of editor.querySelectorAll("textarea")) {
-      textarea.addEventListener("input", () => {
-        textarea.style.height = "auto";
-        textarea.style.height = `${Math.max(textarea.scrollHeight, 112)}px`;
-      });
-      textarea.style.height = "auto";
-      textarea.style.height = `${Math.max(textarea.scrollHeight, 112)}px`;
-    }
+    resizeApprovalTextareas(container);
     refreshApprovalCardState(container, approval);
+  }
+
+  for (const toggle of container.querySelectorAll("[data-approval-section-toggle]")) {
+    toggle.addEventListener("click", () => {
+      const section = toggle.dataset.approvalSectionToggle;
+      if (!section) {
+        return;
+      }
+      setApprovalSectionExpanded(approval.id, section, !isApprovalSectionExpanded(approval, section));
+      render();
+    });
   }
 
   const buttons = container.querySelectorAll("[data-approval-action]");
@@ -2305,7 +2607,7 @@ function handleStreamEvent(event) {
   } else if (event.type === "tool.proposed") {
     syncRunFromEvent(event.conversation_id, assistantMessage, event.payload);
     assistantMessage.proposedTool = event.payload.tool_name;
-    const detail = `Prepared ${humanizeToolName(event.payload.tool_name)}.`;
+    const detail = `Draft ready for ${approvalSurfaceNoun(event.payload.tool_name)} review.`;
     mergeMessageProcess(assistantMessage, {
       kind: "tool",
       label: "Prepared local action",

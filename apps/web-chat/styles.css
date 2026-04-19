@@ -895,14 +895,73 @@ a {
   border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 
+.approval-card.is-pending {
+  border-top-color: rgba(211, 139, 88, 0.18);
+}
+
+.approval-card.is-executed {
+  border-top-color: rgba(109, 207, 144, 0.16);
+}
+
 .approval-header {
   display: grid;
   gap: 4px;
 }
 
+.approval-card .approval-summary {
+  font-size: 0.92rem;
+  color: var(--text);
+}
+
+.approval-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.approval-view-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.approval-view-toggle {
+  appearance: none;
+  border: 0;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 0.74rem;
+  letter-spacing: 0.02em;
+  transition:
+    background 180ms ease,
+    color 180ms ease,
+    transform 180ms ease;
+}
+
+.approval-view-toggle:hover {
+  transform: translateY(-1px);
+  color: var(--text);
+}
+
+.approval-view-toggle.is-active {
+  background: rgba(211, 139, 88, 0.14);
+  color: var(--text);
+}
+
+.approval-section {
+  display: grid;
+  gap: 8px;
+}
+
 .approval-preview {
   display: grid;
-  gap: 6px;
+  gap: 8px;
   padding: 0 0 0 2px;
 }
 
@@ -912,17 +971,42 @@ a {
   color: var(--text);
 }
 
-.approval-preview-body .message-list {
+.approval-card .approval-preview-summary {
+  color: var(--text);
+  line-height: 1.52;
+}
+
+.approval-preview-meta {
+  display: flex;
+  flex-wrap: wrap;
   gap: 8px;
+}
+
+.approval-preview-meta span {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--text-faint);
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
+}
+
+.approval-card .approval-preview-note {
+  color: var(--text-faint);
+  font-size: 0.8rem;
 }
 
 .approval-editor {
   display: grid;
   gap: 10px;
   padding: 12px 13px;
-  border-radius: 16px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  background: rgba(255, 255, 255, 0.022);
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.018), rgba(255, 255, 255, 0.01)),
+    rgba(255, 255, 255, 0.018);
 }
 
 .approval-editor-copy {
@@ -1053,7 +1137,15 @@ a {
 
 .approval-field textarea {
   min-height: 96px;
+  max-height: min(34vh, 280px);
+  overflow-y: auto;
   resize: vertical;
+}
+
+.approval-field textarea.is-overflowing {
+  box-shadow:
+    inset 0 -20px 20px rgba(0, 0, 0, 0.16),
+    inset 0 1px 0 rgba(255, 255, 255, 0.02);
 }
 
 .approval-field input:focus,
@@ -1128,10 +1220,22 @@ a {
   background: rgba(109, 207, 144, 0.09);
 }
 
+.approval-status.is-rejected {
+  border-color: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-muted);
+}
+
+.approval-status.is-failed {
+  border-color: rgba(255, 143, 143, 0.26);
+  background: rgba(255, 143, 143, 0.1);
+}
+
 .approval-result {
   padding: 0;
   font-size: 0.88rem;
   color: var(--text);
+  line-height: 1.45;
 }
 
 .citation-list,
@@ -1682,6 +1786,11 @@ a {
 
   .approval-field-status {
     justify-self: stretch;
+  }
+
+  .approval-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .agent-run-header {
