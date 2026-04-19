@@ -34,7 +34,7 @@ const state = {
 
 const STORAGE_KEYS = {
   approvalDrafts: "field-assistant.approval-drafts.v1",
-  runPanels: "field-assistant.run-panels.v1",
+  runPanels: "field-assistant.run-panels.v2",
   activeConversation: "field-assistant.active-conversation.v1",
 };
 
@@ -305,6 +305,13 @@ function approvalHasDraftChanges(approval, overridePayload = undefined) {
   return stableSerialize(comparableEffective) !== stableSerialize(comparableBase);
 }
 
+function approvalDraftStateText({ dirty = false, invalid = false } = {}) {
+  if (invalid) {
+    return "JSON needs fixing";
+  }
+  return dirty ? "Local edits" : "Original";
+}
+
 function saveApprovalDraft(approvalId, payload) {
   state.approvalDrafts.set(approvalId, payload);
   persistApprovalDrafts();
@@ -344,7 +351,7 @@ function isRunExpanded(run) {
   if (typeof saved === "boolean") {
     return saved;
   }
-  return run.status !== "completed";
+  return false;
 }
 
 function setRunExpanded(runId, expanded) {
@@ -763,38 +770,41 @@ function renderApprovalEditor(approval) {
 
   const payload = approvalEffectivePayload(approval);
   const isDirty = approvalHasDraftChanges(approval, payload);
+  const draftStateText = approvalDraftStateText({ dirty: isDirty });
   if (approval.tool_name === "create_task") {
     return `
-      <section class="approval-editor" data-approval-editor="${approval.id}">
+      <section class="approval-editor approval-editor-task" data-approval-editor="${approval.id}">
         <div class="approval-editor-header">
-          <div>
-            <strong>Refine before approval</strong>
-            <span>Adjust the saved task before it is written locally.</span>
+          <div class="approval-editor-copy">
+            <strong>Edit draft</strong>
+            <span>Changes stay local until you approve the write.</span>
           </div>
           <div class="approval-editor-controls">
-            <span class="approval-editor-state${isDirty ? " is-dirty" : ""}" data-approval-draft-state>${isDirty ? "Saved locally" : "Original draft"}</span>
-            <button class="approval-editor-reset" data-approval-reset type="button"${isDirty ? "" : " disabled"}>Reset</button>
+            <span class="approval-editor-state${isDirty ? " is-dirty" : ""}" data-approval-draft-state>${draftStateText}</span>
+            <button class="approval-editor-reset" data-approval-reset type="button"${isDirty ? "" : " disabled"}>Revert</button>
           </div>
         </div>
-        <label class="approval-field">
-          <span>Title</span>
-          <input data-approval-field="title" type="text" value="${escapeHtml(payload.title || "")}" />
-        </label>
-        <label class="approval-field">
-          <span>Details</span>
-          <textarea data-approval-field="details" rows="6">${escapeHtml(payload.details || "")}</textarea>
-        </label>
-        <label class="approval-field">
-          <span>Status</span>
-          <select data-approval-field="status">
-            ${["open", "in_progress", "blocked", "done"]
-              .map(
-                (status) =>
-                  `<option value="${status}"${payload.status === status ? " selected" : ""}>${escapeHtml(humanizeRunStatus(status))}</option>`,
-              )
-              .join("")}
-          </select>
-        </label>
+        <div class="approval-editor-grid approval-editor-grid-task">
+          <label class="approval-field approval-field-full">
+            <span>Title</span>
+            <input data-approval-field="title" type="text" value="${escapeHtml(payload.title || "")}" />
+          </label>
+          <label class="approval-field approval-field-full">
+            <span>Details</span>
+            <textarea data-approval-field="details" rows="5">${escapeHtml(payload.details || "")}</textarea>
+          </label>
+          <label class="approval-field approval-field-status">
+            <span>Status</span>
+            <select data-approval-field="status">
+              ${["open", "in_progress", "blocked", "done"]
+                .map(
+                  (status) =>
+                    `<option value="${status}"${payload.status === status ? " selected" : ""}>${escapeHtml(humanizeRunStatus(status))}</option>`,
+                )
+                .join("")}
+            </select>
+          </label>
+        </div>
       </section>
     `;
   }
@@ -805,45 +815,49 @@ function renderApprovalEditor(approval) {
         ? "Adjust the saved checklist title or items before it is written locally."
         : "Adjust the saved draft before it is written locally.";
     return `
-      <section class="approval-editor" data-approval-editor="${approval.id}">
+      <section class="approval-editor approval-editor-simple" data-approval-editor="${approval.id}">
         <div class="approval-editor-header">
-          <div>
-            <strong>Refine before approval</strong>
+          <div class="approval-editor-copy">
+            <strong>Edit draft</strong>
             <span>${escapeHtml(helperCopy)}</span>
           </div>
           <div class="approval-editor-controls">
-            <span class="approval-editor-state${isDirty ? " is-dirty" : ""}" data-approval-draft-state>${isDirty ? "Saved locally" : "Original draft"}</span>
-            <button class="approval-editor-reset" data-approval-reset type="button"${isDirty ? "" : " disabled"}>Reset</button>
+            <span class="approval-editor-state${isDirty ? " is-dirty" : ""}" data-approval-draft-state>${draftStateText}</span>
+            <button class="approval-editor-reset" data-approval-reset type="button"${isDirty ? "" : " disabled"}>Revert</button>
           </div>
         </div>
-        <label class="approval-field">
-          <span>Title</span>
-          <input data-approval-field="title" type="text" value="${escapeHtml(payload.title || "")}" />
-        </label>
-        <label class="approval-field">
-          <span>${approval.tool_name === "create_checklist" ? "Checklist content" : "Content"}</span>
-          <textarea data-approval-field="content" rows="${approval.tool_name === "create_checklist" ? "8" : "6"}">${escapeHtml(payload.content || "")}</textarea>
-        </label>
+        <div class="approval-editor-grid">
+          <label class="approval-field approval-field-full">
+            <span>Title</span>
+            <input data-approval-field="title" type="text" value="${escapeHtml(payload.title || "")}" />
+          </label>
+          <label class="approval-field approval-field-full">
+            <span>${approval.tool_name === "create_checklist" ? "Checklist content" : "Content"}</span>
+            <textarea data-approval-field="content" rows="${approval.tool_name === "create_checklist" ? "6" : "5"}">${escapeHtml(payload.content || "")}</textarea>
+          </label>
+        </div>
       </section>
     `;
   }
 
   return `
-    <section class="approval-editor" data-approval-editor="${approval.id}">
+    <section class="approval-editor approval-editor-advanced" data-approval-editor="${approval.id}">
       <div class="approval-editor-header">
-        <div>
-          <strong>Refine before approval</strong>
-          <span>Advanced payload editing for this action.</span>
+        <div class="approval-editor-copy">
+          <strong>Edit payload</strong>
+          <span>Advanced fields stay local until you approve the write.</span>
         </div>
         <div class="approval-editor-controls">
-          <span class="approval-editor-state${isDirty ? " is-dirty" : ""}" data-approval-draft-state>${isDirty ? "Saved locally" : "Original draft"}</span>
-          <button class="approval-editor-reset" data-approval-reset type="button"${isDirty ? "" : " disabled"}>Reset</button>
+          <span class="approval-editor-state${isDirty ? " is-dirty" : ""}" data-approval-draft-state>${draftStateText}</span>
+          <button class="approval-editor-reset" data-approval-reset type="button"${isDirty ? "" : " disabled"}>Revert</button>
         </div>
       </div>
-      <label class="approval-field approval-field-code">
-        <span>Payload JSON</span>
-        <textarea data-approval-json rows="8">${escapeHtml(JSON.stringify(payload, null, 2))}</textarea>
-      </label>
+      <div class="approval-editor-grid">
+        <label class="approval-field approval-field-code approval-field-full">
+          <span>Payload JSON</span>
+          <textarea data-approval-json rows="7">${escapeHtml(JSON.stringify(payload, null, 2))}</textarea>
+        </label>
+      </div>
     </section>
   `;
 }
@@ -885,14 +899,116 @@ function runStepProgress(run) {
   return `${executedCount}/${plannedCount || executedCount || 0} steps`;
 }
 
+function toolDraftLabel(toolName) {
+  switch (toolName) {
+    case "create_note":
+      return "a note draft";
+    case "create_checklist":
+      return "a checklist draft";
+    case "create_task":
+      return "a task draft";
+    case "log_observation":
+      return "an observation draft";
+    default:
+      return "a local draft";
+  }
+}
+
+function sanitizeRunSummary(summary, approval = null) {
+  if (!summary) {
+    return "";
+  }
+
+  const trimmed = String(summary).trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  if (approval?.status === "pending") {
+    return `I reviewed the local workspace and prepared ${toolDraftLabel(approval.tool_name)} for your approval.`;
+  }
+
+  const replaced = trimmed
+    .replace(/`create_note`/g, "a note draft")
+    .replace(/`create_checklist`/g, "a checklist draft")
+    .replace(/`create_task`/g, "a task draft")
+    .replace(/`log_observation`/g, "an observation draft")
+    .replace(/\/Users\/[^\s`]+/g, "this workspace")
+    .replace(/workspace findings/gi, "local material");
+
+  if (/workspace run completed without strong matching files/i.test(replaced)) {
+    return "I did not find strong matching local files for that request.";
+  }
+
+  return replaced;
+}
+
+function runPrimarySummary(run, approval) {
+  const summary = sanitizeRunSummary(run?.result_summary, approval);
+  if (summary) {
+    return summary;
+  }
+  if (approval?.status === "pending") {
+    return `I reviewed the local workspace and prepared ${toolDraftLabel(approval.tool_name)} for your approval.`;
+  }
+  if (run?.status === "completed") {
+    return "I finished the local workspace review.";
+  }
+  if (run?.status === "failed" || run?.status === "blocked") {
+    return "The local workspace review did not complete cleanly.";
+  }
+  return "I’m working through the relevant local workspace material.";
+}
+
+function presentRunStatus(status, approval) {
+  if (approval?.status === "pending") {
+    return "Needs approval";
+  }
+  switch (status) {
+    case "completed":
+      return "Done";
+    case "failed":
+      return "Issue";
+    case "blocked":
+      return "Blocked";
+    case "awaiting_approval":
+      return "Needs approval";
+    default:
+      return "Working locally";
+  }
+}
+
+function presentRunStepTitle(step) {
+  const title = String(step?.title || step?.kind || "Step");
+  const normalized = title.toLowerCase();
+  if (normalized.includes("inspect workspace")) {
+    return "Checked the workspace";
+  }
+  if (normalized.includes("search workspace")) {
+    return "Looked for relevant files";
+  }
+  if (normalized.includes("read candidate")) {
+    return "Read matching documents";
+  }
+  if (normalized.includes("synthesize")) {
+    return "Prepared a working summary";
+  }
+  if (normalized.includes("prepare durable")) {
+    return "Prepared a draft for approval";
+  }
+  return title;
+}
+
 function renderAgentRunMarkup(run, approval) {
   if (!run) {
     return "";
   }
 
-  const steps = (run.executed_steps?.length ? run.executed_steps : run.plan_steps || []).slice(-6);
+  const allSteps = run.executed_steps?.length ? run.executed_steps : run.plan_steps || [];
   const expanded = isRunExpanded(run);
-  const stepMarkup = steps.length
+  const steps = allSteps.slice(-8);
+  const primarySummary = runPrimarySummary(run, approval);
+  const stepMarkup = allSteps.length
     ? `
       <div class="agent-run-steps"${expanded ? "" : ' hidden'}>
         ${steps
@@ -900,16 +1016,14 @@ function renderAgentRunMarkup(run, approval) {
             (step) => `
               <div class="agent-run-step is-${escapeHtml(step.status || "planned")}">
                 <div class="agent-run-step-header">
-                  <strong>${escapeHtml(step.title || step.kind || "Step")}</strong>
+                  <strong>${escapeHtml(presentRunStepTitle(step))}</strong>
                   <span>${escapeHtml(humanizeRunStatus(step.status || "planned"))}</span>
                 </div>
-                ${step.detail ? `<p>${escapeHtml(step.detail)}</p>` : ""}
                 ${
-                  step.references?.length
-                    ? `<div class="agent-run-step-refs">${step.references
-                        .slice(0, 3)
-                        .map((reference) => `<span>${escapeHtml(reference)}</span>`)
-                        .join("")}</div>`
+                  step.status === "failed" || step.status === "blocked"
+                    ? step.detail
+                      ? `<p>${escapeHtml(step.detail)}</p>`
+                      : ""
                     : ""
                 }
               </div>
@@ -922,34 +1036,36 @@ function renderAgentRunMarkup(run, approval) {
 
   const approvalNote =
     approval?.status === "pending"
-      ? `<p class="agent-run-note">Waiting for approval before the workspace run can finish the durable action.</p>`
+      ? `<p class="agent-run-note">Approve the draft below to let the local run finish.</p>`
       : "";
   const artifactNote =
     run.artifact_ids?.length
-      ? `<p class="agent-run-note">Artifacts linked: ${escapeHtml(String(run.artifact_ids.length))}</p>`
+      ? `<p class="agent-run-note">Linked ${escapeHtml(String(run.artifact_ids.length))} local artifact${run.artifact_ids.length === 1 ? "" : "s"}.</p>`
       : "";
-  const toggleMarkup = steps.length
-    ? `<button class="agent-run-toggle" data-run-toggle="${run.id}" type="button">${expanded ? "Hide details" : "Show details"}</button>`
+  const toggleMarkup = allSteps.length
+    ? `<button class="agent-run-toggle" data-run-toggle="${run.id}" type="button">${expanded ? "Hide details" : "Details"}</button>`
     : "";
 
   return `
     <section class="agent-run-card is-${escapeHtml(run.status || "running")}">
       <div class="agent-run-header">
         <div>
-          <span class="agent-run-kicker">Workspace agent</span>
+          <span class="agent-run-kicker">Working locally</span>
           <div class="agent-run-status-row">
-            <span class="agent-run-status">${escapeHtml(humanizeRunStatus(run.status || "running"))}</span>
-            <span class="agent-run-progress">${escapeHtml(runStepProgress(run))}</span>
+            <span class="agent-run-status">${escapeHtml(presentRunStatus(run.status || "running", approval))}</span>
           </div>
         </div>
         ${toggleMarkup}
       </div>
-      <h4>${escapeHtml(clip(run.goal || "Workspace run", 96))}</h4>
-      <p class="agent-run-scope">Scope: <code>${escapeHtml(run.scope_root || ".")}</code></p>
-      ${stepMarkup}
-      ${run.result_summary ? `<p class="agent-run-summary">${escapeHtml(run.result_summary)}</p>` : ""}
-      ${artifactNote}
-      ${approvalNote}
+      <div class="agent-run-body">
+        <h4>${escapeHtml(primarySummary)}</h4>
+        <div class="agent-run-meta">
+          <p class="agent-run-summary">Used local workspace material relevant to this conversation.</p>
+          ${artifactNote}
+          ${approvalNote}
+        </div>
+        ${stepMarkup}
+      </div>
     </section>
   `;
 }
@@ -1135,7 +1251,15 @@ function renderMessages() {
 
   for (const message of messages) {
     const row = document.createElement("article");
-    row.className = `message-row ${message.role}`;
+    row.className = [
+      "message-row",
+      message.role,
+      message.agentRun ? "has-agent-run" : "",
+      message.approval ? "has-approval" : "",
+      message.process?.length ? "has-process" : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
 
     const citations = (message.citations || [])
       .map(
@@ -1270,7 +1394,7 @@ function refreshApprovalCardState(container, approval, collected = undefined) {
   if (currentEdit === null) {
     editor.classList.add("has-invalid-draft");
     if (stateLabel) {
-      stateLabel.textContent = "Draft JSON invalid";
+      stateLabel.textContent = approvalDraftStateText({ invalid: true });
       stateLabel.classList.add("is-invalid");
       stateLabel.classList.remove("is-dirty");
     }
@@ -1292,7 +1416,7 @@ function refreshApprovalCardState(container, approval, collected = undefined) {
     previewSlot.innerHTML = renderApprovalPreview(approval, currentEdit);
   }
   if (stateLabel) {
-    stateLabel.textContent = dirty ? "Saved locally" : "Original draft";
+    stateLabel.textContent = approvalDraftStateText({ dirty });
     stateLabel.classList.toggle("is-dirty", dirty);
     stateLabel.classList.remove("is-invalid");
   }
@@ -2284,6 +2408,13 @@ function resizeComposer() {
     (!elements.promptInput.value.trim() && state.pendingAttachments.length === 0);
 }
 
+function updateResponsiveChrome() {
+  elements.promptInput.placeholder = window.innerWidth <= 640 ? "Ask locally" : "Ask the local assistant";
+  if (window.innerWidth > 1080 && state.mobileSidebarOpen) {
+    closeSidebar();
+  }
+}
+
 function addPendingAttachments(files) {
   for (const file of files) {
     const kind = guessAssetKind(file.type, file.name);
@@ -2428,11 +2559,13 @@ function attachEventHandlers() {
     clearCameraRecording();
     clearMonitorFrames();
   });
+  window.addEventListener("resize", updateResponsiveChrome);
 }
 
 async function bootstrap() {
   loadPersistedUiState();
   attachEventHandlers();
+  updateResponsiveChrome();
   resizeComposer();
   updateStatus("ready", "Ready", "Ready for the next turn.");
   try {
