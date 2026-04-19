@@ -8,22 +8,16 @@
     />
     <title>Field Assistant Chat</title>
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
-    <link rel="stylesheet" href="./styles.css?v=20260419j" />
-    <script defer src="./app.js?v=20260419j"></script>
+    <link rel="stylesheet" href="./styles.css?v=20260419l" />
+    <script defer src="./app.js?v=20260419l"></script>
   </head>
   <body>
     <div class="app-shell">
       <aside class="sidebar" id="sidebar">
         <div class="sidebar-header">
-          <div class="brand-stack">
-            <div class="sidebar-meta-row">
-              <p class="eyebrow">Field Assistant</p>
-              <span class="issue-badge">Local-first</span>
-            </div>
-            <h1>Field Assistant</h1>
-            <p class="sidebar-deck">
-              Offline field intelligence for document reading, image review, video analysis, and bounded local action.
-            </p>
+          <div class="brand-stack brand-stack-compact">
+            <p class="eyebrow">Field Assistant</p>
+            <h1>Local workbench</h1>
           </div>
           <button class="primary-button" id="new-chat-button" type="button">
             New
@@ -31,16 +25,11 @@
         </div>
 
         <section class="sidebar-section">
-          <p class="section-label">Sessions</p>
+          <p class="section-label">Recent</p>
           <div class="conversation-list" id="conversation-list"></div>
         </section>
 
         <section class="sidebar-footer">
-          <div class="sidebar-footer-ribbon">
-            <span>Offline-ready</span>
-            <span>One assistant</span>
-          </div>
-          <p>Grounded chat, local retrieval, approvals, and bounded multimodal work.</p>
           <a href="/v1/system/health" target="_blank" rel="noreferrer">System health</a>
         </section>
       </aside>
@@ -54,17 +43,10 @@
               ☰
             </button>
             <div class="title-block">
-              <p class="eyebrow">Local workspace</p>
               <h2 id="conversation-title">New conversation</h2>
-              <p class="title-deck">
-                Grounded chat, specialist routing, and durable local workflows.
-              </p>
             </div>
           </div>
           <div class="header-actions">
-            <div class="header-ledger" aria-hidden="true">
-              <span>Ready for field work</span>
-            </div>
             <div class="status-wrap">
               <button class="status-trigger" id="status-button" type="button" aria-expanded="false">
                 <span class="status-dot" id="status-dot"></span>
@@ -99,27 +81,13 @@
           <div class="message-scroll" id="message-scroll">
             <div class="empty-state" id="empty-state">
               <div class="empty-state-frame">
-                <div class="empty-state-topline">
-                  <p class="eyebrow">Grounded local work</p>
-                  <span class="issue-badge">Offline-ready</span>
-                </div>
-                <h3>One calm place for chat, image review, document work, and field actions.</h3>
-                <p>
-                  Ask for a checklist, a how-to walkthrough, a medical review with guardrails, or a derived image analysis.
-                </p>
-                <div class="empty-state-columns">
-                  <article>
-                    <span class="empty-state-label">Read</span>
-                    <p>Documents, images, and video with local specialist routing.</p>
-                  </article>
-                  <article>
-                    <span class="empty-state-label">Decide</span>
-                    <p>Bounded agent runs with approvals, citations, and durable outputs.</p>
-                  </article>
-                  <article>
-                    <span class="empty-state-label">Act</span>
-                    <p>Notes, checklists, tasks, and media-derived artifacts without cloud dependence.</p>
-                  </article>
+                <p class="eyebrow">Local-first assistant</p>
+                <h3>Ask, review, or act locally.</h3>
+                <p>Try a how-to, attach an image, or prepare a checklist from local material.</p>
+                <div class="empty-state-prompts" aria-hidden="true">
+                  <span>Teach me how to…</span>
+                  <span>Review this image</span>
+                  <span>Prepare a checklist</span>
                 </div>
               </div>
             </div>
@@ -210,21 +178,29 @@
             <div class="camera-monitor-strip" id="camera-monitor-strip"></div>
           </section>
           <div class="composer-row">
-            <button class="icon-button" id="attachment-button" type="button" aria-label="Attachments">
-              ＋
-            </button>
-            <button class="icon-button" id="camera-button" type="button" aria-label="Camera capture">
-              ◌
-            </button>
-            <textarea
-              id="composer-input"
-              rows="1"
-              placeholder="Ask the local assistant"
-            ></textarea>
-            <button class="icon-button" id="voice-button" type="button" aria-label="Voice coming later">
-              ◉
-            </button>
-            <button class="send-button" id="send-button" type="submit">Send</button>
+            <div class="composer-shell">
+              <div class="composer-utilities">
+                <button class="icon-button composer-icon" id="attachment-button" type="button" aria-label="Attachments">
+                  ＋
+                </button>
+                <button class="icon-button composer-icon" id="camera-button" type="button" aria-label="Camera capture">
+                  ◌
+                </button>
+              </div>
+              <textarea
+                id="composer-input"
+                rows="1"
+                placeholder="Ask the local assistant"
+              ></textarea>
+              <div class="composer-actions">
+                <button class="icon-button composer-icon" id="voice-button" type="button" aria-label="Voice coming later">
+                  ◉
+                </button>
+                <button class="send-button" id="send-button" type="submit" aria-label="Send">
+                  ↗
+                </button>
+              </div>
+            </div>
           </div>
         </form>
       </main>

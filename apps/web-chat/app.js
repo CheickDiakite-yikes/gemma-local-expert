@@ -230,7 +230,8 @@ function hydrateAgentRunsIntoMessages(conversationId) {
       .map((run) => [run.turn_id, run]),
   );
   for (const message of messages) {
-    message.agentRun = message.turnId ? runsByTurn.get(message.turnId) || null : null;
+    message.agentRun =
+      message.role === "assistant" && message.turnId ? runsByTurn.get(message.turnId) || null : null;
   }
 }
 
@@ -369,7 +370,7 @@ function approvalStatusLabel(status) {
 function approvalStatusKicker(status) {
   switch (status) {
     case "pending":
-      return "Review draft";
+      return "Draft ready";
     case "executed":
       return "Saved";
     case "rejected":
@@ -544,24 +545,17 @@ function approvalSummaryText(approval, overridePayload = undefined) {
   }
   const payload = approvalEffectivePayload(approval, overridePayload);
   const title = payload?.title ? clipCopy(payload.title, 72) : "";
-  const subject = title ? `"${title}"` : `this ${approvalSurfaceNoun(approval.tool_name)}`;
   const excerpt = approvalPayloadExcerpt(approval, payload);
-  let lead = "";
   switch (approval.status) {
     case "executed":
-      lead = `Saved ${subject} locally.`;
-      break;
+      return title ? `Saved "${title}" locally.` : "Saved locally.";
     case "rejected":
-      lead = `Skipped ${subject}.`;
-      break;
+      return title ? `Skipped "${title}".` : "Skipped.";
     case "failed":
-      lead = `Could not save ${subject}.`;
-      break;
+      return title ? `Could not save "${title}".` : "Could not save locally.";
     default:
-      lead = `Ready to save ${subject}.`;
-      break;
+      return excerpt || `Ready to save this ${approvalSurfaceNoun(approval.tool_name)}.`;
   }
-  return [lead, excerpt].filter(Boolean).join(" ");
 }
 
 function saveApprovalDraft(approvalId, payload) {
@@ -772,6 +766,41 @@ function clip(text, size = 88) {
     return "";
   }
   return text.length > size ? `${text.slice(0, size - 1)}…` : text;
+}
+
+function formatRelativeAgeCompact(value) {
+  if (!value) {
+    return "";
+  }
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  const diffMs = Date.now() - date.getTime();
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  if (diffMs < minute) {
+    return "now";
+  }
+  if (diffMs < hour) {
+    return `${Math.max(1, Math.round(diffMs / minute))}m`;
+  }
+  if (diffMs < day) {
+    return `${Math.max(1, Math.round(diffMs / hour))}h`;
+  }
+  if (diffMs < day * 7) {
+    return `${Math.max(1, Math.round(diffMs / day))}d`;
+  }
+  return date.toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
+function conversationPreviewText(conversation) {
+  const preview = stripMarkdownToText(conversation.last_message_preview || "");
+  if (!preview) {
+    return "No replies yet";
+  }
+  return clipCopy(preview, 42);
 }
 
 function conversationLabel(conversation) {
@@ -1373,7 +1402,7 @@ function sanitizeRunSummary(summary, approval = null) {
   }
 
   if (approval?.status === "pending") {
-    return `I reviewed the local workspace and prepared ${toolDraftLabel(approval.tool_name)} for your approval.`;
+    return `Reviewed local material and prepared ${toolDraftLabel(approval.tool_name)}.`;
   }
 
   const replaced = trimmed
@@ -1397,15 +1426,31 @@ function runPrimarySummary(run, approval) {
     return summary;
   }
   if (approval?.status === "pending") {
-    return `I reviewed the local workspace and prepared ${toolDraftLabel(approval.tool_name)} for your approval.`;
+    return `Reviewed local material and prepared ${toolDraftLabel(approval.tool_name)}.`;
   }
   if (run?.status === "completed") {
-    return "I finished the local workspace review.";
+    return "Finished the local workspace review.";
   }
   if (run?.status === "failed" || run?.status === "blocked") {
     return "The local workspace review did not complete cleanly.";
   }
-  return "I’m working through the relevant local workspace material.";
+  return "Reviewing relevant local workspace material.";
+}
+
+function runFactBits(run, approval) {
+  const bits = [];
+  const executedCount = run.executed_steps?.length || 0;
+  const plannedCount = run.plan_steps?.length || executedCount;
+  if (executedCount && plannedCount) {
+    bits.push(`${executedCount}/${plannedCount} steps`);
+  }
+  if (run.artifact_ids?.length) {
+    bits.push(`${run.artifact_ids.length} artifact${run.artifact_ids.length === 1 ? "" : "s"}`);
+  }
+  if (approval?.status === "pending") {
+    bits.push("draft ready");
+  }
+  return bits;
 }
 
 function presentRunStatus(status, approval) {
@@ -1482,14 +1527,7 @@ function renderAgentRunMarkup(run, approval) {
     `
     : "";
 
-  const approvalNote =
-    approval?.status === "pending"
-      ? `<p class="agent-run-note">Approve the draft below to let the local run finish.</p>`
-      : "";
-  const artifactNote =
-    run.artifact_ids?.length
-      ? `<p class="agent-run-note">Linked ${escapeHtml(String(run.artifact_ids.length))} local artifact${run.artifact_ids.length === 1 ? "" : "s"}.</p>`
-      : "";
+  const factBits = runFactBits(run, approval).join(" • ");
   const toggleMarkup = allSteps.length
     ? `<button class="agent-run-toggle" data-run-toggle="${run.id}" type="button">${expanded ? "Hide details" : "Details"}</button>`
     : "";
@@ -1497,23 +1535,17 @@ function renderAgentRunMarkup(run, approval) {
   return `
     <section class="agent-run-card is-${escapeHtml(run.status || "running")}">
       <div class="agent-run-header">
-        <div>
+        <div class="agent-run-main">
           <span class="agent-run-kicker">Working locally</span>
-          <div class="agent-run-status-row">
-            <span class="agent-run-status">${escapeHtml(presentRunStatus(run.status || "running", approval))}</span>
-          </div>
+          <h4>${escapeHtml(primarySummary)}</h4>
+          ${factBits ? `<p class="agent-run-facts">${escapeHtml(factBits)}</p>` : ""}
         </div>
-        ${toggleMarkup}
-      </div>
-      <div class="agent-run-body">
-        <h4>${escapeHtml(primarySummary)}</h4>
-        <div class="agent-run-meta">
-          <p class="agent-run-summary">Used local workspace material relevant to this conversation.</p>
-          ${artifactNote}
-          ${approvalNote}
+        <div class="agent-run-inline-actions">
+          <span class="agent-run-status">${escapeHtml(presentRunStatus(run.status || "running", approval))}</span>
+          ${toggleMarkup}
         </div>
-        ${stepMarkup}
       </div>
+      ${stepMarkup}
     </section>
   `;
 }
@@ -1537,9 +1569,15 @@ function renderConversations() {
       button.classList.add("is-active");
     }
 
+    const age = formatRelativeAgeCompact(conversation.last_activity_at || conversation.created_at);
+    const preview = conversationPreviewText(conversation);
+
     button.innerHTML = `
-      <strong>${escapeHtml(clip(conversationLabel(conversation), 42))}</strong>
-      <span>${escapeHtml(clip(conversation.last_message_preview || conversation.mode, 82))}</span>
+      <div class="conversation-row-main">
+        <strong>${escapeHtml(clip(conversationLabel(conversation), 34))}</strong>
+        <span class="conversation-age">${escapeHtml(age)}</span>
+      </div>
+      <span class="conversation-preview">${escapeHtml(preview)}</span>
     `;
 
     button.addEventListener("click", () => {
@@ -1676,8 +1714,9 @@ function renderToolResultMarkup(result) {
   `;
 }
 
-function renderMessages() {
+function renderMessages({ preserveScroll = false } = {}) {
   const messages = activeMessages();
+  const previousScrollTop = elements.messageScroll.scrollTop;
   elements.messageList.innerHTML = "";
   elements.emptyState.classList.toggle("is-hidden", messages.length > 0);
 
@@ -1740,6 +1779,10 @@ function renderMessages() {
   }
 
   queueMicrotask(() => {
+    if (preserveScroll) {
+      elements.messageScroll.scrollTop = previousScrollTop;
+      return;
+    }
     elements.messageScroll.scrollTop = messages.length ? elements.messageScroll.scrollHeight : 0;
   });
 }
@@ -1794,16 +1837,20 @@ function renderApprovalMarkup(approval) {
 
   return `
     <section class="approval-card is-${escapeHtml(approval.status)}">
-      <div class="approval-header">
-        <span class="approval-kicker">${approvalStatusKicker(approval.status)}</span>
-        <h4>${escapeHtml(approvalSurfaceTitle(approval.tool_name))}</h4>
-        <p>${escapeHtml(approvalReasonCopy(approval))}</p>
+      <div class="approval-header approval-header-inline">
+        <div class="approval-header-main">
+          <div class="approval-heading-line">
+            <span class="approval-kicker">${approvalStatusKicker(approval.status)}</span>
+            <h4>${escapeHtml(approvalSurfaceTitle(approval.tool_name))}</h4>
+          </div>
+          <p class="approval-summary">${escapeHtml(approvalSummaryText(approval))}</p>
+        </div>
+        <div class="approval-toolbar">
+          <div class="approval-status is-${escapeHtml(approval.status)}" data-approval-status>${escapeHtml(approvalStatusLabel(approval.status))}</div>
+          ${sectionControls}
+          ${actions}
+        </div>
       </div>
-      <div class="approval-toolbar">
-        <div class="approval-status is-${escapeHtml(approval.status)}" data-approval-status>${escapeHtml(approvalStatusLabel(approval.status))}</div>
-        ${sectionControls}
-      </div>
-      <p class="approval-summary">${escapeHtml(approvalSummaryText(approval))}</p>
       <div class="approval-section approval-section-preview"${previewExpanded ? "" : " hidden"}>
         ${renderApprovalPreviewSlot(approval)}
       </div>
@@ -1817,7 +1864,6 @@ function renderApprovalMarkup(approval) {
           : ""
       }
       ${renderApprovalResult(approval.result)}
-      ${actions}
     </section>
   `;
 }
@@ -1945,7 +1991,7 @@ function wireApprovalActions(container, approval) {
         return;
       }
       setApprovalSectionExpanded(approval.id, section, !isApprovalSectionExpanded(approval, section));
-      render();
+      render({ preserveScroll: true });
     });
   }
 
@@ -1973,7 +2019,7 @@ function wireRunCardActions(container, run) {
   }
   toggle.addEventListener("click", () => {
     setRunExpanded(run.id, !isRunExpanded(run));
-    render();
+    render({ preserveScroll: true });
   });
 }
 
@@ -1985,7 +2031,7 @@ function wireMessageCardActions(container, message) {
   toggle.addEventListener("click", () => {
     const nextExpanded = !isMessagePanelExpanded(message, "context");
     setMessagePanelExpanded(message, "context", nextExpanded);
-    render();
+    render({ preserveScroll: true });
   });
 }
 
@@ -2112,7 +2158,7 @@ function renderCameraSheet() {
   }
 }
 
-function render() {
+function render(options = {}) {
   const activeConversation = state.conversations.find(
     (conversation) => conversation.id === state.activeConversationId,
   );
@@ -2122,7 +2168,7 @@ function render() {
 
   renderConversations();
   renderAttachmentStrip();
-  renderMessages();
+  renderMessages(options);
   renderCameraSheet();
   renderStatusMenu();
   elements.sendButton.disabled =
@@ -2203,7 +2249,8 @@ async function openConversation(conversationId) {
         proposedTool: message.approval?.tool_name || null,
         process: [],
         toolResult: message.approval?.result || null,
-        agentRun: message.turn_id ? runsByTurn.get(message.turn_id) || null : null,
+        agentRun:
+          message.role === "assistant" && message.turn_id ? runsByTurn.get(message.turn_id) || null : null,
         loading: false,
       })),
     );
