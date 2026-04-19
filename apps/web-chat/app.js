@@ -12,6 +12,7 @@ const state = {
   approvals: new Map(),
   approvalDrafts: new Map(),
   approvalPanels: new Map(),
+  messagePanels: new Map(),
   runPanels: new Map(),
   capabilities: null,
   medicalSessions: new Map(),
@@ -36,6 +37,7 @@ const state = {
 const STORAGE_KEYS = {
   approvalDrafts: "field-assistant.approval-drafts.v1",
   approvalPanels: "field-assistant.approval-panels.v1",
+  messagePanels: "field-assistant.message-panels.v1",
   runPanels: "field-assistant.run-panels.v2",
   activeConversation: "field-assistant.active-conversation.v1",
 };
@@ -133,6 +135,9 @@ function loadPersistedUiState() {
   state.approvalPanels = new Map(
     Object.entries(loadStoredRecord(STORAGE_KEYS.approvalPanels)).map(([key, value]) => [key, Boolean(value)]),
   );
+  state.messagePanels = new Map(
+    Object.entries(loadStoredRecord(STORAGE_KEYS.messagePanels)).map(([key, value]) => [key, Boolean(value)]),
+  );
   state.runPanels = new Map(
     Object.entries(loadStoredRecord(STORAGE_KEYS.runPanels)).map(([key, value]) => [key, Boolean(value)]),
   );
@@ -147,6 +152,10 @@ function persistApprovalDrafts() {
 
 function persistApprovalPanels() {
   saveStoredRecord(STORAGE_KEYS.approvalPanels, Object.fromEntries(state.approvalPanels));
+}
+
+function persistMessagePanels() {
+  saveStoredRecord(STORAGE_KEYS.messagePanels, Object.fromEntries(state.messagePanels));
 }
 
 function persistRunPanels() {
@@ -603,15 +612,80 @@ function setRunExpanded(runId, expanded) {
 }
 
 function updateStatus(kind, label, detail = null) {
-  elements.statusPill.textContent = label;
-  elements.statusRuntimeCopy.textContent = detail || label;
-  state.statusDetail = detail || label;
+  const presented = presentStatusUpdate(kind, label, detail);
+  elements.statusPill.textContent = presented.label;
+  elements.statusRuntimeCopy.textContent = presented.detail;
+  state.statusDetail = presented.detail;
   elements.statusPill.classList.toggle("is-thinking", kind === "thinking");
   elements.statusPill.classList.toggle("is-error", kind === "error");
   elements.statusButton.classList.toggle("is-thinking", kind === "thinking");
   elements.statusButton.classList.toggle("is-error", kind === "error");
   elements.statusDot.classList.toggle("is-thinking", kind === "thinking");
   elements.statusDot.classList.toggle("is-error", kind === "error");
+}
+
+function presentStatusUpdate(kind, label, detail = null) {
+  const fallbackDetail = detail || label;
+  if (kind === "ready" || kind === "error") {
+    return {
+      label,
+      detail: fallbackDetail,
+    };
+  }
+
+  const text = `${label || ""} ${detail || ""}`.toLowerCase();
+  if (text.includes("medical")) {
+    return {
+      label: "Medical session",
+      detail: "Opening the guarded workflow for medical review.",
+    };
+  }
+  if (text.includes("upload")) {
+    return {
+      label: "Uploading",
+      detail: "Saving attachments into the local workspace.",
+    };
+  }
+  if (text.includes("ground")) {
+    return {
+      label: "Grounding",
+      detail: "Reviewing local material for this turn.",
+    };
+  }
+  if (text.includes("image") || text.includes("video") || text.includes("vision") || text.includes("media")) {
+    return {
+      label: "Reviewing media",
+      detail: "Checking the attached media locally.",
+    };
+  }
+  if (text.includes("approval") || text.includes("tool") || text.includes("draft ready") || text.includes("running local helper")) {
+    return {
+      label: "Preparing action",
+      detail: "Preparing a local draft for review.",
+    };
+  }
+  if (text.includes("workspace")) {
+    return {
+      label: "Working locally",
+      detail: "Reviewing local workspace material.",
+    };
+  }
+  if (text.includes("writ") || text.includes("draft")) {
+    return {
+      label: "Drafting answer",
+      detail: "Composing the response from local context.",
+    };
+  }
+  if (text.includes("rout")) {
+    return {
+      label: "Working locally",
+      detail: "Choosing the best local path for this request.",
+    };
+  }
+  return {
+    label: "Working locally",
+    detail: "Processing this request on-device.",
+  };
 }
 
 function recordProcessEvent(kind, label, detail = "") {
@@ -842,6 +916,127 @@ function renderPlainText(text) {
   return escapeHtml(text).replace(/\n/g, "<br />");
 }
 
+function latestMessageProcess(message) {
+  if (!message?.process?.length) {
+    return null;
+  }
+  return message.process[message.process.length - 1];
+}
+
+function messagePanelKey(message, section = "context") {
+  const base = message.id || message.turnId || "";
+  return base ? `${base}:${section}` : "";
+}
+
+function isMessagePanelExpanded(message, section = "context") {
+  const key = messagePanelKey(message, section);
+  if (!key) {
+    return false;
+  }
+  return Boolean(state.messagePanels.get(key));
+}
+
+function setMessagePanelExpanded(message, section, expanded) {
+  const key = messagePanelKey(message, section);
+  if (!key) {
+    return;
+  }
+  state.messagePanels.set(key, Boolean(expanded));
+  persistMessagePanels();
+}
+
+function stripAssistantApprovalBoilerplate(content) {
+  const rawLines = String(content || "").replace(/\r\n?/g, "\n").split("\n");
+  const filtered = [];
+  let previousBlank = true;
+  for (const line of rawLines) {
+    const trimmed = line.trim();
+    const normalized = stripMarkdownToText(trimmed);
+    if (!trimmed) {
+      if (!previousBlank && filtered.length) {
+        filtered.push("");
+      }
+      previousBlank = true;
+      continue;
+    }
+    if (
+      /^i can (save|create|write|log)\b/i.test(normalized) ||
+      /^please approve\b/i.test(normalized) ||
+      /^approval required:?/i.test(normalized) ||
+      /^please confirm if you want me to proceed\b/i.test(normalized) ||
+      /^action:\s+/i.test(normalized) ||
+      /^content summary:/i.test(normalized)
+    ) {
+      continue;
+    }
+    filtered.push(line);
+    previousBlank = false;
+  }
+  return filtered.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function messageDisplayContent(message) {
+  const content = String(message.content || "").trim();
+  if (!content) {
+    return "";
+  }
+  if (message.role === "assistant" && message.approval) {
+    return stripAssistantApprovalBoilerplate(content);
+  }
+  return content;
+}
+
+function shouldCollapseMessageContent(message, content) {
+  if (!content || message.role !== "assistant") {
+    return false;
+  }
+  if (!message.approval && !message.agentRun) {
+    return false;
+  }
+  const plain = stripMarkdownToText(content);
+  const lineCount = content.split(/\r?\n/).filter((line) => line.trim()).length;
+  const richBlockCount = (content.match(/^#{1,6}\s+|^[-*+]\s+|^\d+\.\s+/gm) || []).length;
+  return plain.length > 420 || lineCount > 8 || richBlockCount > 4;
+}
+
+function presentAssistantLoadingCopy(message) {
+  const latest = latestMessageProcess(message);
+  if (message.agentRun) {
+    return "Reviewing local workspace material.";
+  }
+  if (message.approval || message.proposedTool) {
+    return "Preparing a local draft for review.";
+  }
+  if (latest?.kind === "retrieval") {
+    return "Reviewing local material.";
+  }
+  if (latest?.kind === "vision") {
+    return "Reviewing the attached media locally.";
+  }
+  if (latest?.kind === "tool") {
+    return "Preparing a local action.";
+  }
+  return "Preparing a local reply.";
+}
+
+function renderAssistantLoadingMarkup(message, content = undefined) {
+  const visibleContent = typeof content === "string" ? content : messageDisplayContent(message);
+  if (message.role !== "assistant" || !message.loading || visibleContent) {
+    return "";
+  }
+
+  return `
+    <section class="assistant-loading" aria-live="polite">
+      <div class="assistant-loading-lines" aria-hidden="true">
+        <span class="assistant-loading-line is-long"></span>
+        <span class="assistant-loading-line is-medium"></span>
+        <span class="assistant-loading-line is-short"></span>
+      </div>
+      <p class="assistant-loading-copy">${escapeHtml(presentAssistantLoadingCopy(message))}</p>
+    </section>
+  `;
+}
+
 function renderMarkdownBlocks(text) {
   const normalized = String(text || "").replace(/\r\n?/g, "\n").trim();
   if (!normalized) {
@@ -964,18 +1159,29 @@ function renderMarkdownBlocks(text) {
   return blocks.join("");
 }
 
-function renderMessageContent(message) {
-  const content = message.content || "";
+function renderMessageContent(message, overrideContent = undefined) {
+  const content = typeof overrideContent === "string" ? overrideContent : messageDisplayContent(message);
   if (!content) {
-    return `<div class="message-content rich-text"><p></p></div>`;
+    return "";
   }
 
   const richTextRoles = new Set(["assistant", "system"]);
+  const collapsible = shouldCollapseMessageContent(message, content);
+  const expanded = collapsible ? isMessagePanelExpanded(message, "context") : false;
   const body = richTextRoles.has(message.role)
     ? renderMarkdownBlocks(content)
     : `<p>${renderPlainText(content)}</p>`;
 
-  return `<div class="message-content${richTextRoles.has(message.role) ? " rich-text" : ""}">${body}</div>`;
+  return `
+    <div class="message-content-shell${collapsible ? " is-collapsible" : ""}${expanded ? " is-expanded" : ""}">
+      ${
+        collapsible
+          ? `<button class="message-content-toggle" data-message-content-toggle="${escapeHtml(messagePanelKey(message, "context"))}" type="button">${expanded ? "Hide context" : "Context"}</button>`
+          : ""
+      }
+      <div class="message-content${richTextRoles.has(message.role) ? " rich-text" : ""}">${body}</div>
+    </div>
+  `;
 }
 
 function renderApprovalPreview(approval, overridePayload = undefined) {
@@ -1455,22 +1661,6 @@ function renderAssetMarkup(assets) {
   return `<div class="asset-gallery">${cards}</div>`;
 }
 
-function renderProcessMarkup(process) {
-  if (!process?.length) {
-    return "";
-  }
-
-  const visible = process.slice(-4);
-  return `
-    <div class="message-process">
-      <span class="message-process-label">Local flow</span>
-      <div class="message-process-steps">
-        ${visible.map((entry) => `<span>${escapeHtml(entry.label)}</span>`).join("")}
-      </div>
-    </div>
-  `;
-}
-
 function renderToolResultMarkup(result) {
   if (!result || !result.message) {
     return "";
@@ -1492,13 +1682,14 @@ function renderMessages() {
   elements.emptyState.classList.toggle("is-hidden", messages.length > 0);
 
   for (const message of messages) {
+    const visibleContent = messageDisplayContent(message);
     const row = document.createElement("article");
     row.className = [
       "message-row",
       message.role,
+      message.loading ? "is-loading" : "",
       message.agentRun ? "has-agent-run" : "",
       message.approval ? "has-approval" : "",
-      message.process?.length ? "has-process" : "",
     ]
       .filter(Boolean)
       .join(" ");
@@ -1516,18 +1707,19 @@ function renderMessages() {
 
     const approvalCard = renderApprovalMarkup(message.approval);
     const assetGallery = renderAssetMarkup(message.assets || []);
-    const processLine = renderProcessMarkup(message.process || []);
     const toolResultCard = renderToolResultMarkup(message.toolResult);
     const agentRunCard = renderAgentRunMarkup(message.agentRun, message.approval);
+    const loadingShell = renderAssistantLoadingMarkup(message, visibleContent);
+    const contentMarkup = renderMessageContent(message, visibleContent);
 
     row.innerHTML = `
       <div class="message-card">
         <div class="message-meta">
           <span>${formatRole(message.role)}</span>
         </div>
-        ${processLine}
         ${agentRunCard}
-        ${renderMessageContent(message)}
+        ${loadingShell}
+        ${contentMarkup}
         ${toolResultCard}
         ${assetGallery}
         ${toolChip ? `<div class="citation-list">${toolChip}</div>` : ""}
@@ -1538,6 +1730,7 @@ function renderMessages() {
 
     elements.messageList.append(row);
 
+    wireMessageCardActions(row, message);
     if (message.approval) {
       wireApprovalActions(row, message.approval);
     }
@@ -1784,6 +1977,18 @@ function wireRunCardActions(container, run) {
   });
 }
 
+function wireMessageCardActions(container, message) {
+  const toggle = container.querySelector("[data-message-content-toggle]");
+  if (!toggle) {
+    return;
+  }
+  toggle.addEventListener("click", () => {
+    const nextExpanded = !isMessagePanelExpanded(message, "context");
+    setMessagePanelExpanded(message, "context", nextExpanded);
+    render();
+  });
+}
+
 function renderCameraSheet() {
   const { camera } = state;
   const isRecording = camera.recorder?.state === "recording";
@@ -1999,6 +2204,7 @@ async function openConversation(conversationId) {
         process: [],
         toolResult: message.approval?.result || null,
         agentRun: message.turn_id ? runsByTurn.get(message.turn_id) || null : null,
+        loading: false,
       })),
     );
     pruneResolvedApprovalDrafts(state.transcripts.get(conversationId));
@@ -2047,6 +2253,7 @@ function ensureAssistantMessage(turnId) {
       proposedTool: null,
       process: [],
       toolResult: null,
+      loading: Boolean(state.streaming),
     };
     messages.push(message);
     setActiveMessages(messages);
@@ -2579,9 +2786,14 @@ function mergeAssets(existingAssets, newAssets) {
 }
 
 function handleStreamEvent(event) {
-  const assistantMessage = ensureAssistantMessage(event.turn_id);
+  const assistantMessage = event.turn_id ? ensureAssistantMessage(event.turn_id) : null;
 
   if (event.type === "citation.added") {
+    if (!assistantMessage) {
+      render();
+      return;
+    }
+    assistantMessage.loading = true;
     assistantMessage.citations.push(event.payload);
     const detail = `Added ${event.payload.label} as grounding context.`;
     mergeMessageProcess(assistantMessage, {
@@ -2592,19 +2804,40 @@ function handleStreamEvent(event) {
     recordProcessEvent("retrieval", "Grounding from local sources", detail);
     updateStatus("thinking", "Grounding", detail);
   } else if (event.type === "turn.status") {
+    if (!assistantMessage) {
+      render();
+      return;
+    }
+    assistantMessage.loading = true;
     syncRunFromEvent(event.conversation_id, assistantMessage, event.payload);
     mergeMessageProcess(assistantMessage, event.payload);
     recordProcessEvent(event.payload.kind || "turn", event.payload.label || "Working", event.payload.detail || "");
     updateStatus("thinking", event.payload.label || "Working", event.payload.detail || "");
   } else if (event.type === "assistant.delta") {
+    if (!assistantMessage) {
+      render();
+      return;
+    }
+    assistantMessage.loading = true;
     assistantMessage.content += event.payload.text || "";
     updateStatus("thinking", "Writing", "Drafting the response from local context.");
   } else if (event.type === "assistant.message.completed") {
+    if (!assistantMessage) {
+      render();
+      return;
+    }
+    assistantMessage.loading = false;
     assistantMessage.content = event.payload.text || assistantMessage.content;
     assistantMessage.assets = mergeAssets(assistantMessage.assets, event.payload.assets || []);
+    assistantMessage.process = [];
     updateConversationPreview(event.conversation_id, assistantMessage.content);
     updateStatus("ready", "Ready", "Response complete.");
   } else if (event.type === "tool.proposed") {
+    if (!assistantMessage) {
+      render();
+      return;
+    }
+    assistantMessage.loading = true;
     syncRunFromEvent(event.conversation_id, assistantMessage, event.payload);
     assistantMessage.proposedTool = event.payload.tool_name;
     const detail = `Draft ready for ${approvalSurfaceNoun(event.payload.tool_name)} review.`;
@@ -2615,6 +2848,11 @@ function handleStreamEvent(event) {
     });
     recordProcessEvent("tool", "Prepared local action", detail);
   } else if (event.type === "tool.started") {
+    if (!assistantMessage) {
+      render();
+      return;
+    }
+    assistantMessage.loading = true;
     syncRunFromEvent(event.conversation_id, assistantMessage, event.payload);
     assistantMessage.proposedTool = event.payload.tool_name;
     const detail = `Running ${humanizeToolName(event.payload.tool_name)} inside the local engine.`;
@@ -2626,6 +2864,11 @@ function handleStreamEvent(event) {
     recordProcessEvent("tool", "Running local helper", detail);
     updateStatus("thinking", "Processing", detail);
   } else if (event.type === "tool.completed") {
+    if (!assistantMessage) {
+      render();
+      return;
+    }
+    assistantMessage.loading = true;
     syncRunFromEvent(event.conversation_id, assistantMessage, event.payload);
     assistantMessage.toolResult = event.payload.result || null;
     assistantMessage.assets = mergeAssets(assistantMessage.assets, event.payload.assets || []);
@@ -2637,6 +2880,11 @@ function handleStreamEvent(event) {
     });
     recordProcessEvent("tool", "Local helper complete", detail);
   } else if (event.type === "approval.required") {
+    if (!assistantMessage) {
+      render();
+      return;
+    }
+    assistantMessage.loading = false;
     syncRunFromEvent(event.conversation_id, assistantMessage, event.payload);
     const approvalPayload = { ...event.payload };
     delete approvalPayload.run;
@@ -2652,6 +2900,9 @@ function handleStreamEvent(event) {
   } else if (event.type === "warning") {
     addSystemMessage(event.payload.message || event.payload.text || "Warning");
   } else if (event.type === "error") {
+    if (assistantMessage) {
+      assistantMessage.loading = false;
+    }
     addSystemMessage(event.payload.message || event.payload.text || "Error");
     updateStatus("error", "Error", event.payload.message || event.payload.text || "The local engine hit an error.");
   }
