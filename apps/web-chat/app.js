@@ -1486,7 +1486,7 @@ function render() {
     (conversation) => conversation.id === state.activeConversationId,
   );
   elements.conversationTitle.textContent = activeConversation
-    ? conversationLabel(activeConversation)
+    ? clip(conversationLabel(activeConversation), 44)
     : "New conversation";
 
   renderConversations();
