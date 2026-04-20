@@ -273,7 +273,7 @@ def test_report_turn_requires_approval_and_persists_report_kind(tmp_path: Path) 
     transcript = transcript_response.json()
 
 
-def test_message_draft_turn_after_image_requires_approval_and_persists_message_draft_kind(
+def test_message_draft_turn_after_image_blocks_when_current_grounding_is_unavailable(
     tmp_path: Path,
 ) -> None:
     settings = Settings(database_path=str(tmp_path / "test-message-draft-approval.db"))
@@ -360,27 +360,11 @@ def test_message_draft_turn_after_image_requires_approval_and_persists_message_d
     )
     assert third_turn.status_code == 200
     lines = [line for line in third_turn.text.splitlines() if line.strip()]
-    approval_event = next(line for line in lines if '"type":"approval.required"' in line)
-    approval_payload = json.loads(approval_event)
-    assert approval_payload["payload"]["tool_name"] == "create_message_draft"
-    assert (
-        approval_payload["payload"]["payload"]["title"]
-        == "Logistics Lead Shortage Update Draft"
-    )
-    assert "lantern batteries" in approval_payload["payload"]["payload"]["content"].lower()
-    assert "translator phone credits" in approval_payload["payload"]["payload"]["content"].lower()
-    assert "ors packets" not in approval_payload["payload"]["payload"]["content"].lower()
-    approval_id = approval_payload["payload"]["id"]
-
-    decision = client.post(
-        f"/v1/approvals/{approval_id}/decisions",
-        json={"action": "approve", "edited_payload": {}},
-    )
-    assert decision.status_code == 200
-    approval = decision.json()
-    assert approval["status"] == "executed"
-    assert approval["result"]["entity_type"] == "message draft"
-    assert approval["result"]["kind"] == "message_draft"
+    assert not any('"type":"approval.required"' in line for line in lines)
+    completed_event = next(line for line in lines if '"type":"assistant.message.completed"' in line)
+    completed_payload = json.loads(completed_event)
+    text = completed_payload["payload"]["text"].lower()
+    assert "need current grounded local evidence" in text or "need stronger grounded evidence" in text
 
     transcript_response = client.get(f"/v1/conversations/{conversation['id']}/messages")
     assert transcript_response.status_code == 200
@@ -388,9 +372,7 @@ def test_message_draft_turn_after_image_requires_approval_and_persists_message_d
     assistant_message = transcript[-1]
     assert assistant_message["role"] == "assistant"
     assert assistant_message["turn_id"]
-    assert assistant_message["approval"]["id"] == approval_id
-    assert assistant_message["approval"]["status"] == "executed"
-    assert assistant_message["approval"]["result"]["entity_type"] == "message draft"
+    assert assistant_message.get("approval") is None
 
 
 def test_build_container_supports_mlx_embedding_backend(

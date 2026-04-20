@@ -52,6 +52,31 @@ class AssetAnalysisStatus(str, Enum):
     FAILED = "failed"
 
 
+class SourceDomain(str, Enum):
+    CONVERSATION = "conversation"
+    IMAGE = "image"
+    VIDEO = "video"
+    DOCUMENT = "document"
+    WORKSPACE = "workspace"
+
+
+class RuntimeProfile(str, Enum):
+    LOW_MEMORY = "low_memory"
+    FULL_LOCAL = "full_local"
+
+
+class ExecutionMode(str, Enum):
+    FULL = "full"
+    FALLBACK = "fallback"
+    UNAVAILABLE = "unavailable"
+
+
+class GroundingStatus(str, Enum):
+    GROUNDED = "grounded"
+    PARTIAL = "partial"
+    UNAVAILABLE = "unavailable"
+
+
 class StreamEventType(str, Enum):
     ASSISTANT_DELTA = "assistant.delta"
     ASSISTANT_MESSAGE_COMPLETED = "assistant.message.completed"
@@ -161,6 +186,30 @@ class SearchResultItem(StrictModel):
     label: str
     excerpt: str
     score: float
+
+
+class EvidenceRef(StrictModel):
+    label: str
+    ref: str
+
+
+class EvidenceFact(StrictModel):
+    summary: str
+    refs: list[EvidenceRef] = Field(default_factory=list)
+
+
+class EvidencePacket(StrictModel):
+    id: str = Field(default_factory=lambda: new_id("evidence"))
+    source_domain: SourceDomain
+    asset_ids: list[str] = Field(default_factory=list)
+    profile: RuntimeProfile
+    execution_mode: ExecutionMode
+    grounding_status: GroundingStatus
+    summary: str
+    facts: list[EvidenceFact] = Field(default_factory=list)
+    uncertainties: list[str] = Field(default_factory=list)
+    refs: list[EvidenceRef] = Field(default_factory=list)
+    artifact_ids: list[str] = Field(default_factory=list)
 
 
 class ConversationStreamEvent(StrictModel):
@@ -323,6 +372,11 @@ class SystemCapabilities(StrictModel):
     tracking_model_available: bool
     medical_model_available: bool
     low_memory_profile: bool
+    active_profile: RuntimeProfile
+    document_extraction_available: bool
+    video_analysis_fallback_only: bool
+    tracking_execution_available: bool
+    isolation_execution_available: bool
 
 
 class ToolDescriptor(StrictModel):

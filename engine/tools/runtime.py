@@ -13,6 +13,8 @@ from engine.contracts.api import (
     AssetKind,
     AssetSummary,
     ConversationTurnRequest,
+    EvidencePacket,
+    GroundingStatus,
     ExportRequest,
     SearchResultItem,
     new_id,
@@ -46,48 +48,58 @@ class ToolRuntime:
         tool_name: str,
         retrieval_results: list[SearchResultItem],
         *,
+        evidence_packet: EvidencePacket | None = None,
         specialist_analysis_text: str | None = None,
         context_assets: list[AssetSummary] | None = None,
         context_summary: str | None = None,
     ) -> ToolPlan:
         if tool_name == "create_note":
+            payload = {
+                "title": self._title_from_request(turn.text, fallback="Field Note"),
+                "content": self._build_note_content(
+                    turn,
+                    evidence_packet=evidence_packet,
+                    specialist_analysis_text=specialist_analysis_text,
+                ),
+                "kind": "note",
+            }
+            self._add_grounding_metadata(payload, evidence_packet)
             return ToolPlan(
                 tool_name=tool_name,
-                payload={
-                    "title": self._title_from_request(turn.text, fallback="Field Note"),
-                    "content": self._build_note_content(
-                        turn,
-                        specialist_analysis_text=specialist_analysis_text,
-                    ),
-                    "kind": "note",
-                },
+                payload=payload,
             )
 
         if tool_name == "create_report":
+            payload = {
+                "title": self._report_title(turn.text, fallback="Field Report"),
+                "content": self._build_report_content(
+                    turn,
+                    evidence_packet=evidence_packet,
+                    specialist_analysis_text=specialist_analysis_text,
+                ),
+                "kind": "report",
+            }
+            self._add_grounding_metadata(payload, evidence_packet)
             return ToolPlan(
                 tool_name=tool_name,
-                payload={
-                    "title": self._report_title(turn.text, fallback="Field Report"),
-                    "content": self._build_report_content(
-                        turn,
-                        specialist_analysis_text=specialist_analysis_text,
-                    ),
-                    "kind": "report",
-                },
+                payload=payload,
             )
 
         if tool_name == "create_message_draft":
+            payload = {
+                "title": self._message_draft_title(turn.text, fallback="Message Draft"),
+                "content": self._build_message_draft_content(
+                    turn,
+                    evidence_packet=evidence_packet,
+                    specialist_analysis_text=specialist_analysis_text,
+                    context_summary=context_summary,
+                ),
+                "kind": "message_draft",
+            }
+            self._add_grounding_metadata(payload, evidence_packet)
             return ToolPlan(
                 tool_name=tool_name,
-                payload={
-                    "title": self._message_draft_title(turn.text, fallback="Message Draft"),
-                    "content": self._build_message_draft_content(
-                        turn,
-                        specialist_analysis_text=specialist_analysis_text,
-                        context_summary=context_summary,
-                    ),
-                    "kind": "message_draft",
-                },
+                payload=payload,
             )
 
         if tool_name == "create_task":
@@ -104,19 +116,22 @@ class ToolRuntime:
             )
 
         if tool_name == "create_checklist":
+            payload = {
+                "title": self._title_from_request(turn.text, fallback="Checklist"),
+                "content": self._build_checklist_content(
+                    turn,
+                    retrieval_results,
+                    evidence_packet=evidence_packet,
+                    specialist_analysis_text=specialist_analysis_text,
+                    context_assets=context_assets or [],
+                    context_summary=context_summary,
+                ),
+                "kind": "checklist",
+            }
+            self._add_grounding_metadata(payload, evidence_packet)
             return ToolPlan(
                 tool_name=tool_name,
-                payload={
-                    "title": self._title_from_request(turn.text, fallback="Checklist"),
-                    "content": self._build_checklist_content(
-                        turn,
-                        retrieval_results,
-                        specialist_analysis_text=specialist_analysis_text,
-                        context_assets=context_assets or [],
-                        context_summary=context_summary,
-                    ),
-                    "kind": "checklist",
-                },
+                payload=payload,
             )
 
         if tool_name == "log_observation":
@@ -149,18 +164,21 @@ class ToolRuntime:
         if tool_name == "export_brief":
             content = self._build_note_content(
                 turn,
+                evidence_packet=evidence_packet,
                 specialist_analysis_text=specialist_analysis_text,
             )
             title = self._export_title(turn.text, content, fallback="Field Brief")
+            payload = {
+                "conversation_id": turn.conversation_id,
+                "title": title,
+                "content": content,
+                "export_type": "markdown",
+                "destination_path": self._default_export_path(title),
+            }
+            self._add_grounding_metadata(payload, evidence_packet)
             return ToolPlan(
                 tool_name=tool_name,
-                payload={
-                    "conversation_id": turn.conversation_id,
-                    "title": title,
-                    "content": content,
-                    "export_type": "markdown",
-                    "destination_path": self._default_export_path(title),
-                },
+                payload=payload,
             )
 
         return ToolPlan(tool_name=tool_name, payload={"request": turn.text.strip()})
@@ -414,10 +432,12 @@ class ToolRuntime:
         self,
         turn: ConversationTurnRequest,
         *,
+        evidence_packet: EvidencePacket | None = None,
         specialist_analysis_text: str | None = None,
     ) -> str:
         content = self._build_note_content(
             turn,
+            evidence_packet=evidence_packet,
             specialist_analysis_text=specialist_analysis_text,
         ).strip()
         title = self._report_title(turn.text, fallback="Field Report")
@@ -431,6 +451,7 @@ class ToolRuntime:
         self,
         turn: ConversationTurnRequest,
         *,
+        evidence_packet: EvidencePacket | None = None,
         specialist_analysis_text: str | None = None,
         context_summary: str | None = None,
     ) -> str:
@@ -438,6 +459,11 @@ class ToolRuntime:
             context_message = self._message_draft_from_context_summary(context_summary)
             if context_message:
                 return self._format_message_draft(context_message)
+
+            if evidence_packet and evidence_packet.facts:
+                body = self._message_draft_from_evidence_packet(evidence_packet)
+                if body:
+                    return self._format_message_draft(body)
 
             if specialist_analysis_text:
                 cleaned = self._clean_specialist_text(specialist_analysis_text).strip()
@@ -699,11 +725,16 @@ class ToolRuntime:
         turn: ConversationTurnRequest,
         retrieval_results: list[SearchResultItem],
         *,
+        evidence_packet: EvidencePacket | None,
         specialist_analysis_text: str | None,
         context_assets: list[AssetSummary],
         context_summary: str | None,
     ) -> str:
         candidate_item_sets: list[list[str]] = []
+        if evidence_packet and evidence_packet.facts:
+            packet_items = [f"- [ ] {fact.summary}" for fact in evidence_packet.facts[:5]]
+            if packet_items:
+                candidate_item_sets.append(packet_items)
         if specialist_analysis_text and not self._looks_like_unavailable_specialist_text(
             specialist_analysis_text
         ):
@@ -797,8 +828,23 @@ class ToolRuntime:
         self,
         turn: ConversationTurnRequest,
         *,
+        evidence_packet: EvidencePacket | None = None,
         specialist_analysis_text: str | None,
     ) -> str:
+        if evidence_packet and evidence_packet.facts:
+            if evidence_packet.source_domain.value == "workspace":
+                lines = ["Key points:"]
+                lines.extend(f"- {fact.summary}" for fact in evidence_packet.facts[:6])
+                if evidence_packet.refs:
+                    lines.append("")
+                    lines.append("Files reviewed:")
+                    lines.extend(f"- {ref.label}" for ref in evidence_packet.refs[:6])
+                return "\n".join(lines).strip()
+            return "\n".join(
+                f"- {fact.summary}"
+                + (f" ({', '.join(ref.ref for ref in fact.refs)})" if fact.refs else "")
+                for fact in evidence_packet.facts[:8]
+            )
         if specialist_analysis_text:
             if self._looks_like_workspace_synthesis_request(turn.text):
                 if self._looks_like_raw_ocr_payload(specialist_analysis_text):
@@ -868,6 +914,38 @@ class ToolRuntime:
             if action_items:
                 return "\n".join(action_items)
         return turn.text.strip()
+
+    def _add_grounding_metadata(
+        self,
+        payload: dict[str, object],
+        evidence_packet: EvidencePacket | None,
+    ) -> None:
+        if evidence_packet is None:
+            return
+        payload["source_domain"] = evidence_packet.source_domain.value
+        payload["evidence_packet_id"] = evidence_packet.id
+        payload["source_asset_ids"] = list(evidence_packet.asset_ids)
+        payload["grounding_status"] = evidence_packet.grounding_status.value
+
+    def _message_draft_from_evidence_packet(
+        self, evidence_packet: EvidencePacket
+    ) -> str | None:
+        if evidence_packet.grounding_status == GroundingStatus.UNAVAILABLE:
+            return None
+        fact_text = [fact.summary.rstrip(".") for fact in evidence_packet.facts[:3] if fact.summary.strip()]
+        if not fact_text:
+            return None
+        if evidence_packet.source_domain.value == "video":
+            return (
+                "I reviewed the local video evidence. "
+                + " ".join(fact_text[:2])
+            )
+        if evidence_packet.source_domain.value == "document":
+            return (
+                "I reviewed the local document. "
+                + " ".join(fact_text[:2])
+            )
+        return " ".join(fact_text[:2])
 
     def _looks_like_workspace_synthesis_request(self, text: str) -> bool:
         lowered = text.lower()

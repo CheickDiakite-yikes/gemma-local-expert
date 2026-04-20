@@ -6,6 +6,7 @@ from engine.contracts.api import (
     AssistantMode,
     ConversationMessage,
     ConversationTurnRequest,
+    SourceDomain,
     TranscriptMessage,
 )
 from engine.context.service import ConversationContextService
@@ -53,6 +54,23 @@ def test_report_turn_proposes_report_tool() -> None:
     assert route.proposed_tool == "create_report"
 
 
+def test_video_report_request_does_not_false_match_workspace_agent() -> None:
+    router = RouterService(ToolRegistry())
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.FIELD,
+        text=(
+            "Prepare a report comparing both videos, call out any possible weapon or process "
+            "findings conservatively, and save it as a report."
+        ),
+    )
+
+    route = router.decide(request)
+
+    assert route.agent_run is False
+    assert route.proposed_tool == "create_report"
+
+
 def test_message_draft_turn_proposes_message_draft_tool() -> None:
     router = RouterService(ToolRegistry())
     request = ConversationTurnRequest(
@@ -77,6 +95,60 @@ def test_export_reference_question_does_not_propose_export_tool() -> None:
     route = router.decide(request)
 
     assert route.proposed_tool is None
+
+
+def test_report_title_question_does_not_propose_report_tool() -> None:
+    router = RouterService(ToolRegistry())
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.GENERAL,
+        text="What title are you using for that report draft right now?",
+    )
+
+    route = router.decide(request)
+
+    assert route.proposed_tool is None
+
+
+def test_report_draft_edit_reference_does_not_propose_fresh_report_tool() -> None:
+    router = RouterService(ToolRegistry())
+    context = ConversationContextService().build(
+        turn_text="Keep that same report draft, but make the title shorter and clearer before we save it.",
+        transcript=[
+            TranscriptMessage(
+                id="msg1",
+                role="assistant",
+                content="I prepared a message draft for approval.",
+                approval=ApprovalState(
+                    id="approval_1",
+                    conversation_id="conv_test",
+                    turn_id="turn_1",
+                    tool_name="create_message_draft",
+                    reason="save locally",
+                    status="pending",
+                    payload={
+                        "title": "Supervisor summary",
+                        "content": "Short summary for the supervisor.",
+                    },
+                ),
+            ),
+        ],
+        attached_assets=[],
+    )
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.GENERAL,
+        text="Keep that same report draft, but make the title shorter and clearer before we save it.",
+    )
+
+    route = router.decide(
+        request,
+        history=[ConversationMessage(role="assistant", content="I prepared a message draft for approval.")],
+        conversation_context=context,
+    )
+
+    assert route.proposed_tool is None
+    assert route.interaction_kind == "draft_follow_up"
 
 
 def test_image_description_routes_to_vision_specialist() -> None:
@@ -210,6 +282,36 @@ def test_video_monitoring_turn_routes_to_tracking_specialist() -> None:
     assert route.needs_retrieval is False
 
 
+def test_attached_document_summary_stays_document_grounded_not_workspace_agent() -> None:
+    router = RouterService(ToolRegistry())
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.GENERAL,
+        text=(
+            "Now switch to the attached document. Summarize it conservatively and tell me "
+            "what kind of file understanding you can do locally."
+        ),
+        asset_ids=["asset_doc"],
+    )
+
+    route = router.decide(
+        request,
+        assets=[
+            AssetSummary(
+                id="asset_doc",
+                display_name="report.pdf",
+                source_path="report.pdf",
+                kind=AssetKind.DOCUMENT,
+                care_context=AssetCareContext.GENERAL,
+            )
+        ],
+    )
+
+    assert route.agent_run is False
+    assert route.specialist_model == "document"
+    assert route.source_domain == SourceDomain.DOCUMENT
+
+
 def test_workspace_agent_turn_routes_to_agent_path() -> None:
     router = RouterService(ToolRegistry())
     request = ConversationTurnRequest(
@@ -257,6 +359,36 @@ def test_supportive_field_turn_stays_conversational_without_retrieval() -> None:
     assert route.interaction_kind == "conversation"
     assert route.needs_retrieval is False
     assert route.specialist_model is None
+
+
+def test_conversational_preface_does_not_clear_explicit_video_reference() -> None:
+    router = RouterService(ToolRegistry())
+    video_asset = AssetSummary(
+        id="asset_video",
+        display_name="clip.mov",
+        source_path="clip.mov",
+        kind=AssetKind.VIDEO,
+    )
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.GENERAL,
+        text="Talk normally with me for a second: after both videos, what are you still most uncertain about?",
+    )
+
+    route = router.decide(
+        request,
+        history=[
+            ConversationMessage(
+                role="assistant",
+                content="I reviewed both videos conservatively from sampled frames.",
+            )
+        ],
+        contextual_assets=[video_asset],
+    )
+
+    assert route.specialist_model == "sam3"
+    assert route.source_domain == SourceDomain.VIDEO
+    assert route.is_follow_up is True
 
 
 def test_follow_up_short_turn_is_marked_as_follow_up() -> None:

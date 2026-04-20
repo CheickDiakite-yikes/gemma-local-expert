@@ -9,6 +9,7 @@ from engine.contracts.api import (
     AssistantMode,
     ConversationMessage,
     ConversationTurnRequest,
+    EvidencePacket,
     SearchResultItem,
 )
 from engine.models.gateway import ModelRouteSelection
@@ -102,6 +103,7 @@ class PromptBuilder:
         model_selection: ModelRouteSelection,
         results: list[SearchResultItem],
         tool_result: dict[str, object] | None = None,
+        evidence_packet: EvidencePacket | None = None,
     ) -> PromptContext:
         history_messages = self._select_history_messages(
             history=history,
@@ -127,6 +129,7 @@ class PromptBuilder:
                     workspace_summary,
                     tool_result,
                     history_trimmed,
+                    evidence_packet,
                 ),
             }
         ]
@@ -147,6 +150,7 @@ class PromptBuilder:
                     policy,
                     results,
                     tool_result,
+                    evidence_packet,
                 ),
             }
         )
@@ -166,6 +170,7 @@ class PromptBuilder:
         workspace_summary: str | None,
         tool_result: dict[str, object] | None,
         history_trimmed: bool,
+        evidence_packet: EvidencePacket | None = None,
     ) -> str:
         lines = [
             "You are Field Assistant, a local-first offline work assistant.",
@@ -284,11 +289,30 @@ class PromptBuilder:
                 "For video work, separate object detection or tracking from higher-level judgment. "
                 "Tracked tools, people, or machines are evidence inputs, not proof of unsafe or illegal conduct by themselves."
             )
+            lines.append(
+                "If the user asks for tracking, SAM, isolation, or segment extraction and the evidence packet says fallback or unavailable, say clearly that tracking/isolation did not run. Do not narrate that it is executing now."
+            )
+        if evidence_packet:
+            lines.append(
+                f"An evidence packet is provided for the current source domain ({evidence_packet.source_domain.value}). "
+                f"Execution mode is {evidence_packet.execution_mode.value} and grounding is {evidence_packet.grounding_status.value}."
+            )
+            lines.append(
+                "Only make claims supported by the evidence packet facts and refs. Treat its uncertainties as hard limits, not soft suggestions."
+            )
+            if evidence_packet.source_domain.value == "document":
+                lines.append(
+                    "For document turns, do not invent clean sections, entities, or action items from sparse OCR lines. If extraction is partial or fallback-only, say so directly and quote only the grounded lines you actually have."
+                )
         if tool_result:
             lines.append(
                 "A safe helper tool already ran during this turn. Explain clearly what it produced and how the user can use it."
             )
-        if specialist_analysis:
+        if evidence_packet:
+            lines.append(
+                "The evidence packet in user context is the primary grounding source for specialist/media/document turns."
+            )
+        elif specialist_analysis:
             lines.append(
                 "Specialist visual analysis is provided in the user context. Prefer it over "
                 "guessing from attachment metadata."
@@ -300,7 +324,7 @@ class PromptBuilder:
             lines.append(
                 "Summarize workspace findings like assistant synthesis, not a serialized trace."
             )
-        if not results and not specialist_analysis and not workspace_summary and not tool_result:
+        if not results and not evidence_packet and not specialist_analysis and not workspace_summary and not tool_result:
             lines.append(
                 "If no local sources are provided, you can still answer from general reasoning. Do not mention missing retrieval unless the user explicitly asked for grounded evidence."
             )
@@ -321,6 +345,7 @@ class PromptBuilder:
         policy: PolicyDecision,
         results: list[SearchResultItem],
         tool_result: dict[str, object] | None,
+        evidence_packet: EvidencePacket | None = None,
     ) -> str:
         sections = [f"User request:\n{turn.text}"]
 
@@ -371,7 +396,22 @@ class PromptBuilder:
                         + "\n- ".join(referent_lines)
                     )
 
-        if specialist_analysis:
+        if evidence_packet:
+            evidence_lines = [
+                f"domain={evidence_packet.source_domain.value}",
+                f"execution_mode={evidence_packet.execution_mode.value}",
+                f"grounding_status={evidence_packet.grounding_status.value}",
+                f"summary={evidence_packet.summary}",
+            ]
+            for fact in evidence_packet.facts[:6]:
+                refs = ", ".join(ref.ref for ref in fact.refs)
+                evidence_lines.append(
+                    f"fact={fact.summary}" + (f" refs={refs}" if refs else "")
+                )
+            for item in evidence_packet.uncertainties[:3]:
+                evidence_lines.append(f"uncertainty={item}")
+            sections.append("Evidence packet:\n- " + "\n- ".join(evidence_lines))
+        elif specialist_analysis:
             sections.append("Specialist visual analysis:\n" + specialist_analysis)
 
         if workspace_summary:

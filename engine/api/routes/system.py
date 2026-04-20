@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends
 
 from engine.api.dependencies import ServiceContainer, get_container
 from engine.contracts.api import SystemCapabilities, ToolDescriptor
+from engine.models.document import document_extraction_available
 from engine.models.sources import resolve_local_model_source
 
 router = APIRouter(tags=["system"])
@@ -38,6 +39,17 @@ async def capabilities(
     container: ServiceContainer = Depends(get_container),
 ) -> SystemCapabilities:
     settings = container.settings
+    low_memory_profile = (
+        settings.default_assistant_model == "gemma-4-e2b-it-4bit"
+        and settings.specialist_backend == "ocr"
+        and settings.embedding_backend == "hash"
+    )
+    tracking_model_available = (
+        resolve_local_model_source(
+            settings.tracking_model_source, settings.default_tracking_model
+        )
+        is not None
+    )
     return SystemCapabilities(
         assistant_backend=settings.assistant_backend,
         assistant_model=settings.default_assistant_model,
@@ -69,23 +81,19 @@ async def capabilities(
             )
             is not None
         ),
-        tracking_model_available=(
-            resolve_local_model_source(
-                settings.tracking_model_source, settings.default_tracking_model
-            )
-            is not None
-        ),
+        tracking_model_available=tracking_model_available,
         medical_model_available=(
             resolve_local_model_source(
                 settings.medical_model_source, settings.default_medical_model
             )
             is not None
         ),
-        low_memory_profile=(
-            settings.default_assistant_model == "gemma-4-e2b-it-4bit"
-            and settings.specialist_backend == "ocr"
-            and settings.embedding_backend == "hash"
-        ),
+        low_memory_profile=low_memory_profile,
+        active_profile="low_memory" if low_memory_profile else "full_local",
+        document_extraction_available=document_extraction_available(),
+        video_analysis_fallback_only=not tracking_model_available,
+        tracking_execution_available=tracking_model_available,
+        isolation_execution_available=tracking_model_available,
     )
 
 

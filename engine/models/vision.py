@@ -9,7 +9,17 @@ from typing import Protocol
 from mlx_vlm import generate as generate_vision
 from mlx_vlm import load as load_vision
 
-from engine.contracts.api import AssetKind, AssistantMode
+from engine.contracts.api import (
+    AssetKind,
+    AssistantMode,
+    EvidenceFact,
+    EvidencePacket,
+    EvidenceRef,
+    ExecutionMode,
+    GroundingStatus,
+    RuntimeProfile,
+    SourceDomain,
+)
 from engine.models.sources import resolve_local_model_source, resolve_model_source
 
 
@@ -44,6 +54,7 @@ class VisionAnalysisResult:
     model_name: str
     model_source: str | None
     available: bool
+    evidence_packet: EvidencePacket | None = None
     unavailable_reason: str | None = None
 
 
@@ -57,12 +68,22 @@ class MetadataVisionRuntime:
     backend_name = "metadata"
 
     def analyze(self, request: VisionAnalysisRequest) -> VisionAnalysisResult:
+        packet = EvidencePacket(
+            source_domain=SourceDomain.IMAGE,
+            asset_ids=[asset.asset_id for asset in request.assets],
+            profile=RuntimeProfile.LOW_MEMORY,
+            execution_mode=ExecutionMode.UNAVAILABLE,
+            grounding_status=GroundingStatus.UNAVAILABLE,
+            summary="No local vision specialist model is available, so only attachment metadata can be reported.",
+            uncertainties=["Pixel-level image review did not run from this path."],
+        )
         return VisionAnalysisResult(
             text=_metadata_summary(request),
             backend=self.backend_name,
             model_name=request.specialist_model_name,
             model_source=request.specialist_model_source,
             available=False,
+            evidence_packet=packet,
             unavailable_reason=(
                 "No local vision specialist model is available, so the assistant is using "
                 "attachment metadata only."
@@ -113,6 +134,15 @@ class MLXVisionRuntime:
                 model_name=request.specialist_model_name,
                 model_source=resolved_source,
                 available=False,
+                evidence_packet=EvidencePacket(
+                    source_domain=SourceDomain.IMAGE,
+                    asset_ids=[asset.asset_id for asset in request.assets],
+                    profile=RuntimeProfile.FULL_LOCAL,
+                    execution_mode=ExecutionMode.UNAVAILABLE,
+                    grounding_status=GroundingStatus.UNAVAILABLE,
+                    summary="Attached images could not be loaded from local storage.",
+                    uncertainties=["No local image files were available for multimodal analysis."],
+                ),
                 unavailable_reason="Attached images could not be loaded from local storage.",
             )
 
@@ -138,6 +168,7 @@ class MLXVisionRuntime:
                 model_name=request.specialist_model_name,
                 model_source=resolved_source,
                 available=False,
+                evidence_packet=fallback.evidence_packet,
                 unavailable_reason=f"Vision specialist inference failed: {exc}",
             )
 
@@ -157,6 +188,12 @@ class MLXVisionRuntime:
             model_name=request.specialist_model_name,
             model_source=resolved_source,
             available=True,
+            evidence_packet=_vision_packet(
+                request,
+                summary=text,
+                backend=backend,
+                grounded=GroundingStatus.GROUNDED if backend == self.backend_name else GroundingStatus.PARTIAL,
+            ),
         )
 
     def _resolve_source(self, request: VisionAnalysisRequest) -> str | None:
@@ -254,6 +291,12 @@ def _ocr_analysis(request: VisionAnalysisRequest) -> VisionAnalysisResult | None
         model_name="tesseract",
         model_source=None,
         available=True,
+        evidence_packet=_vision_packet(
+            request,
+            summary=ocr_text,
+            backend="tesseract",
+            grounded=GroundingStatus.PARTIAL,
+        ),
     )
 
 
@@ -326,4 +369,43 @@ def _merge_visual_and_ocr_text(
             "Visible text extracted from the image:",
             ocr_text,
         ]
+    )
+
+
+def _vision_packet(
+    request: VisionAnalysisRequest,
+    *,
+    summary: str,
+    backend: str,
+    grounded: GroundingStatus,
+) -> EvidencePacket:
+    lines = [
+        line.strip(" -*")
+        for line in summary.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        if line.strip()
+    ]
+    facts: list[EvidenceFact] = []
+    for line in lines:
+        lowered = line.lower()
+        if lowered.startswith(("visible text extracted", "visual observations", "vision specialist routing selected")):
+            continue
+        facts.append(EvidenceFact(summary=line))
+        if len(facts) == 6:
+            break
+
+    execution_mode = ExecutionMode.FULL if backend == "mlx" else ExecutionMode.FALLBACK
+    uncertainties: list[str] = []
+    if grounded != GroundingStatus.GROUNDED:
+        uncertainties.append("This result came from OCR or a fallback image path.")
+
+    return EvidencePacket(
+        source_domain=SourceDomain.IMAGE,
+        asset_ids=[asset.asset_id for asset in request.assets],
+        profile=RuntimeProfile.FULL_LOCAL if backend == "mlx" else RuntimeProfile.LOW_MEMORY,
+        execution_mode=execution_mode,
+        grounding_status=grounded,
+        summary=facts[0].summary if facts else "Local image review completed.",
+        facts=facts,
+        uncertainties=uncertainties,
+        refs=[EvidenceRef(label=asset.display_name, ref=asset.asset_id) for asset in request.assets[:2]],
     )

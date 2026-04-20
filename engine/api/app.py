@@ -25,6 +25,7 @@ from engine.api.routes import (
 from engine.audit.service import AuditService
 from engine.config.settings import Settings, load_settings
 from engine.ingestion.chunking import DocumentChunker
+from engine.models.document import LocalDocumentRuntime
 from engine.models.gateway import ModelGateway
 from engine.models.runtime import MLXAssistantRuntime, MockAssistantRuntime
 from engine.models.video import FFmpegVideoRuntime, MLXSamVideoRuntime, MetadataVideoRuntime
@@ -113,6 +114,7 @@ def build_container(settings: Settings | None = None) -> ServiceContainer:
         raise ValueError(
             f"Unsupported tracking backend: {resolved_settings.tracking_backend}"
         )
+    document_runtime = LocalDocumentRuntime(artifact_root=resolved_settings.asset_storage_dir)
     prompt_builder = PromptBuilder()
     tool_runtime = ToolRuntime(
         store,
@@ -136,6 +138,7 @@ def build_container(settings: Settings | None = None) -> ServiceContainer:
         runtime=runtime,
         vision_runtime=vision_runtime,
         video_runtime=video_runtime,
+        document_runtime=document_runtime,
         prompt_builder=prompt_builder,
         tool_runtime=tool_runtime,
         workspace_agent=workspace_agent,
@@ -152,6 +155,7 @@ def build_container(settings: Settings | None = None) -> ServiceContainer:
         runtime=runtime,
         vision_runtime=vision_runtime,
         video_runtime=video_runtime,
+        document_runtime=document_runtime,
         prompt_builder=prompt_builder,
         tool_runtime=tool_runtime,
         workspace_agent=workspace_agent,

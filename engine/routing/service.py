@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 
 from engine.context.service import ConversationContextSnapshot
 from engine.contracts.api import (
@@ -10,6 +11,7 @@ from engine.contracts.api import (
     AssistantMode,
     ConversationMessage,
     ConversationTurnRequest,
+    SourceDomain,
 )
 from engine.tools.registry import ToolRegistry
 
@@ -20,6 +22,7 @@ class RouteDecision:
     specialist_model: str | None = None
     proposed_tool: str | None = None
     agent_run: bool = False
+    source_domain: SourceDomain | None = None
     interaction_kind: str = "general"
     is_follow_up: bool = False
     reasons: list[str] = field(default_factory=list)
@@ -55,11 +58,6 @@ class RouterService:
         "repo",
         "repository",
         "folder",
-        "file",
-        "files",
-        "document",
-        "documents",
-        "docs",
     }
     _WORKSPACE_ACTION_TOKENS = {
         "search",
@@ -120,6 +118,23 @@ class RouterService:
         "analyse",
         "review",
         "inspect",
+    }
+    _DOCUMENT_HINTS = {
+        "document",
+        "pdf",
+        "page",
+        "pages",
+        "section",
+        "sections",
+        "extract",
+        "summarize",
+        "summarise",
+        "quote",
+        "text",
+        "read",
+        "review",
+        "analyze",
+        "analyse",
     }
     _MEDIA_REFERENCE_PHRASES = {
         "this image",
@@ -286,6 +301,21 @@ class RouterService:
         "update",
         "save",
     }
+    _WORK_PRODUCT_REFERENCE_CUES = {
+        "that",
+        "this",
+        "same",
+        "current",
+        "earlier",
+        "latest",
+        "newer",
+        "again",
+        "title",
+        "called",
+        "before i save",
+        "before you save",
+        "ready to save",
+    }
     _LOCAL_KNOWLEDGE_TOPICS = {
         "ors",
         "oral rehydration",
@@ -391,19 +421,27 @@ class RouterService:
         attached_video_assets = [
             asset for asset in attached_assets if asset.kind == AssetKind.VIDEO
         ]
+        attached_document_assets = [
+            asset for asset in attached_assets if asset.kind == AssetKind.DOCUMENT
+        ]
         contextual_image_assets = [
             asset for asset in contextual_assets if asset.kind == AssetKind.IMAGE
         ]
         contextual_video_assets = [
             asset for asset in contextual_assets if asset.kind == AssetKind.VIDEO
         ]
+        contextual_document_assets = [
+            asset for asset in contextual_assets if asset.kind == AssetKind.DOCUMENT
+        ]
         image_assets = attached_image_assets + contextual_image_assets
         video_assets = attached_video_assets + contextual_video_assets
+        document_assets = attached_document_assets + contextual_document_assets
         medical_image_assets = [
             asset for asset in image_assets if asset.care_context == AssetCareContext.MEDICAL
         ]
         has_visual_context = bool(image_assets)
         has_video_context = bool(video_assets)
+        has_document_context = bool(document_assets)
         history = history or []
         explicit_workspace_request = self._looks_like_workspace_agent_request(lowered)
         explicit_topic_reset = self._looks_like_topic_reset(lowered)
@@ -417,24 +455,27 @@ class RouterService:
         explicit_non_media_override = (
             explicit_workspace_request
             or explicit_topic_reset
-            or explicit_conversation_override
+            or (explicit_conversation_override and not explicit_media_reference)
             or explicit_work_product_reference
             or (explicit_teaching_request and not explicit_media_reference)
             or (explicit_source_request and not explicit_media_reference)
         )
 
         if explicit_non_media_override and (
-            contextual_image_assets or contextual_video_assets
+            contextual_image_assets or contextual_video_assets or contextual_document_assets
         ):
             contextual_image_assets = []
             contextual_video_assets = []
+            contextual_document_assets = []
             image_assets = attached_image_assets
             video_assets = attached_video_assets
+            document_assets = attached_document_assets
             medical_image_assets = [
                 asset for asset in image_assets if asset.care_context == AssetCareContext.MEDICAL
             ]
             has_visual_context = bool(image_assets)
             has_video_context = bool(video_assets)
+            has_document_context = bool(document_assets)
             decision.reasons.append(
                 "Explicit user intent overrides the most recent media context."
             )
@@ -444,6 +485,7 @@ class RouterService:
             mode=turn.mode,
             has_visual_context=bool(attached_image_assets),
             has_video_context=bool(attached_video_assets),
+            has_document_context=bool(attached_document_assets),
         )
 
         decision.is_follow_up = self._looks_like_follow_up(
@@ -452,6 +494,8 @@ class RouterService:
             conversation_context=conversation_context,
             has_visual_context=has_visual_context,
             has_video_context=has_video_context,
+            has_document_context=has_document_context,
+            explicit_media_reference=explicit_media_reference,
             explicit_topic_reset=explicit_topic_reset or explicit_workspace_request,
         )
         if decision.is_follow_up:
@@ -471,6 +515,7 @@ class RouterService:
         if agentic_workspace_request:
             decision.agent_run = True
             decision.interaction_kind = "agent"
+            decision.source_domain = SourceDomain.WORKSPACE
             decision.reasons.append("Turn matches the workspace-scoped agent path.")
 
         if medical_image_assets:
@@ -508,6 +553,7 @@ class RouterService:
                 decision.reasons.append("Using the attached image for this turn.")
             decision.specialist_model = "paligemma"
             decision.interaction_kind = "vision"
+            decision.source_domain = SourceDomain.IMAGE
 
         if decision.specialist_model not in {"medgemma", "translategemma"} and (
             attached_video_assets or (contextual_video_assets and contextual_media_follow_up)
@@ -520,6 +566,20 @@ class RouterService:
                 decision.reasons.append("Using the attached video for this turn.")
             decision.specialist_model = "sam3"
             decision.interaction_kind = "video"
+            decision.source_domain = SourceDomain.VIDEO
+
+        if decision.specialist_model not in {"medgemma", "translategemma", "paligemma", "sam3"} and (
+            attached_document_assets or (contextual_document_assets and decision.is_follow_up)
+        ):
+            if attached_document_assets and any(word in lowered for word in self._DOCUMENT_HINTS):
+                decision.reasons.append("Turn likely needs local document extraction.")
+            elif contextual_document_assets:
+                decision.reasons.append("Using the most recent document context for a follow-up turn.")
+            else:
+                decision.reasons.append("Using the attached document for this turn.")
+            decision.specialist_model = "document"
+            decision.interaction_kind = "document"
+            decision.source_domain = SourceDomain.DOCUMENT
 
         explicit_retrieval = any(token in lowered for token in self._SOURCE_SEEKING_TOKENS)
         image_safe_retrieval = any(
@@ -535,7 +595,15 @@ class RouterService:
             turn.enabled_knowledge_pack_ids
             or (
                 explicit_retrieval
-                and ((not has_visual_context and not has_video_context) or image_safe_retrieval)
+                and (
+                    (not has_visual_context and not has_video_context and not has_document_context)
+                    or (
+                        image_safe_retrieval
+                        and has_visual_context
+                        and not has_video_context
+                        and not has_document_context
+                    )
+                )
                 or knowledge_guided_teaching
             )
         ):
@@ -582,8 +650,9 @@ class RouterService:
         mode: AssistantMode,
         has_visual_context: bool,
         has_video_context: bool,
+        has_document_context: bool,
     ) -> bool:
-        if has_visual_context or has_video_context:
+        if has_visual_context or has_video_context or has_document_context:
             return False
         if any(self._matches_phrase(lowered, phrase) for phrase in self._CASUAL_CONVERSATION_PHRASES):
             return True
@@ -614,8 +683,8 @@ class RouterService:
         if any(phrase in lowered for phrase in self._WORKSPACE_AGENT_PHRASES):
             return True
 
-        has_scope = any(token in lowered for token in self._WORKSPACE_SCOPE_TOKENS)
-        has_action = any(token in lowered for token in self._WORKSPACE_ACTION_TOKENS)
+        has_scope = any(self._contains_term(lowered, token) for token in self._WORKSPACE_SCOPE_TOKENS)
+        has_action = any(self._contains_term(lowered, token) for token in self._WORKSPACE_ACTION_TOKENS)
         return has_scope and has_action
 
     def _looks_like_explicit_media_reference(self, lowered: str) -> bool:
@@ -633,6 +702,10 @@ class RouterService:
                 "video",
                 "clip",
                 "frame",
+                "document",
+                "pdf",
+                "page",
+                "section",
             }
         )
 
@@ -668,6 +741,11 @@ class RouterService:
         words = lowered.replace("?", " ").replace("!", " ").replace(".", " ").split()
         return phrase in words
 
+    def _contains_term(self, lowered: str, term: str) -> bool:
+        if " " in term:
+            return term in lowered
+        return re.search(rf"\b{re.escape(term)}\b", lowered) is not None
+
     def _looks_like_follow_up(
         self,
         lowered: str,
@@ -676,6 +754,8 @@ class RouterService:
         conversation_context: ConversationContextSnapshot | None,
         has_visual_context: bool,
         has_video_context: bool,
+        has_document_context: bool,
+        explicit_media_reference: bool,
         explicit_topic_reset: bool,
     ) -> bool:
         has_prior_context = bool(history) or bool(
@@ -691,6 +771,8 @@ class RouterService:
         if explicit_topic_reset:
             return False
         if self._looks_like_work_product_reference(lowered, conversation_context):
+            return True
+        if explicit_media_reference and (has_visual_context or has_video_context or has_document_context):
             return True
         if lowered.startswith(self._FOLLOW_UP_PREFIXES):
             return True
@@ -741,4 +823,5 @@ class RouterService:
             return True
         has_noun = any(token in lowered for token in self._WORK_PRODUCT_NOUNS)
         has_edit_intent = any(token in lowered for token in self._WORK_PRODUCT_EDIT_TOKENS)
-        return has_noun and has_edit_intent
+        has_reference_cue = any(token in lowered for token in self._WORK_PRODUCT_REFERENCE_CUES)
+        return has_noun and has_edit_intent and has_reference_cue

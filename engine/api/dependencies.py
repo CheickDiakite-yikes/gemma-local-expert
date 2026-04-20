@@ -7,6 +7,7 @@ from fastapi import Request
 from engine.audit.service import AuditService
 from engine.agent.service import WorkspaceAgentService
 from engine.config.settings import Settings
+from engine.models.document import DocumentRuntime
 from engine.models.gateway import ModelGateway
 from engine.models.runtime import AssistantRuntime
 from engine.models.video import VideoRuntime
@@ -33,6 +34,7 @@ class ServiceContainer:
     runtime: AssistantRuntime
     vision_runtime: VisionRuntime
     video_runtime: VideoRuntime
+    document_runtime: DocumentRuntime
     prompt_builder: PromptBuilder
     tool_runtime: ToolRuntime
     workspace_agent: WorkspaceAgentService

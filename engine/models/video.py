@@ -9,7 +9,18 @@ from typing import Protocol
 
 from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 
-from engine.contracts.api import AssetCareContext, AssetKind, AssistantMode
+from engine.contracts.api import (
+    AssetCareContext,
+    AssetKind,
+    AssistantMode,
+    EvidenceFact,
+    EvidencePacket,
+    EvidenceRef,
+    ExecutionMode,
+    GroundingStatus,
+    RuntimeProfile,
+    SourceDomain,
+)
 from engine.models.sources import resolve_local_model_source, resolve_model_source
 
 
@@ -55,6 +66,7 @@ class VideoAnalysisResult:
     model_name: str
     model_source: str | None
     available: bool
+    evidence_packet: EvidencePacket | None = None
     artifacts: list[VideoArtifact] = field(default_factory=list)
     unavailable_reason: str | None = None
 
@@ -75,12 +87,25 @@ class MetadataVideoRuntime:
             if asset.analysis_summary:
                 bits.append(asset.analysis_summary)
             descriptions.append(" | ".join(bits))
+        packet = EvidencePacket(
+            source_domain=SourceDomain.VIDEO,
+            asset_ids=[asset.asset_id for asset in request.assets],
+            profile=RuntimeProfile.LOW_MEMORY,
+            execution_mode=ExecutionMode.UNAVAILABLE,
+            grounding_status=GroundingStatus.UNAVAILABLE,
+            summary="No local video specialist is available, so only video metadata can be reported.",
+            uncertainties=[
+                "Tracking and isolation did not run.",
+                "No sampled local frame evidence was produced from this path.",
+            ],
+        )
         return VideoAnalysisResult(
             text="Video specialist routing selected.\n" + "\n".join(f"- {item}" for item in descriptions),
             backend=self.backend_name,
             model_name=request.tracking_model_name,
             model_source=request.tracking_model_source,
             available=False,
+            evidence_packet=packet,
             unavailable_reason="No local video specialist is available, so only video metadata can be reported.",
         )
 
@@ -92,6 +117,7 @@ class FFmpegVideoRuntime:
         self.artifact_root = Path(artifact_root)
         self.artifact_root.mkdir(parents=True, exist_ok=True)
         self._fallback = MetadataVideoRuntime()
+        self._sample_cache: dict[tuple[str, int, int], VideoAnalysisResult] = {}
 
     def analyze(self, request: VideoAnalysisRequest) -> VideoAnalysisResult:
         source_asset = next((asset for asset in request.assets if asset.kind == AssetKind.VIDEO), None)
@@ -106,12 +132,30 @@ class FFmpegVideoRuntime:
                 model_name=request.tracking_model_name,
                 model_source=request.tracking_model_source,
                 available=False,
+                evidence_packet=EvidencePacket(
+                    source_domain=SourceDomain.VIDEO,
+                    asset_ids=[source_asset.asset_id],
+                    profile=RuntimeProfile.LOW_MEMORY,
+                    execution_mode=ExecutionMode.UNAVAILABLE,
+                    grounding_status=GroundingStatus.UNAVAILABLE,
+                    summary="The referenced local video file is missing.",
+                    uncertainties=["No video evidence could be reviewed because the local file is missing."],
+                ),
                 unavailable_reason="The referenced local video file is missing.",
             )
 
+        cache_key = (
+            source_asset.asset_id,
+            int(video_path.stat().st_mtime_ns),
+            request.sample_frames,
+        )
+        cached = self._sample_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         try:
             metadata = _probe_video(video_path)
-            work_dir = self.artifact_root / request.turn_id
+            work_dir = self.artifact_root / source_asset.asset_id
             work_dir.mkdir(parents=True, exist_ok=True)
             frame_paths = _extract_sample_frames(video_path, metadata, work_dir, request.sample_frames)
         except (FileNotFoundError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
@@ -122,6 +166,7 @@ class FFmpegVideoRuntime:
                 model_name=request.tracking_model_name,
                 model_source=request.tracking_model_source,
                 available=False,
+                evidence_packet=fallback.evidence_packet,
                 artifacts=fallback.artifacts,
                 unavailable_reason=f"Local video sampling failed: {exc}",
             )
@@ -148,25 +193,45 @@ class FFmpegVideoRuntime:
                 )
 
         times = ", ".join(_format_timestamp(item["time_seconds"]) for item in metadata["sample_points"])
-        text = (
-            f"Video loaded locally: {source_asset.display_name}. "
-            f"Duration {_format_timestamp(metadata['duration_seconds'])}, "
-            f"{metadata['width']}x{metadata['height']} at about {metadata['fps']:.1f} fps. "
-            f"I sampled frames around {times} and prepared a contact sheet for review."
+        packet = EvidencePacket(
+            source_domain=SourceDomain.VIDEO,
+            asset_ids=[source_asset.asset_id],
+            profile=RuntimeProfile.LOW_MEMORY,
+            execution_mode=ExecutionMode.FALLBACK,
+            grounding_status=GroundingStatus.PARTIAL,
+            summary=f"Sampled local frames from {source_asset.display_name} and prepared a contact sheet for review.",
+            facts=[
+                EvidenceFact(
+                    summary=(
+                        f"Sampled the clip around {times} after loading it locally "
+                        f"({_format_timestamp(metadata['duration_seconds'])}, {metadata['width']}x{metadata['height']})."
+                    ),
+                    refs=[
+                        EvidenceRef(label="Sample window", ref=_format_timestamp(item["time_seconds"]))
+                        for item in metadata["sample_points"][:4]
+                    ],
+                )
+            ],
+            uncertainties=[
+                "This path only reviews sampled frames and metadata.",
+                "Full tracking and isolation did not run from the fallback path.",
+            ],
+            refs=[
+                EvidenceRef(label="Sample window", ref=_format_timestamp(item["time_seconds"]))
+                for item in metadata["sample_points"][:4]
+            ],
         )
-        if _looks_like_tracking_request(request.user_text):
-            text += (
-                " This fallback path does not infer unsafe or illegal behavior by itself; "
-                "it prepares local visual evidence and metadata until the SAM tracking backend is available."
-            )
-        return VideoAnalysisResult(
-            text=text,
+        result = VideoAnalysisResult(
+            text=_fallback_video_summary(source_asset.display_name, packet),
             backend=self.backend_name,
             model_name=request.tracking_model_name,
             model_source=request.tracking_model_source,
             available=True,
+            evidence_packet=packet,
             artifacts=artifacts,
         )
+        self._sample_cache[cache_key] = result
+        return result
 
 
 class MLXSamVideoRuntime:
@@ -216,6 +281,7 @@ class MLXSamVideoRuntime:
                 model_name=request.tracking_model_name,
                 model_source=resolved_source,
                 available=False,
+                evidence_packet=fallback.evidence_packet,
                 artifacts=fallback.artifacts,
                 unavailable_reason=f"SAM video tracking failed locally: {exc}",
             )
@@ -238,17 +304,38 @@ class MLXSamVideoRuntime:
                 )
             )
 
+        packet = EvidencePacket(
+            source_domain=SourceDomain.VIDEO,
+            asset_ids=[source_asset.asset_id],
+            profile=RuntimeProfile.FULL_LOCAL,
+            execution_mode=ExecutionMode.FULL,
+            grounding_status=GroundingStatus.GROUNDED,
+            summary=f"Tracked {source_asset.display_name} locally with SAM 3.1 prompts: {', '.join(prompts)}.",
+            facts=[
+                EvidenceFact(
+                    summary=(
+                        f"Generated a tracked local output for {_format_timestamp(metadata['duration_seconds'])} "
+                        f"of video at {metadata['width']}x{metadata['height']}."
+                    ),
+                    refs=[EvidenceRef(label="Prompt", ref=prompt) for prompt in prompts[:4]],
+                )
+            ],
+            uncertainties=[
+                "The tracked output still needs assistant review before any policy or safety conclusion."
+            ],
+            artifact_ids=[artifact.local_path for artifact in artifacts if artifact.kind == AssetKind.VIDEO],
+        )
+
         return VideoAnalysisResult(
             text=(
-                f"Tracked the local video with SAM 3.1 using prompts: {', '.join(prompts)}. "
-                f"The source clip is {_format_timestamp(metadata['duration_seconds'])} long at "
-                f"{metadata['width']}x{metadata['height']}. Review the tracked output for repeated tool, "
-                "vehicle, machine, or person activity; policy conclusions should still come from the assistant or rules layer."
+                f"I ran local SAM tracking on {source_asset.display_name} using prompts: {', '.join(prompts)}. "
+                "The tracked output is ready for review, but any safety or policy conclusion should still come from visible evidence."
             ),
             backend=self.backend_name,
             model_name=request.tracking_model_name,
             model_source=resolved_source,
             available=True,
+            evidence_packet=packet,
             artifacts=artifacts,
         )
 
@@ -449,3 +536,18 @@ def _tracking_prompts_for_text(text: str) -> list[str]:
     if not prompts:
         prompts.append("person")
     return list(dict.fromkeys(prompts))
+
+
+def _fallback_video_summary(display_name: str, packet: EvidencePacket) -> str:
+    lines = [f"I reviewed {display_name} locally using sampled frames."]
+    if packet.facts:
+        lines.append("Grounded from the fallback path:")
+        for fact in packet.facts[:2]:
+            refs = ", ".join(ref.ref for ref in fact.refs)
+            suffix = f" ({refs})" if refs else ""
+            lines.append(f"- {fact.summary}{suffix}")
+    if packet.uncertainties:
+        lines.append("Limits:")
+        for item in packet.uncertainties[:2]:
+            lines.append(f"- {item}")
+    return "\n".join(lines)

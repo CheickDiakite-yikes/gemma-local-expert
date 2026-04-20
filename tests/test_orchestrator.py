@@ -10,8 +10,16 @@ from engine.contracts.api import (
     AssetIngestRequest,
     ConversationCreateRequest,
     ConversationTurnRequest,
+    EvidenceFact,
+    EvidencePacket,
+    EvidenceRef,
+    ExecutionMode,
+    GroundingStatus,
+    RuntimeProfile,
+    SourceDomain,
     StreamEventType,
 )
+from engine.models.document import DocumentAnalysisResult
 from engine.models.video import VideoAnalysisResult, VideoArtifact
 from engine.models.vision import VisionAnalysisResult
 
@@ -269,6 +277,421 @@ def test_orchestrator_supports_normal_conversation_without_retrieval_warning(
         text = completed[0].payload["text"]
         assert "talk normally" in text.lower()
         assert "retrieved local sources" not in text.lower()
+    finally:
+        container.store.close()
+
+
+def test_orchestrator_tracking_request_uses_truthful_unavailable_reply(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(database_path=str(tmp_path / "orchestrator-video-guardrail.db"))
+    container = build_container(settings)
+    try:
+        class FakeVideoRuntime:
+            backend_name = "fake-video"
+
+            def analyze(self, request):
+                return VideoAnalysisResult(
+                    text="Fallback video sampling only.",
+                    backend="fake-video",
+                    model_name=request.tracking_model_name,
+                    model_source="/tmp/fake-sam",
+                    available=True,
+                    evidence_packet=EvidencePacket(
+                        source_domain=SourceDomain.VIDEO,
+                        asset_ids=[request.assets[0].asset_id],
+                        profile=RuntimeProfile.LOW_MEMORY,
+                        execution_mode=ExecutionMode.FALLBACK,
+                        grounding_status=GroundingStatus.PARTIAL,
+                        summary="Sampled fallback video frames only.",
+                        facts=[
+                            EvidenceFact(
+                                summary="Sampled the clip around 00:16 and 00:41.",
+                                refs=[EvidenceRef(label="Timestamp", ref="00:16")],
+                            )
+                        ],
+                        uncertainties=[
+                            "Full tracking and isolation did not run from the fallback path."
+                        ],
+                    ),
+                )
+
+        container.orchestrator.video_runtime = FakeVideoRuntime()
+        conversation = container.store.create_conversation(
+            ConversationCreateRequest(title="Video Guardrail", mode=AssistantMode.GENERAL)
+        )
+        video_path = tmp_path / "guardrail.mp4"
+        video_path.write_bytes(b"fake-video-bytes")
+        ingest_result = container.store.ingest_assets(
+            AssetIngestRequest(source_paths=[str(video_path)])
+        )
+
+        request = ConversationTurnRequest(
+            conversation_id=conversation.id,
+            mode=AssistantMode.GENERAL,
+            text="Use local SAM tracking or local video isolation on this video.",
+            asset_ids=ingest_result.asset_ids,
+        )
+
+        events = asyncio.run(_collect_events(container, request))
+        completed = [
+            event for event in events if event.type == StreamEventType.ASSISTANT_MESSAGE_COMPLETED
+        ]
+        assert completed
+        text = completed[0].payload["text"].lower()
+        assert "could not run local sam tracking or video isolation" in text
+        assert "executing local sam tracking" not in text
+    finally:
+        container.store.close()
+
+
+def test_orchestrator_document_turn_stays_grounded_when_extraction_is_partial(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(database_path=str(tmp_path / "orchestrator-document-guardrail.db"))
+    container = build_container(settings)
+    try:
+        class FakeDocumentRuntime:
+            backend_name = "fake-document"
+
+            def analyze(self, request):
+                asset = request.assets[0]
+                packet = EvidencePacket(
+                    source_domain=SourceDomain.DOCUMENT,
+                    asset_ids=[asset.asset_id],
+                    profile=RuntimeProfile.LOW_MEMORY,
+                    execution_mode=ExecutionMode.FALLBACK,
+                    grounding_status=GroundingStatus.PARTIAL,
+                    summary="Mali at a Turning Point:",
+                    facts=[
+                        EvidenceFact(
+                            summary="Mali at a Turning Point:",
+                            refs=[EvidenceRef(label="Page 1", ref="p1")],
+                        ),
+                        EvidenceFact(
+                            summary="The world is entering a new age of intelligence.",
+                            refs=[EvidenceRef(label="Page 2", ref="p2")],
+                        ),
+                    ],
+                    uncertainties=[
+                        "The document summary is based on OCR fallback rather than embedded text."
+                    ],
+                )
+                return DocumentAnalysisResult(
+                    text="I reviewed the document locally.",
+                    backend="fake-document",
+                    model_name="ocr-fallback",
+                    model_source=None,
+                    available=True,
+                    evidence_packet=packet,
+                    unavailable_reason="Embedded PDF text was unavailable, so OCR fallback was used.",
+                )
+
+        container.orchestrator.document_runtime = FakeDocumentRuntime()
+        conversation = container.store.create_conversation(
+            ConversationCreateRequest(title="Document Guardrail", mode=AssistantMode.GENERAL)
+        )
+        pdf_path = tmp_path / "report.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4 fake")
+        ingest_result = container.store.ingest_assets(
+            AssetIngestRequest(source_paths=[str(pdf_path)])
+        )
+
+        request = ConversationTurnRequest(
+            conversation_id=conversation.id,
+            mode=AssistantMode.GENERAL,
+            text=(
+                "From that same document, extract the main sections, key named entities, "
+                "and any clear action items or claims."
+            ),
+            asset_ids=ingest_result.asset_ids,
+        )
+
+        events = asyncio.run(_collect_events(container, request))
+        completed = [
+            event for event in events if event.type == StreamEventType.ASSISTANT_MESSAGE_COMPLETED
+        ]
+        assert completed
+        text = completed[0].payload["text"].lower()
+        assert "do not have a clean enough document extraction" in text
+        assert "main sections" in text
+        assert "p1" in text or "p2" in text
+    finally:
+        container.store.close()
+
+
+def test_orchestrator_document_follow_up_keeps_document_context(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(database_path=str(tmp_path / "orchestrator-document-follow-up.db"))
+    container = build_container(settings)
+    try:
+        class FakeDocumentRuntime:
+            backend_name = "fake-document"
+
+            def analyze(self, request):
+                asset = request.assets[0]
+                packet = EvidencePacket(
+                    source_domain=SourceDomain.DOCUMENT,
+                    asset_ids=[asset.asset_id],
+                    profile=RuntimeProfile.LOW_MEMORY,
+                    execution_mode=ExecutionMode.FALLBACK,
+                    grounding_status=GroundingStatus.PARTIAL,
+                    summary="Mali at a Turning Point:",
+                    facts=[
+                        EvidenceFact(
+                            summary="Mali at a Turning Point:",
+                            refs=[EvidenceRef(label="Page 1", ref="p1")],
+                        ),
+                        EvidenceFact(
+                            summary="The world is entering a new age of intelligence.",
+                            refs=[EvidenceRef(label="Page 2", ref="p2")],
+                        ),
+                    ],
+                    uncertainties=[
+                        "The document summary is based on OCR fallback rather than embedded text."
+                    ],
+                )
+                return DocumentAnalysisResult(
+                    text="I reviewed the document locally.",
+                    backend="fake-document",
+                    model_name="ocr-fallback",
+                    model_source=None,
+                    available=True,
+                    evidence_packet=packet,
+                    unavailable_reason="Embedded PDF text was unavailable, so OCR fallback was used.",
+                )
+
+        container.orchestrator.document_runtime = FakeDocumentRuntime()
+        conversation = container.store.create_conversation(
+            ConversationCreateRequest(title="Document Follow-up", mode=AssistantMode.GENERAL)
+        )
+        pdf_path = tmp_path / "followup.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4 fake")
+        ingest_result = container.store.ingest_assets(
+            AssetIngestRequest(source_paths=[str(pdf_path)])
+        )
+
+        asyncio.run(
+            _collect_events(
+                container,
+                ConversationTurnRequest(
+                    conversation_id=conversation.id,
+                    mode=AssistantMode.GENERAL,
+                    text=(
+                        "Now switch to the attached document. Summarize it conservatively and tell me "
+                        "what kind of file understanding you can do locally."
+                    ),
+                    asset_ids=ingest_result.asset_ids,
+                ),
+            )
+        )
+        events = asyncio.run(
+            _collect_events(
+                container,
+                ConversationTurnRequest(
+                    conversation_id=conversation.id,
+                    mode=AssistantMode.GENERAL,
+                    text=(
+                        "From that same document, extract the main sections, key named entities, "
+                        "and any clear action items or claims."
+                    ),
+                ),
+            )
+        )
+        completed = [
+            event for event in events if event.type == StreamEventType.ASSISTANT_MESSAGE_COMPLETED
+        ]
+        assert completed
+        text = completed[0].payload["text"].lower()
+        assert "clean enough document extraction" in text
+        assert "mali at a turning point" in text
+    finally:
+        container.store.close()
+
+
+def test_orchestrator_blocks_partial_video_report_until_user_overrides(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(database_path=str(tmp_path / "orchestrator-video-report.db"))
+    container = build_container(settings)
+    try:
+        class FakeVideoRuntime:
+            backend_name = "fake-video"
+
+            def analyze(self, request):
+                return VideoAnalysisResult(
+                    text="Fallback video sampling only.",
+                    backend="fake-video",
+                    model_name=request.tracking_model_name,
+                    model_source="/tmp/fake-sam",
+                    available=True,
+                    evidence_packet=EvidencePacket(
+                        source_domain=SourceDomain.VIDEO,
+                        asset_ids=[request.assets[0].asset_id],
+                        profile=RuntimeProfile.LOW_MEMORY,
+                        execution_mode=ExecutionMode.FALLBACK,
+                        grounding_status=GroundingStatus.PARTIAL,
+                        summary="Sampled fallback video frames only.",
+                        facts=[
+                            EvidenceFact(
+                                summary="Sampled the clip around 00:16 and 00:41.",
+                                refs=[EvidenceRef(label="Timestamp", ref="00:16")],
+                            )
+                        ],
+                        uncertainties=[
+                            "Full tracking and isolation did not run from the fallback path."
+                        ],
+                    ),
+                )
+
+        container.orchestrator.video_runtime = FakeVideoRuntime()
+        conversation = container.store.create_conversation(
+            ConversationCreateRequest(title="Video Report Guardrail", mode=AssistantMode.GENERAL)
+        )
+        video_path = tmp_path / "compare.mp4"
+        video_path.write_bytes(b"fake-video-bytes")
+        ingest_result = container.store.ingest_assets(
+            AssetIngestRequest(source_paths=[str(video_path)])
+        )
+
+        first_turn = ConversationTurnRequest(
+            conversation_id=conversation.id,
+            mode=AssistantMode.GENERAL,
+            text="Review this video conservatively first.",
+            asset_ids=ingest_result.asset_ids,
+        )
+        second_turn = ConversationTurnRequest(
+            conversation_id=conversation.id,
+            mode=AssistantMode.GENERAL,
+            text="Prepare a report based on that video and save it as a report.",
+        )
+
+        asyncio.run(_collect_events(container, first_turn))
+        events = asyncio.run(_collect_events(container, second_turn))
+        completed = [
+            event for event in events if event.type == StreamEventType.ASSISTANT_MESSAGE_COMPLETED
+        ]
+        assert completed
+        text = completed[0].payload["text"].lower()
+        assert "need stronger grounded evidence" in text
+        assert "prepare that durable draft" in text
+    finally:
+        container.store.close()
+
+
+def test_orchestrator_does_not_retarget_missing_report_to_message_draft(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(database_path=str(tmp_path / "orchestrator-missing-report.db"))
+    container = build_container(settings)
+    try:
+        class FakeVideoRuntime:
+            backend_name = "fake-video"
+
+            def analyze(self, request):
+                return VideoAnalysisResult(
+                    text="Fallback video sampling only.",
+                    backend="fake-video",
+                    model_name=request.tracking_model_name,
+                    model_source="/tmp/fake-sam",
+                    available=True,
+                    evidence_packet=EvidencePacket(
+                        source_domain=SourceDomain.VIDEO,
+                        asset_ids=[asset.asset_id for asset in request.assets],
+                        profile=RuntimeProfile.LOW_MEMORY,
+                        execution_mode=ExecutionMode.FALLBACK,
+                        grounding_status=GroundingStatus.PARTIAL,
+                        summary="Sampled fallback video frames only.",
+                        facts=[
+                            EvidenceFact(
+                                summary="Sampled the clip around 00:16 and 00:41.",
+                                refs=[EvidenceRef(label="Timestamp", ref="00:16")],
+                            )
+                        ],
+                        uncertainties=[
+                            "Full tracking and isolation did not run from the fallback path."
+                        ],
+                    ),
+                )
+
+        container.orchestrator.video_runtime = FakeVideoRuntime()
+        conversation = container.store.create_conversation(
+            ConversationCreateRequest(title="Missing Report Guardrail", mode=AssistantMode.GENERAL)
+        )
+        video_path = tmp_path / "missing-report.mp4"
+        video_path.write_bytes(b"fake-video-bytes")
+        ingest_result = container.store.ingest_assets(
+            AssetIngestRequest(source_paths=[str(video_path)])
+        )
+
+        asyncio.run(
+            _collect_events(
+                container,
+                ConversationTurnRequest(
+                    conversation_id=conversation.id,
+                    mode=AssistantMode.GENERAL,
+                    text="Review this video conservatively first.",
+                    asset_ids=ingest_result.asset_ids,
+                ),
+            )
+        )
+        asyncio.run(
+            _collect_events(
+                container,
+                ConversationTurnRequest(
+                    conversation_id=conversation.id,
+                    mode=AssistantMode.GENERAL,
+                    text="Draft a short message to a supervisor summarizing the first video conservatively.",
+                ),
+            )
+        )
+        asyncio.run(
+            _collect_events(
+                container,
+                ConversationTurnRequest(
+                    conversation_id=conversation.id,
+                    mode=AssistantMode.GENERAL,
+                    text="Prepare a report based on that video and save it as a report.",
+                ),
+            )
+        )
+        events = asyncio.run(
+            _collect_events(
+                container,
+                ConversationTurnRequest(
+                    conversation_id=conversation.id,
+                    mode=AssistantMode.GENERAL,
+                    text="What title are you using for that report draft right now?",
+                ),
+            )
+        )
+        completed = [
+            event for event in events if event.type == StreamEventType.ASSISTANT_MESSAGE_COMPLETED
+        ]
+        assert completed
+        text = completed[0].payload["text"].lower()
+        assert "there is no current report" in text
+        assert "message draft" not in text
+
+        events = asyncio.run(
+            _collect_events(
+                container,
+                ConversationTurnRequest(
+                    conversation_id=conversation.id,
+                    mode=AssistantMode.GENERAL,
+                    text="Keep that same report draft, but make the title shorter and clearer before we save it.",
+                ),
+            )
+        )
+        completed = [
+            event for event in events if event.type == StreamEventType.ASSISTANT_MESSAGE_COMPLETED
+        ]
+        assert completed
+        text = completed[0].payload["text"].lower()
+        assert "there is no current report" in text
+        assert "what is the current draft you are referring to" not in text
+        assert not any(event.type == StreamEventType.APPROVAL_REQUIRED for event in events)
     finally:
         container.store.close()
 

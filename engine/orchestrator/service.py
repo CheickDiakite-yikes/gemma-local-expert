@@ -15,9 +15,17 @@ from engine.contracts.api import (
     AssetAnalysisStatus,
     AssetKind,
     AssetSummary,
+    EvidencePacket,
+    EvidenceFact,
+    EvidenceRef,
+    ExecutionMode,
+    GroundingStatus,
+    RuntimeProfile,
+    SourceDomain,
     TranscriptMessage,
 )
 from engine.contracts.api import ConversationStreamEvent, ConversationTurnRequest, StreamEventType, new_id
+from engine.models.document import DocumentAnalysisRequest, DocumentAsset, DocumentRuntime
 from engine.models.gateway import ModelGateway
 from engine.models.runtime import (
     AssistantGenerationRequest,
@@ -47,6 +55,7 @@ class OrchestratorService:
         runtime: AssistantRuntime,
         vision_runtime: VisionRuntime,
         video_runtime: VideoRuntime,
+        document_runtime: DocumentRuntime,
         prompt_builder: PromptBuilder,
         tool_runtime: ToolRuntime,
         workspace_agent: WorkspaceAgentService,
@@ -61,6 +70,7 @@ class OrchestratorService:
         self.runtime = runtime
         self.vision_runtime = vision_runtime
         self.video_runtime = video_runtime
+        self.document_runtime = document_runtime
         self.prompt_builder = prompt_builder
         self.tool_runtime = tool_runtime
         self.workspace_agent = workspace_agent
@@ -145,7 +155,11 @@ class OrchestratorService:
                 payload={"message": warning},
             )
 
-        if route.interaction_kind == "draft_follow_up" and active_pending_approval:
+        if (
+            route.interaction_kind == "draft_follow_up"
+            and active_pending_approval
+            and getattr(conversation_context, "selected_referent_kind", None) == "pending_output"
+        ):
             revised_approval = self._apply_pending_draft_revision(
                 approval=active_pending_approval,
                 instruction=turn.text,
@@ -223,6 +237,7 @@ class OrchestratorService:
                 )
 
         specialist_analysis = None
+        evidence_packet: EvidencePacket | None = None
         specialist_asset_ids: list[str] = []
         if route.specialist_model in {"paligemma", "medgemma"} and model_selection.specialist_model:
             visual_assets = self._collect_visual_assets(routed_assets)
@@ -255,12 +270,19 @@ class OrchestratorService:
                     model_name=specialist_analysis.model_name,
                     available=specialist_analysis.available,
                 )
+                evidence_packet = specialist_analysis.evidence_packet
                 if not specialist_analysis.available and specialist_analysis.unavailable_reason:
                     yield ConversationStreamEvent(
                         type=StreamEventType.WARNING,
                         conversation_id=turn.conversation_id,
                         turn_id=turn_id,
-                        payload={"message": specialist_analysis.unavailable_reason},
+                        payload={
+                            "message": specialist_analysis.unavailable_reason,
+                            "source_domain": SourceDomain.IMAGE.value,
+                            "execution_mode": evidence_packet.execution_mode.value if evidence_packet else None,
+                            "grounding_status": evidence_packet.grounding_status.value if evidence_packet else None,
+                            "evidence_packet_id": evidence_packet.id if evidence_packet else None,
+                        },
                     )
         elif route.specialist_model == "sam3" and model_selection.tracking_model:
             video_assets = self._collect_video_assets(routed_assets)
@@ -289,6 +311,9 @@ class OrchestratorService:
                 specialist_asset_ids = self._persist_specialist_artifacts(
                     specialist_analysis.artifacts
                 )
+                evidence_packet = specialist_analysis.evidence_packet
+                if evidence_packet is not None:
+                    evidence_packet.artifact_ids = list(specialist_asset_ids)
                 self.audit.record(
                     "video.analyzed",
                     conversation_id=turn.conversation_id,
@@ -302,7 +327,53 @@ class OrchestratorService:
                         type=StreamEventType.WARNING,
                         conversation_id=turn.conversation_id,
                         turn_id=turn_id,
-                        payload={"message": specialist_analysis.unavailable_reason},
+                        payload={
+                            "message": specialist_analysis.unavailable_reason,
+                            "source_domain": SourceDomain.VIDEO.value,
+                            "execution_mode": evidence_packet.execution_mode.value if evidence_packet else None,
+                            "grounding_status": evidence_packet.grounding_status.value if evidence_packet else None,
+                            "evidence_packet_id": evidence_packet.id if evidence_packet else None,
+                        },
+                    )
+        elif route.specialist_model == "document":
+            document_assets = self._collect_document_assets(routed_assets)
+            if document_assets:
+                yield self._status_event(
+                    conversation_id=turn.conversation_id,
+                    turn_id=turn_id,
+                    kind="document",
+                    label="Reviewing the document locally",
+                    detail="Running local document extraction before the final answer.",
+                )
+                specialist_analysis = self.document_runtime.analyze(
+                    DocumentAnalysisRequest(
+                        conversation_id=turn.conversation_id,
+                        turn_id=turn_id,
+                        user_text=turn.text,
+                        assets=document_assets,
+                    )
+                )
+                evidence_packet = specialist_analysis.evidence_packet
+                self.audit.record(
+                    "document.analyzed",
+                    conversation_id=turn.conversation_id,
+                    turn_id=turn_id,
+                    backend=specialist_analysis.backend,
+                    model_name=specialist_analysis.model_name,
+                    available=specialist_analysis.available,
+                )
+                if specialist_analysis.unavailable_reason:
+                    yield ConversationStreamEvent(
+                        type=StreamEventType.WARNING,
+                        conversation_id=turn.conversation_id,
+                        turn_id=turn_id,
+                        payload={
+                            "message": specialist_analysis.unavailable_reason,
+                            "source_domain": SourceDomain.DOCUMENT.value,
+                            "execution_mode": evidence_packet.execution_mode.value if evidence_packet else None,
+                            "grounding_status": evidence_packet.grounding_status.value if evidence_packet else None,
+                            "evidence_packet_id": evidence_packet.id if evidence_packet else None,
+                        },
                     )
 
         if route.agent_run:
@@ -371,12 +442,17 @@ class OrchestratorService:
 
                 workspace_summary = agent_state.summary_text or agent_run.result_summary
                 if agent_run.status == AgentRunStatus.RUNNING and workspace_summary:
+                    evidence_packet = self._workspace_evidence_packet(
+                        summary_text=workspace_summary,
+                        run=agent_run,
+                    )
                     if agent_plan.output_tool_name:
                         prepared_tool_name = agent_plan.output_tool_name
                         prepared_tool_plan = self.tool_runtime.plan(
                             turn,
                             prepared_tool_name,
                             results,
+                            evidence_packet=evidence_packet,
                             specialist_analysis_text=workspace_summary,
                             context_assets=routed_assets,
                             context_summary=conversation_context.selected_context_summary,
@@ -402,6 +478,10 @@ class OrchestratorService:
                         result_summary="The workspace run completed without strong matching files.",
                     )
                     workspace_summary = agent_run.result_summary
+                    evidence_packet = self._workspace_evidence_packet(
+                        summary_text=workspace_summary,
+                        run=agent_run,
+                    )
                     yield self._status_event(
                         conversation_id=turn.conversation_id,
                         turn_id=turn_id,
@@ -424,6 +504,12 @@ class OrchestratorService:
                     result_summary=str(exc),
                 )
                 workspace_summary = str(exc)
+                evidence_packet = self._workspace_evidence_packet(
+                    summary_text=workspace_summary,
+                    run=agent_run,
+                    grounded=GroundingStatus.UNAVAILABLE,
+                    execution_mode=ExecutionMode.UNAVAILABLE,
+                )
                 yield self._status_event(
                     conversation_id=turn.conversation_id,
                     turn_id=turn_id,
@@ -445,11 +531,34 @@ class OrchestratorService:
                 )
 
         planned_tool_name = prepared_tool_name or route.proposed_tool
+        tool_feedback: str | None = None
+        if planned_tool_name:
+            allowed, tool_feedback = self._grounding_allows_tool(
+                tool_name=planned_tool_name,
+                evidence_packet=evidence_packet,
+                user_text=turn.text,
+                source_domain=route.source_domain,
+            )
+            if not allowed:
+                yield ConversationStreamEvent(
+                    type=StreamEventType.WARNING,
+                    conversation_id=turn.conversation_id,
+                    turn_id=turn_id,
+                    payload={
+                        "message": tool_feedback,
+                        "source_domain": route.source_domain.value if route.source_domain else None,
+                        "execution_mode": evidence_packet.execution_mode.value if evidence_packet else None,
+                        "grounding_status": evidence_packet.grounding_status.value if evidence_packet else None,
+                        "evidence_packet_id": evidence_packet.id if evidence_packet else None,
+                    },
+                )
+                planned_tool_name = None
         if planned_tool_name:
             tool_plan = prepared_tool_plan or self.tool_runtime.plan(
                 turn,
                 planned_tool_name,
                 results,
+                evidence_packet=evidence_packet,
                 specialist_analysis_text=(
                     workspace_summary
                     or (specialist_analysis.text if specialist_analysis else None)
@@ -464,6 +573,10 @@ class OrchestratorService:
                 payload={
                     "tool_name": planned_tool_name,
                     "payload": tool_plan.payload,
+                    "source_domain": route.source_domain.value if route.source_domain else None,
+                    "execution_mode": evidence_packet.execution_mode.value if evidence_packet else None,
+                    "grounding_status": evidence_packet.grounding_status.value if evidence_packet else None,
+                    "evidence_packet_id": evidence_packet.id if evidence_packet else None,
                     "run_id": agent_run.id if agent_run else None,
                     "run": agent_run.model_dump(mode="json") if agent_run else None,
                 },
@@ -504,6 +617,10 @@ class OrchestratorService:
                     turn_id=turn_id,
                     payload={
                         **approval.model_dump(mode="json"),
+                        "source_domain": route.source_domain.value if route.source_domain else None,
+                        "execution_mode": evidence_packet.execution_mode.value if evidence_packet else None,
+                        "grounding_status": evidence_packet.grounding_status.value if evidence_packet else None,
+                        "evidence_packet_id": evidence_packet.id if evidence_packet else None,
                         "run": agent_run.model_dump(mode="json") if agent_run else None,
                     },
                 )
@@ -523,6 +640,10 @@ class OrchestratorService:
                     payload={
                         "tool_name": planned_tool_name,
                         "payload": tool_plan.payload,
+                        "source_domain": route.source_domain.value if route.source_domain else None,
+                        "execution_mode": evidence_packet.execution_mode.value if evidence_packet else None,
+                        "grounding_status": evidence_packet.grounding_status.value if evidence_packet else None,
+                        "evidence_packet_id": evidence_packet.id if evidence_packet else None,
                         "run_id": agent_run.id if agent_run else None,
                         "run": agent_run.model_dump(mode="json") if agent_run else None,
                     },
@@ -549,6 +670,10 @@ class OrchestratorService:
                         "tool_name": planned_tool_name,
                         "result": tool_result,
                         "assets": [asset.model_dump(mode="json") for asset in completed_assets],
+                        "source_domain": route.source_domain.value if route.source_domain else None,
+                        "execution_mode": evidence_packet.execution_mode.value if evidence_packet else None,
+                        "grounding_status": evidence_packet.grounding_status.value if evidence_packet else None,
+                        "evidence_packet_id": evidence_packet.id if evidence_packet else None,
                         "run_id": agent_run.id if agent_run else None,
                         "run": agent_run.model_dump(mode="json") if agent_run else None,
                     },
@@ -570,7 +695,19 @@ class OrchestratorService:
         )
         deterministic_reply = self._multi_output_recall_reply(
             turn.text, conversation_context
+        ) or self._missing_output_reply(
+            turn_text=turn.text,
+            conversation_context=conversation_context,
+        ) or self._evidence_guardrail_reply(
+            turn_text=turn.text,
+            evidence_packet=evidence_packet,
+            route=route,
         )
+        if not deterministic_reply and tool_feedback and not planned_tool_name:
+            deterministic_reply = self._grounding_feedback_reply(
+                tool_feedback=tool_feedback,
+                evidence_packet=evidence_packet,
+            )
         prompt_context = None
         if deterministic_reply and not planned_tool_name:
             generation = AssistantGenerationResult(
@@ -586,13 +723,19 @@ class OrchestratorService:
                 assets=attached_assets,
                 context_assets=contextual_assets,
                 conversation_context=conversation_context,
+                evidence_packet=evidence_packet,
                 specialist_analysis=specialist_analysis.text if specialist_analysis else None,
                 workspace_summary=workspace_summary,
                 route=route,
                 policy=policy,
                 model_selection=model_selection,
                 results=results,
-                tool_result=tool_result,
+                tool_result=tool_result
+                or (
+                    {"message": tool_feedback, "status": "grounding_blocked"}
+                    if tool_feedback and not planned_tool_name
+                    else None
+                ),
             )
 
             generation = self.runtime.generate(
@@ -614,10 +757,16 @@ class OrchestratorService:
                     referent_excerpt=conversation_context.selected_referent_excerpt,
                     proposed_tool=planned_tool_name,
                     approval_required=approval_required,
-                    tool_result=tool_result,
+                    tool_result=tool_result
+                    or (
+                        {"message": tool_feedback, "status": "grounding_blocked"}
+                        if tool_feedback and not planned_tool_name
+                        else None
+                    ),
                     assistant_model_name=model_selection.assistant_model,
                     assistant_model_source=model_selection.assistant_model_source,
                     specialist_model_name=model_selection.specialist_model,
+                    evidence_packet=evidence_packet,
                     specialist_analysis_text=specialist_analysis.text if specialist_analysis else None,
                     workspace_summary_text=workspace_summary,
                     max_tokens=self.settings.assistant_max_tokens,
@@ -702,6 +851,183 @@ class OrchestratorService:
             return None
         return "\n".join(parts)
 
+    def _missing_output_reply(
+        self,
+        *,
+        turn_text: str,
+        conversation_context,
+    ) -> str | None:
+        if not conversation_context or conversation_context.selected_referent_kind != "missing_output":
+            return None
+        label = self._tool_label(conversation_context.selected_referent_tool)
+        lowered = turn_text.lower().strip()
+        if any(
+            token in lowered
+            for token in {
+                "title",
+                "called",
+                "name",
+                "named",
+                "shorter",
+                "tighten",
+                "rename",
+                "retitle",
+                "edit",
+                "revise",
+                "rewrite",
+                "what is in",
+                "what's in",
+                "what was in",
+            }
+        ):
+            return (
+                f"There is no current {label} yet. "
+                "I held off on creating it because the local evidence is not grounded enough for a durable draft. "
+                "If you want, tell me to proceed anyway with a partial draft."
+            )
+        return None
+
+    def _evidence_guardrail_reply(
+        self,
+        *,
+        turn_text: str,
+        evidence_packet: EvidencePacket | None,
+        route,
+    ) -> str | None:
+        if evidence_packet is None:
+            return None
+
+        lowered = turn_text.lower().strip()
+
+        if (
+            evidence_packet.source_domain == SourceDomain.VIDEO
+            and any(
+                token in lowered
+                for token in {"sam", "track", "tracking", "isolation", "isolate", "segment"}
+            )
+            and evidence_packet.execution_mode != ExecutionMode.FULL
+        ):
+            return self._tracking_unavailable_reply(evidence_packet)
+
+        if evidence_packet.source_domain == SourceDomain.DOCUMENT and any(
+            token in lowered
+            for token in {
+                "summarize",
+                "summarise",
+                "extract",
+                "section",
+                "sections",
+                "entity",
+                "entities",
+                "action item",
+                "action items",
+                "claims",
+                "file understanding",
+                "understanding",
+            }
+        ):
+            return self._document_grounded_reply(turn_text, evidence_packet)
+
+        if (
+            evidence_packet.source_domain == SourceDomain.DOCUMENT
+            and route.interaction_kind == "document"
+            and evidence_packet.grounding_status != GroundingStatus.GROUNDED
+        ):
+            return self._document_grounded_reply(turn_text, evidence_packet)
+
+        return None
+
+    def _tracking_unavailable_reply(self, evidence_packet: EvidencePacket) -> str:
+        refs = [ref.ref for ref in evidence_packet.refs[:4] if ref.ref]
+        ref_text = ", ".join(refs)
+        lines = [
+            "I could not run local SAM tracking or video isolation in this profile.",
+            "Right now I only have sampled-frame review from the video fallback path.",
+        ]
+        if ref_text:
+            lines.append(f"Sampled timestamps: {ref_text}.")
+        if evidence_packet.uncertainties:
+            lines.append(evidence_packet.uncertainties[0])
+        lines.append(
+            "If you want, I can inspect one sampled timestamp more closely or keep comparing the videos conservatively from the fallback evidence."
+        )
+        return "\n".join(lines)
+
+    def _document_grounded_reply(
+        self,
+        turn_text: str,
+        evidence_packet: EvidencePacket,
+    ) -> str:
+        lowered = turn_text.lower()
+        fact_lines = self._document_fact_lines(evidence_packet)
+        capability_lines = [
+            "Locally I can read embedded PDF text, render pages and OCR them when embedded text is missing, cite page refs, and draft only from extracted evidence.",
+            "I should not claim clean sections, named entities, or action items when the extraction is incomplete or OCR-noisy.",
+        ]
+
+        if any(token in lowered for token in {"file understanding", "what kind of file understanding", "do locally"}):
+            lines = []
+            if evidence_packet.grounding_status == GroundingStatus.UNAVAILABLE:
+                lines.append(evidence_packet.summary)
+            else:
+                lines.append("I reviewed the attached document conservatively.")
+                if fact_lines:
+                    lines.append("Grounded lines so far:")
+                    lines.extend(f"- {line}" for line in fact_lines[:4])
+            if evidence_packet.uncertainties:
+                lines.append("Limits:")
+                lines.extend(f"- {item}" for item in evidence_packet.uncertainties[:2])
+            lines.append("Local file understanding:")
+            lines.extend(f"- {item}" for item in capability_lines)
+            return "\n".join(lines)
+
+        if any(token in lowered for token in {"extract", "section", "sections", "entity", "entities", "action item", "action items", "claims"}):
+            lines = [
+                "I do not have a clean enough document extraction to list main sections, named entities, or action items with high confidence yet."
+            ]
+            if fact_lines:
+                lines.append("What I can ground so far:")
+                lines.extend(f"- {line}" for line in fact_lines[:5])
+            if evidence_packet.uncertainties:
+                lines.append("Limits:")
+                lines.extend(f"- {item}" for item in evidence_packet.uncertainties[:2])
+            return "\n".join(lines)
+
+        lines = ["I reviewed the attached document conservatively."]
+        if fact_lines:
+            lines.append("Grounded points:")
+            lines.extend(f"- {line}" for line in fact_lines[:4])
+        if evidence_packet.uncertainties:
+            lines.append("Limits:")
+            lines.extend(f"- {item}" for item in evidence_packet.uncertainties[:2])
+        return "\n".join(lines)
+
+    def _document_fact_lines(self, evidence_packet: EvidencePacket) -> list[str]:
+        fact_lines: list[str] = []
+        for fact in evidence_packet.facts:
+            summary = fact.summary.strip()
+            if not summary:
+                continue
+            refs = ", ".join(ref.ref for ref in fact.refs[:2] if ref.ref)
+            if refs:
+                summary = f"{summary} ({refs})"
+            fact_lines.append(summary)
+        return fact_lines
+
+    def _grounding_feedback_reply(
+        self,
+        *,
+        tool_feedback: str,
+        evidence_packet: EvidencePacket | None,
+    ) -> str:
+        lines = [tool_feedback]
+        if evidence_packet and evidence_packet.facts:
+            lines.append("Current grounded evidence:")
+            lines.extend(
+                f"- {line}" for line in self._document_fact_lines(evidence_packet)[:3]
+            )
+        return "\n".join(lines)
+
     def _tool_label(self, tool_name: str | None) -> str:
         mapping = {
             "create_note": "note",
@@ -785,6 +1111,25 @@ class OrchestratorService:
                 )
             )
         return video_assets
+
+    def _collect_document_assets(self, attached_assets: list) -> list[DocumentAsset]:
+        document_assets: list[DocumentAsset] = []
+        for asset in attached_assets:
+            if asset.kind != AssetKind.DOCUMENT:
+                continue
+            local_path = self.store.get_asset_local_path(asset.id)
+            if not local_path or not Path(local_path).exists():
+                continue
+            document_assets.append(
+                DocumentAsset(
+                    asset_id=asset.id,
+                    display_name=asset.display_name,
+                    local_path=local_path,
+                    media_type=asset.media_type,
+                    analysis_summary=asset.analysis_summary,
+                )
+            )
+        return document_assets
 
     def _persist_specialist_artifacts(self, artifacts: list) -> list[str]:
         asset_ids: list[str] = []
@@ -918,3 +1263,104 @@ class OrchestratorService:
         if result.get("status"):
             return f"Tool finished with status {result['status']}."
         return "The local tool completed successfully."
+
+    def _workspace_evidence_packet(
+        self,
+        *,
+        summary_text: str | None,
+        run: AgentRun,
+        grounded: GroundingStatus = GroundingStatus.GROUNDED,
+        execution_mode: ExecutionMode = ExecutionMode.FULL,
+    ) -> EvidencePacket:
+        lines = [
+            line.strip()
+            for line in (summary_text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+            if line.strip()
+        ]
+        facts: list[EvidenceFact] = []
+        refs: list[str] = []
+        section: str | None = None
+        overview: str | None = None
+        for line in lines:
+            lowered = line.lower().strip()
+            if lowered.startswith("key points:"):
+                section = "facts"
+                continue
+            if lowered.startswith("files reviewed:"):
+                section = "refs"
+                continue
+            cleaned = line.strip(" -*")
+            if not cleaned:
+                continue
+            if section == "refs":
+                refs.append(cleaned)
+                continue
+            if section == "facts":
+                facts.append(EvidenceFact(summary=cleaned))
+                continue
+            if not lowered.startswith(("overview:", "working title:", "related docs:", "related local docs:")):
+                overview = cleaned
+
+        if not facts and overview:
+            facts.append(EvidenceFact(summary=overview))
+
+        return EvidencePacket(
+            source_domain=SourceDomain.WORKSPACE,
+            asset_ids=list(run.artifact_ids),
+            profile=(
+                RuntimeProfile.LOW_MEMORY
+                if self.settings.default_assistant_model == "gemma-4-e2b-it-4bit"
+                else RuntimeProfile.FULL_LOCAL
+            ),
+            execution_mode=execution_mode,
+            grounding_status=grounded,
+            summary=overview or (facts[0].summary if facts else (summary_text or "Workspace run completed.")),
+            facts=facts[:6],
+            uncertainties=(
+                ["The workspace run did not produce strong local matches."]
+                if grounded == GroundingStatus.UNAVAILABLE
+                else []
+            ),
+            refs=[EvidenceRef(label=ref, ref=ref) for ref in refs[:6]],
+        )
+
+    def _grounding_allows_tool(
+        self,
+        *,
+        tool_name: str,
+        evidence_packet: EvidencePacket | None,
+        user_text: str,
+        source_domain: SourceDomain | None,
+    ) -> tuple[bool, str | None]:
+        gated_tools = {"create_note", "create_report", "create_message_draft", "export_brief"}
+        if tool_name not in gated_tools:
+            return True, None
+        if evidence_packet is None:
+            if source_domain in {
+                SourceDomain.IMAGE,
+                SourceDomain.VIDEO,
+                SourceDomain.DOCUMENT,
+                SourceDomain.WORKSPACE,
+            }:
+                return (
+                    False,
+                    "I need current grounded local evidence before I prepare that durable draft. Please keep the asset in scope for this turn or ask me to review it again first.",
+                )
+            return True, None
+        if evidence_packet.grounding_status == GroundingStatus.GROUNDED:
+            return True, None
+        if evidence_packet.grounding_status == GroundingStatus.PARTIAL:
+            lowered = user_text.lower()
+            if any(
+                phrase in lowered
+                for phrase in {"proceed anyway", "draft it anyway", "save it anyway", "use partial evidence"}
+            ):
+                return True, None
+            return (
+                False,
+                "I need stronger grounded evidence before I prepare that durable draft. I can keep extracting locally or you can explicitly tell me to proceed anyway with a partial draft.",
+            )
+        return (
+            False,
+            "I cannot prepare a durable draft from this turn yet because the local evidence path did not produce grounded extraction.",
+        )

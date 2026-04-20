@@ -8,7 +8,14 @@ from typing import Protocol
 from mlx_lm import generate, load
 from mlx_lm.sample_utils import make_sampler
 
-from engine.contracts.api import AssistantMode, SearchResultItem
+from engine.contracts.api import (
+    AssistantMode,
+    EvidencePacket,
+    ExecutionMode,
+    GroundingStatus,
+    SearchResultItem,
+    SourceDomain,
+)
 from engine.models.sources import resolve_model_source
 
 
@@ -35,6 +42,7 @@ class AssistantGenerationRequest:
     assistant_model_name: str
     assistant_model_source: str | None
     specialist_model_name: str | None
+    evidence_packet: EvidencePacket | None
     specialist_analysis_text: str | None
     workspace_summary_text: str | None
     max_tokens: int
@@ -68,6 +76,8 @@ class MockAssistantRuntime:
             lines.append(work_product_reply)
         elif request.workspace_summary_text:
             lines.append(self._workspace_response(request.workspace_summary_text))
+        elif request.evidence_packet:
+            lines.append(self._evidence_response(request.evidence_packet))
         elif request.specialist_analysis_text:
             lines.append(self._specialist_response(request))
         elif request.citations:
@@ -75,7 +85,7 @@ class MockAssistantRuntime:
         else:
             lines.append(self._general_local_response(request))
 
-        if request.specialist_model_name and not request.specialist_analysis_text:
+        if request.specialist_model_name and not request.specialist_analysis_text and not request.evidence_packet:
             lines.append(f"Selected specialist route: {request.specialist_model_name}.")
             if not request.citations:
                 lines.append(
@@ -201,6 +211,54 @@ class MockAssistantRuntime:
             return f"From the local review, {cleaned[:1].lower() + cleaned[1:]}"
 
         return cleaned
+
+    def _evidence_response(self, packet: EvidencePacket) -> str:
+        if packet.source_domain == SourceDomain.VIDEO:
+            if packet.execution_mode == ExecutionMode.UNAVAILABLE:
+                return (
+                    "I could not run local tracking or sampled-frame review for the video in this profile, "
+                    "so I cannot safely make claims about what the clip shows yet."
+                )
+            lines = ["I reviewed the video locally."]
+            if packet.execution_mode == ExecutionMode.FALLBACK:
+                lines[0] = "I reviewed sampled video frames locally."
+            if packet.facts:
+                for fact in packet.facts[:3]:
+                    refs = ", ".join(ref.ref for ref in fact.refs)
+                    suffix = f" ({refs})" if refs else ""
+                    lines.append(f"- {fact.summary}{suffix}")
+            if packet.uncertainties:
+                lines.append("Limits:")
+                for item in packet.uncertainties[:2]:
+                    lines.append(f"- {item}")
+            return "\n".join(lines)
+
+        if packet.source_domain == SourceDomain.DOCUMENT:
+            if packet.grounding_status == GroundingStatus.UNAVAILABLE:
+                return packet.summary
+            lines = ["I reviewed the document locally."]
+            if packet.facts:
+                lines.append("Key grounded points:")
+                for fact in packet.facts[:4]:
+                    refs = ", ".join(ref.ref for ref in fact.refs)
+                    suffix = f" ({refs})" if refs else ""
+                    lines.append(f"- {fact.summary}{suffix}")
+            if packet.uncertainties:
+                lines.append("Limits:")
+                for item in packet.uncertainties[:2]:
+                    lines.append(f"- {item}")
+            return "\n".join(lines)
+
+        if packet.source_domain == SourceDomain.IMAGE:
+            if packet.grounding_status == GroundingStatus.UNAVAILABLE:
+                return packet.summary
+            if packet.facts:
+                return "From the image, the clearest grounded points are:\n" + "\n".join(
+                    f"- {fact.summary}" for fact in packet.facts[:4]
+                )
+            return packet.summary
+
+        return packet.summary
 
     def _general_local_response(self, request: AssistantGenerationRequest) -> str:
         lowered = request.user_text.lower().strip()

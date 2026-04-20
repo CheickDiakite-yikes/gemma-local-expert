@@ -39,6 +39,17 @@ _VIDEO_REFERENCE_TOKENS = {
     "frame",
 }
 
+_DOCUMENT_REFERENCE_TOKENS = {
+    "document",
+    "pdf",
+    "page",
+    "pages",
+    "section",
+    "sections",
+    "file",
+    "files",
+}
+
 _MEDIA_FOLLOW_UP_CUES = {
     "before departure",
     "item",
@@ -143,6 +154,22 @@ _WORK_PRODUCT_EDIT_TOKENS = {
     "save",
 }
 
+_WORK_PRODUCT_REFERENCE_CUES = {
+    "that",
+    "this",
+    "same",
+    "current",
+    "earlier",
+    "latest",
+    "newer",
+    "again",
+    "title",
+    "called",
+    "before i save",
+    "before you save",
+    "ready to save",
+}
+
 _EARLIER_REFERENCE_TOKENS = {
     "earlier",
     "previous",
@@ -218,6 +245,9 @@ _REFERENT_STOPWORDS = {
 @dataclass(slots=True)
 class ConversationContextSnapshot:
     active_topic: str | None = None
+    active_domain: str | None = None
+    active_asset_ids: list[str] = field(default_factory=list)
+    active_asset_labels: list[str] = field(default_factory=list)
     recent_topics: list[str] = field(default_factory=list)
     last_user_request: str | None = None
     last_assistant_reply: str | None = None
@@ -237,6 +267,7 @@ class ConversationContextSnapshot:
     pending_approval_tool: str | None = None
     pending_approval_summary: str | None = None
     pending_approval_excerpt: str | None = None
+    active_draft_lineage: str | None = None
     last_completed_output_tool: str | None = None
     last_completed_output_title: str | None = None
     last_completed_output_excerpt: str | None = None
@@ -247,6 +278,10 @@ class ConversationContextSnapshot:
         lines: list[str] = []
         if self.active_topic:
             lines.append(f"Active topic: {self.active_topic}")
+        if self.active_domain:
+            lines.append(f"Active domain: {self.active_domain}")
+        if self.active_asset_labels:
+            lines.append("Active asset set: " + ", ".join(self.active_asset_labels[:3]))
         if self.recent_topics[1:]:
             recent = ", ".join(self.recent_topics[1:3])
             if recent:
@@ -291,6 +326,8 @@ class ConversationContextSnapshot:
             )
             if self.pending_approval_excerpt:
                 lines.append(f"Pending draft preview: {self.pending_approval_excerpt}")
+        if self.active_draft_lineage:
+            lines.append(f"Active draft lineage: {self.active_draft_lineage}")
         if (
             self.last_completed_output_tool
             and self.last_completed_output_title
@@ -411,6 +448,9 @@ class ConversationContextService:
         video_reference_groups = self._recent_reference_assets_by_kind(
             transcript, AssetKind.VIDEO
         )
+        document_reference_groups = self._recent_reference_assets_by_kind(
+            transcript, AssetKind.DOCUMENT
+        )
         snapshot.last_image_assets = image_reference_groups[0] if image_reference_groups else []
         snapshot.last_video_assets = video_reference_groups[0] if video_reference_groups else []
 
@@ -424,6 +464,7 @@ class ConversationContextService:
                 transcript=transcript,
                 image_reference_groups=image_reference_groups,
                 video_reference_groups=video_reference_groups,
+                document_reference_groups=document_reference_groups,
             )
             if snapshot.selected_context_assets and snapshot.selected_context_kind:
                 snapshot.selected_context_summary = self._asset_context_summary(
@@ -448,6 +489,12 @@ class ConversationContextService:
             snapshot.selected_referent_excerpt = snapshot.selected_context_summary
         elif snapshot.selected_referent_kind == "topic" and snapshot.active_topic:
             snapshot.selected_referent_summary = snapshot.active_topic
+        snapshot.active_domain = snapshot.selected_referent_kind or snapshot.selected_context_kind
+        snapshot.active_asset_ids = [asset.id for asset in snapshot.selected_context_assets]
+        snapshot.active_asset_labels = [
+            asset.display_name for asset in snapshot.selected_context_assets[:3]
+        ]
+        snapshot.active_draft_lineage = snapshot.pending_approval_id
         return snapshot
 
     def _recent_topics(self, transcript: list[TranscriptMessage]) -> list[str]:
@@ -630,6 +677,7 @@ class ConversationContextService:
         transcript: list[TranscriptMessage],
         image_reference_groups: list[list[AssetSummary]],
         video_reference_groups: list[list[AssetSummary]],
+        document_reference_groups: list[list[AssetSummary]],
     ) -> tuple[list[AssetSummary], str | None, str | None]:
         lowered = turn_text.lower().strip()
         if not lowered:
@@ -649,6 +697,13 @@ class ConversationContextService:
                 groups=image_reference_groups,
             )
             return selected_image_assets, "image", "User referred back to an earlier image."
+        if any(token in lowered for token in _DOCUMENT_REFERENCE_TOKENS) and document_reference_groups:
+            selected_document_assets = self._select_referenced_asset_group(
+                lowered,
+                kind="document",
+                groups=document_reference_groups,
+            )
+            return selected_document_assets, "document", "User referred back to an earlier document."
 
         if self._looks_like_media_follow_up(lowered):
             last_media_assets, last_media_kind = self._last_media_assets(transcript)
@@ -689,6 +744,30 @@ class ConversationContextService:
                         matched_output.excerpt,
                         f"User referred back to the recent {self._tool_label(matched_output.tool_name)} output.",
                     )
+                if snapshot.pending_approval_tool in requested_tools:
+                    return (
+                        "pending_output",
+                        snapshot.pending_approval_tool,
+                        snapshot.pending_approval_summary,
+                        snapshot.pending_approval_excerpt,
+                        "User referred to the current local draft.",
+                    )
+                if snapshot.last_completed_output_tool in requested_tools:
+                    return (
+                        "saved_output",
+                        snapshot.last_completed_output_tool,
+                        snapshot.last_completed_output_title,
+                        snapshot.last_completed_output_excerpt,
+                        "User referred back to the most recent saved local output.",
+                    )
+                requested_tool = sorted(requested_tools)[0]
+                return (
+                    "missing_output",
+                    requested_tool,
+                    None,
+                    None,
+                    f"User asked about a {self._tool_label(requested_tool)} that does not exist yet.",
+                )
             if snapshot.pending_approval_tool:
                 return (
                     "pending_output",
@@ -873,10 +952,11 @@ class ConversationContextService:
             return True
         has_noun = any(token in lowered for token in _WORK_PRODUCT_NOUNS)
         has_edit_intent = any(token in lowered for token in _WORK_PRODUCT_EDIT_TOKENS)
+        has_reference_cue = any(token in lowered for token in _WORK_PRODUCT_REFERENCE_CUES)
         has_recall_intent = lowered.startswith(
             ("what was in", "what is in", "what's in", "remind me", "show me")
         )
-        return has_noun and (has_edit_intent or has_recall_intent)
+        return has_noun and (has_recall_intent or (has_edit_intent and has_reference_cue))
 
     def _looks_like_topic_reference(self, lowered: str) -> bool:
         if any(phrase in lowered for phrase in _TOPIC_REFERENCE_PHRASES):
@@ -902,8 +982,21 @@ class ConversationContextService:
     ) -> list[AssetSummary]:
         if not groups:
             return []
+        if f"both {kind}s" in lowered or f"both {kind}" in lowered:
+            combined: list[AssetSummary] = []
+            seen_ids: set[str] = set()
+            for group in groups[:2]:
+                for asset in group:
+                    if asset.id in seen_ids:
+                        continue
+                    seen_ids.add(asset.id)
+                    combined.append(asset)
+            if combined:
+                return combined
         if any(phrase in lowered for phrase in {f"first {kind}", f"original {kind}", f"initial {kind}"}):
             return groups[-1]
+        if any(phrase in lowered for phrase in {f"second {kind}", f"newer {kind}"}):
+            return groups[0] if len(groups) > 1 else groups[0]
         if any(
             phrase in lowered
             for phrase in {f"earlier {kind}", f"previous {kind}", f"prior {kind}"}
