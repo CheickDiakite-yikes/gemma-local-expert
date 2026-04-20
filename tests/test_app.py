@@ -270,6 +270,68 @@ def test_report_turn_requires_approval_and_persists_report_kind(tmp_path: Path) 
     transcript_response = client.get(f"/v1/conversations/{conversation['id']}/messages")
     assert transcript_response.status_code == 200
     transcript = transcript_response.json()
+
+
+def test_message_draft_turn_after_image_requires_approval_and_persists_message_draft_kind(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(database_path=str(tmp_path / "test-message-draft-approval.db"))
+    client = TestClient(create_app(settings))
+    conversation = client.post(
+        "/v1/conversations",
+        json={"title": "Message draft", "mode": "general"},
+    ).json()
+
+    image_asset = client.post(
+        "/v1/assets/upload",
+        data={"care_context": "general"},
+        files={"file": ("board.png", _tiny_png_bytes(), "image/png")},
+    ).json()["asset"]
+
+    first_turn = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "general",
+            "text": "Describe this supply image conservatively.",
+            "asset_ids": [image_asset["id"]],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+    assert first_turn.status_code == 200
+
+    second_turn = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "general",
+            "text": "Draft a short message to the logistics lead about the two shortages that matter most before departure.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+    assert second_turn.status_code == 200
+    lines = [line for line in second_turn.text.splitlines() if line.strip()]
+    approval_event = next(line for line in lines if '"type":"approval.required"' in line)
+    approval_payload = json.loads(approval_event)
+    assert approval_payload["payload"]["tool_name"] == "create_message_draft"
+    approval_id = approval_payload["payload"]["id"]
+
+    decision = client.post(
+        f"/v1/approvals/{approval_id}/decisions",
+        json={"action": "approve", "edited_payload": {}},
+    )
+    assert decision.status_code == 200
+    approval = decision.json()
+    assert approval["status"] == "executed"
+    assert approval["result"]["entity_type"] == "note"
+    assert approval["result"]["kind"] == "message_draft"
+
+    transcript_response = client.get(f"/v1/conversations/{conversation['id']}/messages")
+    assert transcript_response.status_code == 200
+    transcript = transcript_response.json()
     assistant_message = transcript[-1]
     assert assistant_message["role"] == "assistant"
     assert assistant_message["turn_id"]

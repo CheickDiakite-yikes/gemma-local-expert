@@ -405,7 +405,7 @@ class ToolRuntime:
         *,
         specialist_analysis_text: str | None = None,
     ) -> str:
-        if specialist_analysis_text and not self._looks_like_workspace_brief_request(turn.text):
+        if specialist_analysis_text and not self._looks_like_workspace_synthesis_request(turn.text):
             cleaned = self._clean_specialist_text(specialist_analysis_text).strip()
             if cleaned and "visible text extracted from the image" not in cleaned.lower():
                 return self._format_message_draft(cleaned)
@@ -872,6 +872,14 @@ class ToolRuntime:
                 continue
             lines.append(cleaned.rstrip("."))
         return lines
+
+    def _clean_specialist_text(self, text: str) -> str:
+        lines = self._normalized_specialist_lines(text)
+        if not lines:
+            return ""
+        if len(lines) == 1:
+            return lines[0]
+        return " ".join(lines[:6])
 
     def _select_image_asset(self, assets: list[AssetSummary]) -> AssetSummary | None:
         for asset in assets:
