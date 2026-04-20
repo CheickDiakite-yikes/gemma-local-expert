@@ -236,7 +236,38 @@ def test_workspace_request_overrides_recent_video_context() -> None:
 
     route = router.decide(
         request,
-        assets=[
+        contextual_assets=[
+            AssetSummary(
+                id="asset_video",
+                display_name="mine.mov",
+                source_path="mine.mov",
+                kind=AssetKind.VIDEO,
+                care_context=AssetCareContext.GENERAL,
+            )
+        ],
+        history=[
+            ConversationMessage(role="assistant", content="Reviewed the attached mining clip.")
+        ],
+    )
+
+    assert route.agent_run is True
+    assert route.specialist_model is None
+
+
+def test_separate_topic_workspace_briefing_overrides_recent_video_context() -> None:
+    router = RouterService(ToolRegistry())
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.RESEARCH,
+        text=(
+            "Separate topic again. Prepare a short workspace briefing about the current "
+            "field assistant architecture and save it as a note, but keep it concise."
+        ),
+    )
+
+    route = router.decide(
+        request,
+        contextual_assets=[
             AssetSummary(
                 id="asset_video",
                 display_name="mine.mov",
@@ -264,7 +295,7 @@ def test_topic_reset_overrides_recent_image_context() -> None:
 
     route = router.decide(
         request,
-        assets=[
+        contextual_assets=[
             AssetSummary(
                 id="asset_image",
                 display_name="board.png",
@@ -284,3 +315,31 @@ def test_topic_reset_overrides_recent_image_context() -> None:
     assert route.interaction_kind == "conversation"
     assert route.specialist_model is None
     assert route.is_follow_up is False
+
+
+def test_unrelated_conversation_does_not_reuse_recent_video_context() -> None:
+    router = RouterService(ToolRegistry())
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.GENERAL,
+        text="I’m tired tonight. How would you tell me to wind down simply?",
+    )
+
+    route = router.decide(
+        request,
+        contextual_assets=[
+            AssetSummary(
+                id="asset_video",
+                display_name="mine.mov",
+                source_path="mine.mov",
+                kind=AssetKind.VIDEO,
+                care_context=AssetCareContext.GENERAL,
+            )
+        ],
+        history=[
+            ConversationMessage(role="assistant", content="Reviewed the attached mining clip.")
+        ],
+    )
+
+    assert route.interaction_kind == "conversation"
+    assert route.specialist_model is None

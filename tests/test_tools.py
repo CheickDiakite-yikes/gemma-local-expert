@@ -87,3 +87,58 @@ def test_note_planner_uses_specialist_lines_when_available() -> None:
 
     assert "Lantern batteries 2 @ 48.00" in plan.payload["content"]
     assert "Create a note summarizing the purchases from this receipt." not in plan.payload["content"]
+
+
+def test_note_planner_does_not_use_raw_ocr_for_workspace_briefing_requests() -> None:
+    runtime = ToolRuntime(_UnusedStore())
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.RESEARCH,
+        text=(
+            "Separate topic again. Prepare a short workspace briefing about the current "
+            "field assistant architecture and save it as a note."
+        ),
+    )
+
+    plan = runtime.plan(
+        request,
+        "create_note",
+        [],
+        specialist_analysis_text=(
+            "Visible text extracted from the image:\n"
+            "[eater eet\n:\n— —\n"
+            "ooto oot"
+        ),
+        context_assets=[],
+    )
+
+    assert "Visible text extracted from the image" not in plan.payload["content"]
+    assert "workspace briefing" in plan.payload["content"].lower()
+
+
+def test_note_planner_strips_workspace_review_lede_from_synthesized_note() -> None:
+    runtime = ToolRuntime(_UnusedStore())
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.RESEARCH,
+        text="Prepare a short workspace briefing about the field assistant architecture.",
+    )
+
+    plan = runtime.plan(
+        request,
+        "create_note",
+        [],
+        specialist_analysis_text=(
+            "I reviewed 4 workspace files in the workspace and pulled together the most relevant points.\n\n"
+            "Key points:\n"
+            "- Working title: Field Assistant\n"
+            "- Key specifications live in the product spec\n\n"
+            "Files reviewed:\n"
+            "- offline-field-assistant-v1-product-spec.md"
+        ),
+        context_assets=[],
+    )
+
+    assert not plan.payload["content"].startswith("I reviewed")
+    assert plan.payload["content"].startswith("Key points:")
+    assert "Files reviewed:" in plan.payload["content"]

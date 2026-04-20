@@ -48,6 +48,32 @@ class RouterService:
         "in this folder",
         "in the workspace",
     }
+    _WORKSPACE_SCOPE_TOKENS = {
+        "workspace",
+        "project",
+        "repo",
+        "repository",
+        "folder",
+        "file",
+        "files",
+        "document",
+        "documents",
+        "docs",
+    }
+    _WORKSPACE_ACTION_TOKENS = {
+        "search",
+        "scan",
+        "review",
+        "read",
+        "find",
+        "brief",
+        "briefing",
+        "summary",
+        "summarize",
+        "summarise",
+        "inspect",
+        "architecture",
+    }
     _VISUAL_HINTS = {
         "extract",
         "form",
@@ -172,6 +198,8 @@ class RouterService:
     _TOPIC_RESET_PHRASES = {
         "switch topics",
         "switch gears",
+        "separate topic",
+        "separate topic again",
         "chat normally again",
         "talk normally again",
         "just chat normally again",
@@ -202,26 +230,43 @@ class RouterService:
         turn: ConversationTurnRequest,
         assets: list[AssetSummary] | None = None,
         history: list[ConversationMessage] | None = None,
+        contextual_assets: list[AssetSummary] | None = None,
     ) -> RouteDecision:
         lowered = turn.text.lower().strip()
         decision = RouteDecision()
-        image_assets = [asset for asset in assets or [] if asset.kind == AssetKind.IMAGE]
-        video_assets = [asset for asset in assets or [] if asset.kind == AssetKind.VIDEO]
+        attached_assets = assets or []
+        contextual_assets = contextual_assets or []
+        attached_image_assets = [
+            asset for asset in attached_assets if asset.kind == AssetKind.IMAGE
+        ]
+        attached_video_assets = [
+            asset for asset in attached_assets if asset.kind == AssetKind.VIDEO
+        ]
+        contextual_image_assets = [
+            asset for asset in contextual_assets if asset.kind == AssetKind.IMAGE
+        ]
+        contextual_video_assets = [
+            asset for asset in contextual_assets if asset.kind == AssetKind.VIDEO
+        ]
+        image_assets = attached_image_assets + contextual_image_assets
+        video_assets = attached_video_assets + contextual_video_assets
         medical_image_assets = [
             asset for asset in image_assets if asset.care_context == AssetCareContext.MEDICAL
         ]
         has_visual_context = bool(image_assets)
         has_video_context = bool(video_assets)
         history = history or []
-        explicit_workspace_request = any(
-            phrase in lowered for phrase in self._WORKSPACE_AGENT_PHRASES
-        )
+        explicit_workspace_request = self._looks_like_workspace_agent_request(lowered)
         explicit_topic_reset = self._looks_like_topic_reset(lowered)
         explicit_conversation_override = self._looks_like_conversation_override(lowered)
 
         if (explicit_workspace_request or explicit_topic_reset or explicit_conversation_override) and (
             has_visual_context or has_video_context
         ):
+            attached_image_assets = []
+            contextual_image_assets = []
+            attached_video_assets = []
+            contextual_video_assets = []
             image_assets = []
             video_assets = []
             medical_image_assets = []
@@ -234,8 +279,8 @@ class RouterService:
         general_conversation = self._looks_like_general_conversation(
             lowered,
             mode=turn.mode,
-            has_visual_context=has_visual_context,
-            has_video_context=has_video_context,
+            has_visual_context=bool(attached_image_assets),
+            has_video_context=bool(attached_video_assets),
         )
 
         decision.is_follow_up = self._looks_like_follow_up(
@@ -278,19 +323,31 @@ class RouterService:
             decision.interaction_kind = "translation"
             decision.reasons.append("Turn looks like a translation workflow.")
 
-        if decision.specialist_model not in {"medgemma", "translategemma"} and has_visual_context:
-            if any(word in lowered for word in self._VISUAL_HINTS):
+        contextual_media_follow_up = decision.is_follow_up or any(
+            word in lowered for word in {"same", "that", "those", "shown", "visible", "there", "it"}
+        )
+
+        if decision.specialist_model not in {"medgemma", "translategemma"} and (
+            attached_image_assets or (contextual_image_assets and contextual_media_follow_up)
+        ):
+            if attached_image_assets and any(word in lowered for word in self._VISUAL_HINTS):
                 decision.reasons.append("Turn likely needs structured visual extraction.")
-            else:
+            elif contextual_image_assets:
                 decision.reasons.append("Using the most recent image context for a follow-up turn.")
+            else:
+                decision.reasons.append("Using the attached image for this turn.")
             decision.specialist_model = "paligemma"
             decision.interaction_kind = "vision"
 
-        if decision.specialist_model not in {"medgemma", "translategemma"} and has_video_context:
-            if any(word in lowered for word in self._VIDEO_HINTS):
+        if decision.specialist_model not in {"medgemma", "translategemma"} and (
+            attached_video_assets or (contextual_video_assets and contextual_media_follow_up)
+        ):
+            if attached_video_assets and any(word in lowered for word in self._VIDEO_HINTS):
                 decision.reasons.append("Turn likely needs local video detection or tracking.")
-            else:
+            elif contextual_video_assets:
                 decision.reasons.append("Using the most recent video context for a follow-up turn.")
+            else:
+                decision.reasons.append("Using the attached video for this turn.")
             decision.specialist_model = "sam3"
             decision.interaction_kind = "video"
 
@@ -355,7 +412,7 @@ class RouterService:
             return True
         if self._looks_like_teaching_request(lowered):
             return False
-        if any(token in lowered for token in self._WORKSPACE_AGENT_PHRASES):
+        if self._looks_like_workspace_agent_request(lowered):
             return False
         if self.tools.propose(lowered):
             return False
@@ -371,6 +428,14 @@ class RouterService:
             or any(self._matches_phrase(lowered, phrase) for phrase in self._SUPPORTIVE_CONVERSATION_PHRASES)
             or self._looks_like_topic_reset(lowered)
         )
+
+    def _looks_like_workspace_agent_request(self, lowered: str) -> bool:
+        if any(phrase in lowered for phrase in self._WORKSPACE_AGENT_PHRASES):
+            return True
+
+        has_scope = any(token in lowered for token in self._WORKSPACE_SCOPE_TOKENS)
+        has_action = any(token in lowered for token in self._WORKSPACE_ACTION_TOKENS)
+        return has_scope and has_action
 
     def _matches_phrase(self, lowered: str, phrase: str) -> bool:
         if " " in phrase:
@@ -391,13 +456,11 @@ class RouterService:
             return False
         if explicit_topic_reset:
             return False
-        if has_visual_context or has_video_context:
-            return True
         if lowered.startswith(self._FOLLOW_UP_PREFIXES):
             return True
-        if len(lowered.split()) <= 10 and any(
+        if len(lowered.split()) <= 12 and any(
             lowered.startswith(prefix)
-            for prefix in {"it", "that", "those", "they", "and", "also", "why", "what", "how"}
+            for prefix in {"it", "that", "those", "they", "and", "also", "why", "what", "how", "which"}
         ):
             return True
         return False

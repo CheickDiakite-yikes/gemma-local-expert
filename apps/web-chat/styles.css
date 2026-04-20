@@ -207,6 +207,7 @@ a {
 .approval-action,
 .status-trigger,
 .conversation-row,
+.conversation-row-delete,
 .attachment-remove {
   appearance: none;
   border: 0;
@@ -223,6 +224,7 @@ a {
 .approval-action:hover,
 .status-trigger:hover,
 .conversation-row:hover,
+.conversation-row-delete:hover,
 .attachment-remove:hover {
   transform: translateY(-1px);
 }
@@ -247,10 +249,14 @@ a {
   padding-right: 4px;
 }
 
+.conversation-row-shell {
+  position: relative;
+}
+
 .conversation-row {
   position: relative;
   width: 100%;
-  padding: 9px 10px;
+  padding: 9px 38px 9px 10px;
   text-align: left;
   border-radius: 14px;
   background: transparent;
@@ -266,6 +272,43 @@ a {
 .conversation-row.is-active {
   background: rgba(255, 255, 255, 0.042);
   border-color: rgba(255, 255, 255, 0.06);
+}
+
+.conversation-row-delete {
+  position: absolute;
+  top: 7px;
+  right: 8px;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--text-faint);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.conversation-row-shell:hover .conversation-row-delete,
+.conversation-row-shell:focus-within .conversation-row-delete,
+.conversation-row-shell.is-active .conversation-row-delete {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.conversation-row-delete:hover,
+.conversation-row-delete:focus-visible {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+}
+
+@media (hover: none), (pointer: coarse) {
+  .conversation-row-delete {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 .conversation-row-main {

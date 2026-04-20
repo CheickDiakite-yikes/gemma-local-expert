@@ -92,7 +92,11 @@ function activeMessages() {
   if (!state.activeConversationId) {
     return state.draftMessages;
   }
-  return state.transcripts.get(state.activeConversationId) ?? [];
+  return conversationTranscript(state.activeConversationId);
+}
+
+function conversationTranscript(conversationId) {
+  return state.transcripts.get(conversationId) ?? [];
 }
 
 function canUseStorage() {
@@ -196,6 +200,35 @@ function setActiveMessages(messages) {
     return;
   }
   state.transcripts.set(state.activeConversationId, messages);
+}
+
+function purgeConversationUiState(conversationId) {
+  const transcript = conversationTranscript(conversationId);
+  const approvalIds = transcript.map((message) => message.approval?.id).filter(Boolean);
+  const messageIds = transcript.map((message) => message.id).filter(Boolean);
+  const runs = runsForConversation(conversationId);
+
+  for (const approvalId of approvalIds) {
+    state.approvalDrafts.delete(approvalId);
+    state.approvalPanels.delete(approvalPanelKey(approvalId, "draft"));
+    state.approvalPanels.delete(approvalPanelKey(approvalId, "edit"));
+  }
+  for (const messageId of messageIds) {
+    state.messagePanels.delete(messagePanelKey(messageId, "context"));
+  }
+  for (const run of runs) {
+    if (run?.id) {
+      state.runPanels.delete(run.id);
+    }
+  }
+
+  state.transcripts.delete(conversationId);
+  state.agentRuns.delete(conversationId);
+  state.medicalSessions.delete(conversationId);
+  persistApprovalDrafts();
+  persistApprovalPanels();
+  persistMessagePanels();
+  persistRunPanels();
 }
 
 function runsForConversation(conversationId) {
@@ -1061,7 +1094,10 @@ function shouldCollapseMessageContent(message, content) {
   if (!content || message.role !== "assistant") {
     return false;
   }
-  if (!message.approval && !message.agentRun) {
+  if (message.approval) {
+    return false;
+  }
+  if (!message.agentRun) {
     return false;
   }
   const plain = stripMarkdownToText(content);
@@ -1596,6 +1632,12 @@ function renderConversations() {
   }
 
   for (const conversation of state.conversations) {
+    const shell = document.createElement("div");
+    shell.className = "conversation-row-shell";
+    if (conversation.id === state.activeConversationId) {
+      shell.classList.add("is-active");
+    }
+
     const button = document.createElement("button");
     button.type = "button";
     button.className = "conversation-row";
@@ -1619,7 +1661,18 @@ function renderConversations() {
       closeSidebar();
     });
 
-    elements.conversationList.append(button);
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "conversation-row-delete";
+    deleteButton.setAttribute("aria-label", `Delete ${conversationLabel(conversation)}`);
+    deleteButton.innerHTML = "&times;";
+    deleteButton.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      await deleteConversation(conversation.id);
+    });
+
+    shell.append(button, deleteButton);
+    elements.conversationList.append(shell);
   }
 }
 
@@ -2227,7 +2280,12 @@ async function requestJson(path, init = {}) {
     throw new Error(text || `Request failed: ${response.status}`);
   }
 
-  return response.json();
+  if (response.status === 204) {
+    return null;
+  }
+
+  const text = await response.text();
+  return text ? JSON.parse(text) : null;
 }
 
 async function refreshConversations() {
@@ -2296,6 +2354,36 @@ async function openConversation(conversationId) {
     await refreshAgentRuns(conversationId);
     pruneResolvedApprovalDrafts(state.transcripts.get(conversationId));
   }
+  render();
+}
+
+async function deleteConversation(conversationId) {
+  const conversation = state.conversations.find((entry) => entry.id === conversationId);
+  const label = conversationLabel(conversation || { title: "this conversation" });
+  const confirmed = window.confirm(`Delete "${label}"? This removes the local transcript and run history.`);
+  if (!confirmed) {
+    return;
+  }
+
+  try {
+    await requestJson(`/v1/conversations/${conversationId}`, { method: "DELETE" });
+  } catch (error) {
+    addSystemMessage(error.message || "Unable to delete that conversation.");
+    return;
+  }
+
+  purgeConversationUiState(conversationId);
+  state.conversations = state.conversations.filter((entry) => entry.id !== conversationId);
+
+  if (state.activeConversationId === conversationId) {
+    state.activeConversationId = state.conversations[0]?.id || null;
+    persistActiveConversation();
+    if (state.activeConversationId) {
+      await openConversation(state.activeConversationId);
+      return;
+    }
+  }
+
   render();
 }
 

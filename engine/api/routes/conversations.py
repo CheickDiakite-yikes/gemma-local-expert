@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
 
 from engine.api.dependencies import ServiceContainer, get_container
@@ -40,6 +40,17 @@ async def list_conversation_messages(
     if container.store.get_conversation(conversation_id) is None:
         raise HTTPException(status_code=404, detail="Conversation not found.")
     return container.store.list_transcript(conversation_id, limit=limit)
+
+
+@router.delete("/{conversation_id}", status_code=204)
+async def delete_conversation(
+    conversation_id: str,
+    container: ServiceContainer = Depends(get_container),
+) -> Response:
+    deleted = container.store.delete_conversation(conversation_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return Response(status_code=204)
 
 
 @router.post("/{conversation_id}/turns")

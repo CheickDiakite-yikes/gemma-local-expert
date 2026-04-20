@@ -302,6 +302,14 @@ class ToolRuntime:
         specialist_analysis_text: str | None,
     ) -> str:
         if specialist_analysis_text:
+            if self._looks_like_workspace_synthesis_request(turn.text):
+                if self._looks_like_raw_ocr_payload(specialist_analysis_text):
+                    return turn.text.strip()
+                cleaned_workspace_note = self._workspace_note_from_synthesis(
+                    specialist_analysis_text
+                )
+                if cleaned_workspace_note:
+                    return cleaned_workspace_note
             if any(
                 keyword in turn.text.lower()
                 for keyword in {"brief", "briefing", "workspace", "report"}
@@ -326,6 +334,42 @@ class ToolRuntime:
             if action_items:
                 return "\n".join(action_items)
         return turn.text.strip()
+
+    def _looks_like_workspace_synthesis_request(self, text: str) -> bool:
+        lowered = text.lower()
+        scope_tokens = {"workspace", "project", "repo", "repository", "folder", "file", "files"}
+        action_tokens = {"brief", "briefing", "summary", "summarize", "summarise", "architecture", "report"}
+        return any(token in lowered for token in scope_tokens) and any(
+            token in lowered for token in action_tokens
+        )
+
+    def _looks_like_raw_ocr_payload(self, text: str) -> bool:
+        lowered = text.lower().strip()
+        return lowered.startswith("visible text extracted from the image:")
+
+    def _workspace_note_from_synthesis(self, text: str) -> str | None:
+        cleaned = text.strip()
+        if not cleaned:
+            return None
+
+        paragraphs = [paragraph.strip() for paragraph in re.split(r"\n\s*\n", cleaned) if paragraph.strip()]
+        if not paragraphs:
+            return cleaned
+
+        remaining: list[str] = []
+        skipped_lede = False
+        for paragraph in paragraphs:
+            lowered = paragraph.lower()
+            if not skipped_lede and (
+                lowered.startswith("i reviewed ")
+                or lowered.startswith("i reviewed the allowed workspace scope")
+            ):
+                skipped_lede = True
+                continue
+            remaining.append(paragraph)
+
+        result = "\n\n".join(remaining).strip()
+        return result or cleaned
 
     def _priority_items_from_specialist_analysis(self, text: str) -> list[str]:
         items: list[str] = []

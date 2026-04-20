@@ -77,6 +77,40 @@ def test_conversation_listing_and_transcript_endpoints(tmp_path: Path) -> None:
     assert [message["role"] for message in transcript] == ["user", "assistant"]
 
 
+def test_conversation_delete_removes_transcript_and_listing(tmp_path: Path) -> None:
+    settings = Settings(database_path=str(tmp_path / "test-delete.db"))
+    client = TestClient(create_app(settings))
+    conversation = client.post(
+        "/v1/conversations",
+        json={"title": "Delete me", "mode": "general"},
+    ).json()
+
+    turn_response = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "general",
+            "text": "Say hello normally.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+    assert turn_response.status_code == 200
+
+    delete_response = client.delete(f"/v1/conversations/{conversation['id']}")
+    assert delete_response.status_code == 204
+    assert delete_response.text == ""
+
+    transcript_response = client.get(f"/v1/conversations/{conversation['id']}/messages")
+    assert transcript_response.status_code == 404
+
+    conversations_response = client.get("/v1/conversations")
+    assert conversations_response.status_code == 200
+    conversations = conversations_response.json()
+    assert all(item["id"] != conversation["id"] for item in conversations)
+
+
 def test_approval_executes_checklist_tool_and_persists_note(tmp_path: Path) -> None:
     settings = Settings(database_path=str(tmp_path / "test-approval.db"))
     client = TestClient(create_app(settings))
@@ -802,7 +836,11 @@ def test_multimodal_conversation_handles_topic_pivots_follow_ups_and_workspace_o
             [],
         ),
         ("Review the attached mining video conservatively.", [video_asset["id"]]),
-        ("Prepare a briefing from the relevant workspace files and save it as a note.", []),
+        (
+            "Separate topic again. Prepare a short workspace briefing about the current "
+            "field assistant architecture and save it as a note, but keep it concise.",
+            [],
+        ),
     ]
 
     for text, asset_ids in turns:
@@ -848,6 +886,8 @@ def test_multimodal_conversation_handles_topic_pivots_follow_ups_and_workspace_o
     assert approval_content is not None
     assert "Key points:" in approval_content
     assert "Files reviewed:" in approval_content
+    assert not approval_content.startswith("I reviewed")
+    assert "Visible text extracted from the image" not in approval_content
     assert "Goal:" not in approval_content
     assert "Workspace scope:" not in approval_content
 
@@ -865,6 +905,7 @@ def test_multimodal_conversation_handles_topic_pivots_follow_ups_and_workspace_o
     assert notes
     assert "Key points:" in notes[0]["content"]
     assert "Files reviewed:" in notes[0]["content"]
+    assert not notes[0]["content"].startswith("I reviewed")
     assert "Goal:" not in notes[0]["content"]
     assert "Workspace scope:" not in notes[0]["content"]
 

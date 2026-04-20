@@ -87,7 +87,12 @@ class OrchestratorService:
             asset_ids=attached_asset_ids,
             turn_id=turn_id,
         )
-        route = self.router.decide(turn, assets=routed_assets, history=history)
+        route = self.router.decide(
+            turn,
+            assets=attached_assets,
+            contextual_assets=contextual_assets,
+            history=history,
+        )
         if contextual_assets:
             route.reasons.append("Using recent image attachment from conversation context.")
         policy = self.policy.evaluate(turn, route)

@@ -65,6 +65,8 @@ class PersistenceStore(Protocol):
 
     def list_conversations(self, limit: int = 50) -> list[ConversationSummary]: ...
 
+    def delete_conversation(self, conversation_id: str) -> bool: ...
+
     def ensure_conversation(
         self, conversation_id: str, mode: AssistantMode = AssistantMode.GENERAL
     ) -> Conversation: ...
@@ -343,6 +345,15 @@ class SQLiteStore:
             )
             for row in rows
         ]
+
+    def delete_conversation(self, conversation_id: str) -> bool:
+        with self._lock:
+            cursor = self._connection.execute(
+                "DELETE FROM conversations WHERE id = ?",
+                (conversation_id,),
+            )
+            self._connection.commit()
+        return cursor.rowcount > 0
 
     def ensure_conversation(
         self, conversation_id: str, mode: AssistantMode = AssistantMode.GENERAL
