@@ -118,16 +118,17 @@ class ToolRuntime:
             )
 
         if tool_name == "export_brief":
-            title = self._title_from_request(turn.text, fallback="Field Brief")
+            content = self._build_note_content(
+                turn,
+                specialist_analysis_text=specialist_analysis_text,
+            )
+            title = self._export_title(turn.text, content, fallback="Field Brief")
             return ToolPlan(
                 tool_name=tool_name,
                 payload={
                     "conversation_id": turn.conversation_id,
                     "title": title,
-                    "content": self._build_note_content(
-                        turn,
-                        specialist_analysis_text=specialist_analysis_text,
-                    ),
+                    "content": content,
                     "export_type": "markdown",
                     "destination_path": self._default_export_path(title),
                 },
@@ -220,6 +221,54 @@ class ToolRuntime:
 
         return merged
 
+    def revise_pending_payload(
+        self,
+        tool_name: str,
+        base_payload: dict[str, object],
+        instruction: str,
+    ) -> dict[str, object] | None:
+        lowered = instruction.lower().strip()
+        if not lowered:
+            return None
+
+        edited: dict[str, object] = {}
+        title = str(base_payload.get("title") or "").strip()
+
+        explicit_title = self._extract_requested_title(instruction)
+        if explicit_title:
+            edited["title"] = explicit_title
+
+        if tool_name in {
+            "create_note",
+            "create_checklist",
+            "log_observation",
+            "export_brief",
+        }:
+            if self._looks_like_tighten_request(lowered):
+                if not explicit_title and title:
+                    tighter_title = self._tighten_title(title)
+                    if tighter_title and tighter_title != title:
+                        edited["title"] = tighter_title
+                tightened = self._tighten_content(str(base_payload.get("content") or ""))
+                if tightened and tightened != str(base_payload.get("content") or ""):
+                    edited["content"] = tightened
+
+        if tool_name == "create_task":
+            if self._looks_like_tighten_request(lowered):
+                if not explicit_title and title:
+                    tighter_title = self._tighten_title(title)
+                    if tighter_title and tighter_title != title:
+                        edited["title"] = tighter_title
+                tightened = self._tighten_content(str(base_payload.get("details") or ""))
+                if tightened and tightened != str(base_payload.get("details") or ""):
+                    edited["details"] = tightened
+
+        if not edited:
+            return None
+
+        merged = self.merge_edited_payload(tool_name, base_payload, edited)
+        return merged if merged != base_payload else None
+
     def _title_from_request(self, text: str, *, fallback: str) -> str:
         cleaned = re.sub(r"^(create|make|build|write|log)\s+(a|an|the)?\s*", "", text, flags=re.I)
         cleaned = cleaned.strip().rstrip(".")
@@ -228,6 +277,39 @@ class ToolRuntime:
         if len(cleaned) > 80:
             cleaned = cleaned[:77].rstrip() + "..."
         return cleaned[:1].upper() + cleaned[1:]
+
+    def _export_title(self, request_text: str, content: str, *, fallback: str) -> str:
+        lowered = request_text.lower()
+        if "field assistant architecture" in lowered:
+            return "Field Assistant Architecture Briefing"
+        if "workspace" in lowered and any(token in lowered for token in {"brief", "briefing"}):
+            return "Workspace Briefing"
+        heading = self._title_from_content(content)
+        if heading:
+            return heading
+
+        cleaned = re.sub(
+            r"\b(and )?(export( it)?|save( it)?)( as)? (markdown|a document|document)\b",
+            "",
+            request_text,
+            flags=re.I,
+        )
+        cleaned = re.sub(r"\bfrom the relevant files\b", "", cleaned, flags=re.I)
+        return self._title_from_request(cleaned, fallback=fallback)
+
+    def _title_from_content(self, content: str) -> str | None:
+        for raw_line in content.splitlines():
+            line = raw_line.strip().lstrip("#").strip()
+            if not line:
+                continue
+            if line.endswith(":"):
+                continue
+            if line.startswith("- ") or re.match(r"^\d+\.\s+", line):
+                continue
+            if len(line) > 88:
+                continue
+            return line
+        return None
 
     def _edited_text(self, value: object, *, max_chars: int) -> str | None:
         if value is None:
@@ -257,6 +339,124 @@ class ToolRuntime:
         if normalized in {"open", "in_progress", "blocked", "done"}:
             return normalized
         return None
+
+    def _looks_like_tighten_request(self, lowered: str) -> bool:
+        return any(
+            token in lowered
+            for token in {"shorten", "shorter", "tighten", "trim", "condense", "more concise"}
+        )
+
+    def _extract_requested_title(self, instruction: str) -> str | None:
+        patterns = (
+            r"\b(?:rename|retitle)\s+(?:that|this|the)?\s*(?:draft|note|checklist|task|export|markdown|document)?\s*to\s+[\"“]?(.+?)[\"”]?(?:[.?!]|$)",
+            r"\bcall\s+(?:it|that|this)\s+[\"“]?(.+?)[\"”]?(?:[.?!]|$)",
+            r"\btitle\s+(?:it|that|this)\s+[\"“]?(.+?)[\"”]?(?:[.?!]|$)",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, instruction, flags=re.IGNORECASE)
+            if not match:
+                continue
+            candidate = match.group(1).strip().strip("\"'“”")
+            candidate = re.sub(r"\s{2,}", " ", candidate).strip(" -")
+            if candidate:
+                return candidate[:120]
+        return None
+
+    def _tighten_title(self, title: str) -> str | None:
+        revised = title
+        replacements = (
+            ("current ", ""),
+            ("relevant ", ""),
+            ("workspace ", ""),
+            ("architecture overview", "Architecture Brief"),
+            ("briefing", "Brief"),
+        )
+        for old, new in replacements:
+            revised = re.sub(old, new, revised, flags=re.IGNORECASE)
+        revised = re.sub(r"\s{2,}", " ", revised).strip(" -")
+        if not revised or revised.lower() == title.lower():
+            return None
+        return revised[:120]
+
+    def _tighten_content(self, content: str) -> str | None:
+        normalized = content.replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not normalized:
+            return None
+
+        lines = [line.rstrip() for line in normalized.split("\n")]
+        meaningful = [line.strip() for line in lines if line.strip()]
+        if not meaningful:
+            return None
+
+        output: list[str] = []
+        heading = meaningful[0]
+        if heading.startswith("#") or (len(heading) <= 88 and not heading.endswith(":")):
+            output.append(heading)
+
+        key_point_index = next(
+            (index for index, line in enumerate(meaningful) if line.lower().startswith("key points:")),
+            None,
+        )
+        if key_point_index is not None:
+            output.append("Key points:")
+            bullets = [
+                line
+                for line in meaningful[key_point_index + 1 :]
+                if re.match(r"^[-*+]\s+|^\d+\.\s+", line)
+            ]
+            if bullets:
+                output.extend(bullets[:3])
+                return "\n".join(self._dedupe_preserving_order(output)).strip()
+
+        bullets = [line for line in meaningful if re.match(r"^[-*+]\s+|^\d+\.\s+", line)]
+        if bullets:
+            output.extend(bullets[:3])
+            return "\n".join(self._dedupe_preserving_order(output)).strip()
+
+        paragraphs = [paragraph.strip() for paragraph in re.split(r"\n\s*\n", normalized) if paragraph.strip()]
+        if output and paragraphs:
+            first_paragraph = paragraphs[0].strip()
+            if self._normalize_heading(first_paragraph) == self._normalize_heading(output[0]):
+                paragraphs = paragraphs[1:]
+        clipped = [self._clip_sentence_block(paragraph, 220) for paragraph in paragraphs[:2]]
+        output.extend(block for block in clipped if block)
+        tightened = "\n\n".join(self._dedupe_preserving_order(output)).strip()
+        return tightened or self._clip_sentence_block(normalized, 320)
+
+    def _clip_sentence_block(self, text: str, max_chars: int) -> str:
+        cleaned = re.sub(r"\s+", " ", text).strip()
+        if len(cleaned) <= max_chars:
+            return cleaned
+        sentences = re.split(r"(?<=[.!?])\s+", cleaned)
+        clipped: list[str] = []
+        total = 0
+        for sentence in sentences:
+            if not sentence:
+                continue
+            proposed = total + len(sentence) + (1 if clipped else 0)
+            if clipped and proposed > max_chars:
+                break
+            clipped.append(sentence)
+            total = proposed
+            if total >= max_chars:
+                break
+        if clipped:
+            return " ".join(clipped)
+        return cleaned[: max_chars - 1].rstrip() + "…"
+
+    def _dedupe_preserving_order(self, values: list[str]) -> list[str]:
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for value in values:
+            normalized = self._normalize_heading(value)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            deduped.append(value)
+        return deduped
+
+    def _normalize_heading(self, value: str) -> str:
+        return re.sub(r"\s+", " ", value.strip().lower().lstrip("#").strip())
 
     def _default_export_path(self, title: str) -> str:
         slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "field-brief"
@@ -425,23 +625,36 @@ class ToolRuntime:
         if not cleaned:
             return None
 
-        paragraphs = [paragraph.strip() for paragraph in re.split(r"\n\s*\n", cleaned) if paragraph.strip()]
-        if not paragraphs:
-            return cleaned
-
-        remaining: list[str] = []
+        filtered_lines: list[str] = []
         skipped_lede = False
-        for paragraph in paragraphs:
-            lowered = paragraph.lower()
+        previous_blank = True
+
+        for raw_line in cleaned.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+            line = raw_line.strip()
+            lowered = line.lower()
+
+            if not line:
+                if not previous_blank and filtered_lines:
+                    filtered_lines.append("")
+                previous_blank = True
+                continue
+
             if not skipped_lede and (
                 lowered.startswith("i reviewed ")
                 or lowered.startswith("i reviewed the allowed workspace scope")
             ):
                 skipped_lede = True
                 continue
-            remaining.append(paragraph)
 
-        result = "\n\n".join(remaining).strip()
+            if re.match(r"^(related docs|related brief|related local docs|working title)\s*:", lowered):
+                continue
+            if re.match(r"^[-*+]\s+\[[^\]]+\]\([^)]+\)\s*$", line):
+                continue
+
+            filtered_lines.append(line)
+            previous_blank = False
+
+        result = "\n".join(filtered_lines).replace("\n\n\n", "\n\n").strip()
         return result or cleaned
 
     def _priority_items_from_specialist_analysis(self, text: str) -> list[str]:

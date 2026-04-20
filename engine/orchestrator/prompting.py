@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from engine.context.service import ConversationContextSnapshot
 from engine.contracts.api import (
     AssetSummary,
     AssistantMode,
@@ -28,6 +29,7 @@ class PromptBuilder:
         history: list[ConversationMessage],
         assets: list[AssetSummary],
         context_assets: list[AssetSummary],
+        conversation_context: ConversationContextSnapshot | None,
         specialist_analysis: str | None,
         workspace_summary: str | None,
         route: RouteDecision,
@@ -44,6 +46,7 @@ class PromptBuilder:
                     turn.text,
                     route,
                     policy,
+                    conversation_context,
                     model_selection,
                     results,
                     specialist_analysis,
@@ -63,6 +66,7 @@ class PromptBuilder:
                     turn,
                     assets,
                     context_assets,
+                    conversation_context,
                     specialist_analysis,
                     workspace_summary,
                     route,
@@ -80,6 +84,7 @@ class PromptBuilder:
         user_text: str,
         route: RouteDecision,
         policy: PolicyDecision,
+        conversation_context: ConversationContextSnapshot | None,
         model_selection: ModelRouteSelection,
         results: list[SearchResultItem],
         specialist_analysis: str | None,
@@ -114,10 +119,27 @@ class PromptBuilder:
                 lines.append(
                     "Do not drag in earlier task context unless the user explicitly asks you to connect it."
                 )
+        elif route.interaction_kind == "draft_follow_up":
+            lines.append(
+                "This turn is about a current local draft or recent saved output. Stay anchored to that work product instead of switching back to older media or retrieval context."
+            )
+            lines.append(
+                "If the user asks what it is called, answer with the current title. If they ask to tighten or rename it, keep the reply practical and pre-save."
+            )
+            lines.append(
+                "If the continuity snapshot includes a draft preview, use it directly. When the user asks what is in the draft, summarize that preview. When they ask to shorten it, propose a tighter title or opening instead of only saying you can help."
+            )
 
         if route.is_follow_up:
             lines.append(
                 "This is a follow-up turn. Preserve continuity with the recent conversation instead of restarting from scratch."
+            )
+        if conversation_context and conversation_context.prompt_lines():
+            lines.append(
+                "A structured continuity snapshot is provided in the user context. Use it to resolve references like 'that', 'earlier image', 'the draft', or 'go back to the video' without making the user restate everything."
+            )
+            lines.append(
+                "Treat the referent summary and referent preview in that snapshot as the main continuity anchor for follow-up turns."
             )
 
         if self._is_teaching_request(user_text):
@@ -190,6 +212,7 @@ class PromptBuilder:
         turn: ConversationTurnRequest,
         assets: list[AssetSummary],
         context_assets: list[AssetSummary],
+        conversation_context: ConversationContextSnapshot | None,
         specialist_analysis: str | None,
         workspace_summary: str | None,
         route: RouteDecision,
@@ -207,6 +230,14 @@ class PromptBuilder:
                 "Relevant recent assets from the conversation:\n"
                 + "\n".join(self._asset_lines(context_assets))
             )
+
+        if conversation_context:
+            continuity_lines = conversation_context.prompt_lines()
+            if continuity_lines:
+                sections.append(
+                    "Conversation continuity snapshot:\n- "
+                    + "\n- ".join(continuity_lines)
+                )
 
         if specialist_analysis:
             sections.append("Specialist visual analysis:\n" + specialist_analysis)

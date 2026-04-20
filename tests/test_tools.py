@@ -160,12 +160,43 @@ def test_note_planner_strips_workspace_review_lede_from_synthesized_note() -> No
     assert "Files reviewed:" in plan.payload["content"]
 
 
+def test_note_planner_strips_workspace_link_scaffolding_from_synthesis() -> None:
+    runtime = ToolRuntime(_UnusedStore())
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.RESEARCH,
+        text="Prepare a short workspace briefing about the field assistant architecture.",
+    )
+
+    plan = runtime.plan(
+        request,
+        "create_note",
+        [],
+        specialist_analysis_text=(
+            "I reviewed 4 workspace files in the workspace and pulled together the most relevant points.\n\n"
+            "Key points:\n"
+            "Related docs:\n"
+            "- [Offline Field Assistant v1 Product Spec](offline-field-assistant-v1-product-spec.md)\n"
+            "- The local engine is a modular monolith that owns routing, retrieval, tool execution, and persistence.\n"
+            "Working title: Field Assistant\n\n"
+            "Files reviewed:\n"
+            "- offline-field-assistant-v1-technical-architecture.md"
+        ),
+        context_assets=[],
+    )
+
+    assert "Related docs:" not in plan.payload["content"]
+    assert "Working title:" not in plan.payload["content"]
+    assert "Offline Field Assistant v1 Product Spec" not in plan.payload["content"]
+    assert "modular monolith" in plan.payload["content"]
+
+
 def test_export_brief_plan_and_execute_writes_markdown(tmp_path) -> None:
     runtime = ToolRuntime(_ExportStore(), export_storage_dir=str(tmp_path))
     request = ConversationTurnRequest(
         conversation_id="conv_test",
         mode=AssistantMode.RESEARCH,
-        text="Export a short workspace briefing as markdown.",
+        text="Export a short workspace briefing about the current field assistant architecture as markdown.",
     )
 
     plan = runtime.plan(
@@ -173,6 +204,7 @@ def test_export_brief_plan_and_execute_writes_markdown(tmp_path) -> None:
         "export_brief",
         [],
         specialist_analysis_text=(
+            "Field Assistant Architecture Briefing\n\n"
             "Key points:\n"
             "- Working title: Field Assistant\n\n"
             "Files reviewed:\n"
@@ -183,10 +215,51 @@ def test_export_brief_plan_and_execute_writes_markdown(tmp_path) -> None:
 
     result = runtime.execute("export_brief", plan.payload)
 
-    destination = tmp_path / "export-a-short-workspace-briefing-as-markdown.md"
+    destination = tmp_path / "field-assistant-architecture-briefing.md"
     assert destination.exists()
-    assert destination.read_text(encoding="utf-8").startswith(
-        "# Export a short workspace briefing as markdown"
-    )
+    document = destination.read_text(encoding="utf-8")
+    assert document.startswith("# Field Assistant Architecture Briefing")
     assert result["entity_type"] == "export"
     assert result["status"] == "completed"
+
+
+def test_revise_pending_export_payload_can_tighten_title_and_content() -> None:
+    runtime = ToolRuntime(_UnusedStore())
+    revised = runtime.revise_pending_payload(
+        "export_brief",
+        {
+            "title": "Field Assistant Architecture Briefing",
+            "content": (
+                "Field Assistant Architecture Overview\n\n"
+                "Key points:\n"
+                "- Local-first assistant built on Gemma.\n"
+                "- Orchestrator owns routing, retrieval, and tools.\n"
+                "- Writes stay behind approval.\n\n"
+                "Files reviewed:\n"
+                "- offline-field-assistant-v1-technical-architecture.md\n"
+            ),
+        },
+        "Keep the same draft, but make that shorter before I save it.",
+    )
+
+    assert revised is not None
+    assert revised["title"] == "Field Assistant Architecture Brief"
+    assert "Files reviewed:" not in revised["content"]
+    assert "Writes stay behind approval." in revised["content"]
+
+
+def test_revise_pending_note_payload_can_rename_title_explicitly() -> None:
+    runtime = ToolRuntime(_UnusedStore())
+    revised = runtime.revise_pending_payload(
+        "create_note",
+        {
+            "title": "Workspace Briefing",
+            "content": "A concise note about the architecture.",
+            "kind": "note",
+        },
+        'Retitle that draft to "Architecture Build Contract".',
+    )
+
+    assert revised is not None
+    assert revised["title"] == "Architecture Build Contract"
+    assert revised["content"] == "A concise note about the architecture."

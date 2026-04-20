@@ -4,8 +4,8 @@
     "title": "General Follow-up",
     "mode": "general",
     "turns": [
-      {"text": "Hey, can we just talk normally for a minute?"},
-      {"text": "What do you mean by that?"}
+      {"text": "Hey, can we just talk normally for a minute?", "expected_contains": ["talk normally"]},
+      {"text": "What do you mean by that?", "expected_contains": ["keep the conversation natural"]}
     ],
     "expected_assistant_turns": 2,
     "expected_contains": [
@@ -18,13 +18,13 @@
     "title": "Teaching Follow-up",
     "mode": "research",
     "turns": [
-      {"text": "Teach me how to prepare oral rehydration solution in the field."},
-      {"text": "What should I emphasize first to a volunteer with no medical training?"}
+      {"text": "Teach me how to prepare oral rehydration solution in the field.", "expected_contains": ["practical way to approach"]},
+      {"text": "What should I emphasize first to a volunteer with no medical training?", "expected_contains": ["most practical first point"]}
     ],
     "expected_assistant_turns": 2,
     "expected_contains": [
-      "ORS Guidance",
-      "Most relevant source"
+      "practical way to approach",
+      "practical way to approach"
     ]
   },
   {
@@ -36,18 +36,18 @@
       {"text": "Teach me how to prepare oral rehydration solution in the field."},
       {"text": "What should I emphasize first to a volunteer with no medical training?"},
       {"text": "Describe the attached supply image conservatively.", "assets": ["image"]},
-      {"text": "Which two shortages matter most before departure?"},
+      {"text": "Which two shortages matter most before departure?", "expected_contains": ["two clearest shortages"]},
       {"text": "Also, can we switch topics and just chat normally again for a second?"},
       {"text": "Honestly I'm a little anxious about tomorrow. No checklist right now, just help me calm down for a second."},
       {"text": "Review the attached mining video conservatively.", "assets": ["video"]},
-      {"text": "Prepare a briefing from the relevant workspace files."}
+      {"text": "Prepare a briefing from the relevant workspace files.", "expected_forbidden": ["Goal:", "Workspace scope:"]}
     ],
     "approve_last_tool": true,
     "expected_assistant_turns": 9,
     "expected_contains": [
       "talk normally",
       "take a breath",
-      "ORS Guidance",
+      "practical way to approach",
       "Lantern batteries low",
       "workers near excavation equipment"
     ],
@@ -56,6 +56,85 @@
       "Files reviewed:"
     ],
     "expected_note_contains": [
+      "Key points:",
+      "Files reviewed:"
+    ]
+  },
+  {
+    "id": "mixed_multimodal_topic_pivots_without_magic_phrase",
+    "title": "Mixed Multimodal Topic Pivots",
+    "mode": "research",
+    "turns": [
+      {"text": "Describe the attached supply image conservatively.", "assets": ["image"]},
+      {"text": "Which two shortages matter most before departure?"},
+      {"text": "Teach me how to explain oral rehydration solution to a new volunteer."},
+      {"text": "Review the attached mining video conservatively.", "assets": ["video"]},
+      {"text": "Honestly I'm a little anxious about tomorrow. No checklist right now, just help me calm down for a second."},
+      {"text": "Prepare a short workspace briefing about the current field assistant architecture and export it as markdown.", "expected_forbidden": ["pit edge", "Goal:", "Workspace scope:"]}
+    ],
+    "approve_last_tool": true,
+    "expected_assistant_turns": 6,
+    "expected_contains": [
+      "Lantern batteries low",
+      "two clearest shortages",
+      "practical way to approach",
+      "workers near excavation equipment",
+      "take a breath"
+    ],
+    "expected_approval_contains": [
+      "Key points:",
+      "Files reviewed:"
+    ]
+  },
+  {
+    "id": "multimodal_rereference_after_topic_shift",
+    "title": "Multimodal Re-reference",
+    "mode": "research",
+    "turns": [
+      {"text": "Describe the attached supply image conservatively.", "assets": ["image"]},
+      {"text": "Review the attached mining video conservatively.", "assets": ["video"]},
+      {"text": "Go back to the earlier image for a second. Which shortage mattered most?", "expected_contains": ["clearest shortage"], "expected_forbidden": ["pit edge", "contact sheet", "eater"]},
+      {"text": "And what did you mean by that?"}
+    ],
+    "expected_assistant_turns": 4,
+    "expected_contains": [
+      "Lantern batteries low",
+      "workers near excavation equipment",
+      "clearest shortage"
+    ]
+  },
+  {
+    "id": "pending_export_draft_follow_up",
+    "title": "Pending Export Draft Follow-up",
+    "mode": "research",
+    "turns": [
+      {
+        "text": "Prepare a short workspace briefing about the current field assistant architecture and export it as markdown.",
+        "expected_forbidden": ["Goal:", "Workspace scope:"]
+      },
+      {
+        "text": "What title are you using for that draft?",
+        "expected_contains": ["Field Assistant Architecture Briefing"],
+        "expected_forbidden": ["pit edge", "contact sheet"]
+      },
+      {
+        "text": "What's in that draft again?",
+        "expected_contains": ["currently centers on", "Local-first assistant built on Gemma"],
+        "expected_forbidden": ["pit edge", "contact sheet"]
+      },
+      {
+        "text": "Keep the same draft, but make that shorter before I save it.",
+        "expected_contains": ["A tighter title would be"],
+        "expected_forbidden": ["pit edge", "contact sheet"]
+      }
+    ],
+    "expected_assistant_turns": 4,
+    "expected_contains": [
+      "Field Assistant Architecture Briefing",
+      "currently centers on",
+      "A tighter title would be"
+    ],
+    "expected_approval_contains": [
       "Key points:",
       "Files reviewed:"
     ]

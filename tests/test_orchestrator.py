@@ -143,6 +143,109 @@ def test_orchestrator_reuses_recent_image_context_for_follow_up(tmp_path: Path) 
         container.store.close()
 
 
+def test_orchestrator_can_return_to_earlier_image_after_video_turn(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(database_path=str(tmp_path / "orchestrator-earlier-image.db"))
+    container = build_container(settings)
+    try:
+        class FakeVisionRuntime:
+            backend_name = "fake-vision"
+
+            def analyze(self, request):
+                asset_name = request.assets[0].display_name.lower()
+                if "board" in asset_name:
+                    text = (
+                        "The board shows lantern batteries and translator phone credits marked low "
+                        "before departure."
+                    )
+                else:
+                    text = "The image shows generic field notes."
+                return VisionAnalysisResult(
+                    text=text,
+                    backend="fake-vision",
+                    model_name=request.specialist_model_name,
+                    model_source="/tmp/fake-paligemma",
+                    available=True,
+                )
+
+        class FakeVideoRuntime:
+            backend_name = "fake-video"
+
+            def analyze(self, request):
+                return VideoAnalysisResult(
+                    text="The video shows heavy vehicle movement near the pit edge.",
+                    backend="fake-video",
+                    model_name=request.tracking_model_name,
+                    model_source="/tmp/fake-sam",
+                    available=True,
+                )
+
+        container.orchestrator.vision_runtime = FakeVisionRuntime()
+        container.orchestrator.video_runtime = FakeVideoRuntime()
+        conversation = container.store.create_conversation(
+            ConversationCreateRequest(title="Mixed media", mode=AssistantMode.GENERAL)
+        )
+
+        image_path = tmp_path / "board.png"
+        image_path.write_bytes(_tiny_png_bytes())
+        image_asset_id = container.store.ingest_assets(
+            AssetIngestRequest(source_paths=[str(image_path)])
+        ).asset_ids[0]
+
+        video_path = tmp_path / "mine.mp4"
+        video_path.write_bytes(b"fake-video-bytes")
+        video_asset_id = container.store.ingest_assets(
+            AssetIngestRequest(source_paths=[str(video_path)])
+        ).asset_ids[0]
+
+        asyncio.run(
+            _collect_events(
+                container,
+                ConversationTurnRequest(
+                    conversation_id=conversation.id,
+                    mode=AssistantMode.GENERAL,
+                    text="What stands out in this image?",
+                    asset_ids=[image_asset_id],
+                ),
+            )
+        )
+        asyncio.run(
+            _collect_events(
+                container,
+                ConversationTurnRequest(
+                    conversation_id=conversation.id,
+                    mode=AssistantMode.GENERAL,
+                    text="Now review this mining video conservatively.",
+                    asset_ids=[video_asset_id],
+                ),
+            )
+        )
+
+        follow_up_events = asyncio.run(
+            _collect_events(
+                container,
+                ConversationTurnRequest(
+                    conversation_id=conversation.id,
+                    mode=AssistantMode.GENERAL,
+                    text="Go back to the earlier image for a second. Which shortage mattered most?",
+                ),
+            )
+        )
+        completed = [
+            event
+            for event in follow_up_events
+            if event.type == StreamEventType.ASSISTANT_MESSAGE_COMPLETED
+        ]
+        assert completed
+        text = completed[0].payload["text"].lower()
+        assert "lantern batteries" in text
+        assert "pit edge" not in text
+        assert completed[0].payload["models"]["specialist_backend"] == "fake-vision"
+    finally:
+        container.store.close()
+
+
 def test_orchestrator_supports_normal_conversation_without_retrieval_warning(
     tmp_path: Path,
 ) -> None:
@@ -268,11 +371,96 @@ def test_orchestrator_workspace_summary_reads_like_assistant_synthesis(
         ]
         assert completed
         text = completed[0].payload["text"]
-        assert "I reviewed" in text
+        assert "Here is a concise briefing:" in text
         assert "Key points:" in text
         assert "Files reviewed:" in text
+        assert "I reviewed" not in text
         assert "Goal:" not in text
         assert "Workspace scope:" not in text
+    finally:
+        container.store.close()
+
+
+def test_orchestrator_can_answer_follow_up_about_pending_export_title(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    (workspace_root / "field-assistant-architecture.md").write_text(
+        "Field Assistant architecture overview\n"
+        "Local-first assistant built on Gemma.\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings(
+        database_path=str(tmp_path / "orchestrator-export-follow-up.db"),
+        workspace_root=str(workspace_root),
+    )
+    container = build_container(settings)
+    try:
+        conversation = container.store.create_conversation(
+            ConversationCreateRequest(title="Export Follow-up", mode=AssistantMode.RESEARCH)
+        )
+        first_turn = ConversationTurnRequest(
+            conversation_id=conversation.id,
+            mode=AssistantMode.RESEARCH,
+            text="Prepare a short workspace briefing about the current field assistant architecture and export it as markdown.",
+        )
+        follow_up = ConversationTurnRequest(
+            conversation_id=conversation.id,
+            mode=AssistantMode.RESEARCH,
+            text="What title are you using for that draft?",
+        )
+        summary_follow_up = ConversationTurnRequest(
+            conversation_id=conversation.id,
+            mode=AssistantMode.RESEARCH,
+            text="What's in that draft again?",
+        )
+        tighten_follow_up = ConversationTurnRequest(
+            conversation_id=conversation.id,
+            mode=AssistantMode.RESEARCH,
+            text="Keep the same draft, but make that shorter before I save it.",
+        )
+
+        asyncio.run(_collect_events(container, first_turn))
+        events = asyncio.run(_collect_events(container, follow_up))
+        completed = [
+            event for event in events if event.type == StreamEventType.ASSISTANT_MESSAGE_COMPLETED
+        ]
+        assert completed
+        text = completed[0].payload["text"]
+        assert 'Field Assistant Architecture Briefing' in text
+        assert "pit edge" not in text.lower()
+
+        summary_events = asyncio.run(_collect_events(container, summary_follow_up))
+        summary_completed = [
+            event
+            for event in summary_events
+            if event.type == StreamEventType.ASSISTANT_MESSAGE_COMPLETED
+        ]
+        assert summary_completed
+        summary_text = summary_completed[0].payload["text"]
+        assert "currently centers on" in summary_text.lower()
+        assert "local-first assistant built on gemma" in summary_text.lower()
+
+        tighten_events = asyncio.run(_collect_events(container, tighten_follow_up))
+        tighten_completed = [
+            event
+            for event in tighten_events
+            if event.type == StreamEventType.ASSISTANT_MESSAGE_COMPLETED
+        ]
+        tighten_approval_events = [
+            event for event in tighten_events if event.type == StreamEventType.APPROVAL_REQUIRED
+        ]
+        assert tighten_completed
+        assert tighten_approval_events
+        tighten_text = tighten_completed[0].payload["text"]
+        assert "i tightened the current markdown export draft" in tighten_text.lower()
+        assert 'field assistant architecture brief' in tighten_text.lower()
+        approval_payload = tighten_approval_events[0].payload
+        assert approval_payload["id"].startswith("approval_")
+        assert approval_payload["payload"]["title"] == "Field Assistant Architecture Brief"
+        assert "Files reviewed:" not in approval_payload["payload"]["content"]
     finally:
         container.store.close()
 

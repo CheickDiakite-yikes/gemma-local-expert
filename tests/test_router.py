@@ -1,11 +1,14 @@
 from engine.contracts.api import (
+    ApprovalState,
     AssetCareContext,
     AssetKind,
     AssetSummary,
     AssistantMode,
     ConversationMessage,
     ConversationTurnRequest,
+    TranscriptMessage,
 )
+from engine.context.service import ConversationContextService
 from engine.routing.service import RouterService
 from engine.tools.registry import ToolRegistry
 
@@ -370,3 +373,256 @@ def test_unrelated_conversation_does_not_reuse_recent_video_context() -> None:
 
     assert route.interaction_kind == "conversation"
     assert route.specialist_model is None
+
+
+def test_teaching_request_does_not_get_stuck_on_recent_image_context() -> None:
+    router = RouterService(ToolRegistry())
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.RESEARCH,
+        text="Teach me how to explain oral rehydration solution to a new volunteer.",
+    )
+
+    route = router.decide(
+        request,
+        contextual_assets=[
+            AssetSummary(
+                id="asset_image",
+                display_name="board.png",
+                source_path="board.png",
+                kind=AssetKind.IMAGE,
+                care_context=AssetCareContext.GENERAL,
+            )
+        ],
+        history=[
+            ConversationMessage(role="assistant", content="From the image, the clearest visible items are lantern batteries and ORS packets.")
+        ],
+    )
+
+    assert route.interaction_kind == "teaching"
+    assert route.specialist_model is None
+    assert route.needs_retrieval is True
+
+
+def test_source_seeking_request_does_not_reuse_recent_video_context() -> None:
+    router = RouterService(ToolRegistry())
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.RESEARCH,
+        text="Search local guidance on oral rehydration and dehydration risk.",
+        enabled_knowledge_pack_ids=["local-pack"],
+    )
+
+    route = router.decide(
+        request,
+        contextual_assets=[
+            AssetSummary(
+                id="asset_video",
+                display_name="mine.mov",
+                source_path="mine.mov",
+                kind=AssetKind.VIDEO,
+                care_context=AssetCareContext.GENERAL,
+            )
+        ],
+        history=[
+            ConversationMessage(role="assistant", content="Reviewed the attached mining clip conservatively.")
+        ],
+    )
+
+    assert route.specialist_model is None
+    assert route.needs_retrieval is True
+
+
+def test_media_follow_up_without_explicit_image_word_can_reuse_recent_image_context() -> None:
+    router = RouterService(ToolRegistry())
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.GENERAL,
+        text="Which two shortages matter most before departure?",
+    )
+
+    route = router.decide(
+        request,
+        contextual_assets=[
+            AssetSummary(
+                id="asset_image",
+                display_name="board.png",
+                source_path="board.png",
+                kind=AssetKind.IMAGE,
+                care_context=AssetCareContext.GENERAL,
+            )
+        ],
+        history=[
+            ConversationMessage(role="assistant", content="From the image, the clearest visible items are lantern batteries low and translator phone credits low.")
+        ],
+    )
+
+    assert route.interaction_kind == "vision"
+    assert route.specialist_model == "paligemma"
+
+
+def test_generic_follow_up_question_after_image_does_not_force_media_reuse() -> None:
+    router = RouterService(ToolRegistry())
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.GENERAL,
+        text="What do you mean by that?",
+    )
+
+    route = router.decide(
+        request,
+        contextual_assets=[
+            AssetSummary(
+                id="asset_image",
+                display_name="board.png",
+                source_path="board.png",
+                kind=AssetKind.IMAGE,
+                care_context=AssetCareContext.GENERAL,
+            )
+        ],
+        history=[
+            ConversationMessage(role="assistant", content="From the image, the clearest visible items are lantern batteries low and translator phone credits low.")
+        ],
+    )
+
+    assert route.specialist_model is None
+    assert route.interaction_kind == "conversation"
+
+
+def test_earlier_image_reference_can_override_newer_video_context() -> None:
+    router = RouterService(ToolRegistry())
+    context_service = ConversationContextService()
+    image_asset = AssetSummary(
+        id="asset_image",
+        display_name="board.png",
+        source_path="board.png",
+        kind=AssetKind.IMAGE,
+        care_context=AssetCareContext.GENERAL,
+    )
+    video_asset = AssetSummary(
+        id="asset_video",
+        display_name="mine.mov",
+        source_path="mine.mov",
+        kind=AssetKind.VIDEO,
+        care_context=AssetCareContext.GENERAL,
+    )
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.GENERAL,
+        text="Go back to the earlier image for a second. Which shortage mattered most?",
+    )
+    context = context_service.build(
+        turn_text=request.text,
+        transcript=[
+            TranscriptMessage(id="m1", role="user", content="What do you notice in this image?"),
+            TranscriptMessage(
+                id="m2",
+                role="assistant",
+                content="From the image, lantern batteries look low.",
+                assets=[image_asset],
+            ),
+            TranscriptMessage(id="m3", role="user", content="Now review this mining video."),
+            TranscriptMessage(
+                id="m4",
+                role="assistant",
+                content="From the video, heavy vehicle movement stands out.",
+                assets=[video_asset],
+            ),
+        ],
+        attached_assets=[],
+    )
+
+    route = router.decide(
+        request,
+        contextual_assets=context.selected_context_assets,
+        conversation_context=context,
+    )
+
+    assert route.specialist_model == "paligemma"
+    assert route.interaction_kind == "vision"
+
+
+def test_clarification_turn_can_use_structured_context_without_full_history() -> None:
+    router = RouterService(ToolRegistry())
+    context_service = ConversationContextService()
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.GENERAL,
+        text="What did you mean by that?",
+    )
+    context = context_service.build(
+        turn_text=request.text,
+        transcript=[
+            TranscriptMessage(
+                id="m1",
+                role="user",
+                content="Teach me how to explain oral rehydration solution to a new volunteer.",
+            ),
+            TranscriptMessage(
+                id="m2",
+                role="assistant",
+                content="Start with the goal, then demonstrate the first step plainly.",
+            ),
+        ],
+        attached_assets=[],
+    )
+
+    route = router.decide(request, conversation_context=context)
+
+    assert route.is_follow_up is True
+    assert route.interaction_kind == "conversation"
+
+
+def test_pending_draft_reference_overrides_recent_video_context() -> None:
+    router = RouterService(ToolRegistry())
+    context_service = ConversationContextService()
+    approval = ApprovalState(
+        id="approval_1",
+        conversation_id="conv_test",
+        turn_id="turn_1",
+        tool_name="create_note",
+        reason="save locally",
+        status="pending",
+        payload={"title": "Architecture brief"},
+    )
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.RESEARCH,
+        text="What title are you using for that draft?",
+    )
+    context = context_service.build(
+        turn_text=request.text,
+        transcript=[
+            TranscriptMessage(
+                id="m1",
+                role="assistant",
+                content="Reviewed the attached mining clip conservatively.",
+                assets=[
+                    AssetSummary(
+                        id="asset_video",
+                        display_name="mine.mov",
+                        source_path="mine.mov",
+                        kind=AssetKind.VIDEO,
+                        care_context=AssetCareContext.GENERAL,
+                    )
+                ],
+            ),
+            TranscriptMessage(
+                id="m2",
+                role="assistant",
+                content="I prepared a note draft for approval.",
+                approval=approval,
+            ),
+        ],
+        attached_assets=[],
+    )
+
+    route = router.decide(
+        request,
+        contextual_assets=context.selected_context_assets,
+        conversation_context=context,
+    )
+
+    assert route.specialist_model is None
+    assert route.interaction_kind == "draft_follow_up"
+    assert route.is_follow_up is True

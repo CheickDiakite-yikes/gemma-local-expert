@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import threading
 from dataclasses import dataclass
 from typing import Protocol
@@ -21,6 +22,13 @@ class AssistantGenerationRequest:
     citations: list[SearchResultItem]
     interaction_kind: str
     is_follow_up: bool
+    active_topic: str | None
+    conversation_context_summary: str | None
+    referent_kind: str | None
+    referent_tool: str | None
+    referent_title: str | None
+    referent_summary: str | None
+    referent_excerpt: str | None
     proposed_tool: str | None
     approval_required: bool
     tool_result: dict[str, object] | None
@@ -55,13 +63,11 @@ class MockAssistantRuntime:
         lines = []
 
         if request.workspace_summary_text:
-            lines.append(request.workspace_summary_text.strip())
+            lines.append(self._workspace_response(request.workspace_summary_text))
         elif request.specialist_analysis_text:
             lines.append(self._specialist_response(request))
         elif request.citations:
-            top_labels = ", ".join(citation.label for citation in request.citations[:2])
-            lines.append(f"I found relevant local material in {top_labels}.")
-            lines.append(self._summary_from_sources(request.citations))
+            lines.append(self._retrieval_response(request))
         else:
             lines.append(self._general_local_response(request))
 
@@ -85,7 +91,7 @@ class MockAssistantRuntime:
                 lines.append(f"I can turn this into a {tool_label} if you want that action.")
 
         return AssistantGenerationResult(
-            text=" ".join(lines),
+            text=self._join_sections(lines),
             backend=self.backend_name,
             model_name=request.assistant_model_name,
             model_source=request.assistant_model_source,
@@ -95,10 +101,51 @@ class MockAssistantRuntime:
         primary = citations[0]
         return f"Most relevant source: [{primary.label}] {primary.excerpt}"
 
+    def _retrieval_response(self, request: AssistantGenerationRequest) -> str:
+        top_labels = ", ".join(citation.label for citation in request.citations[:2])
+        primary = request.citations[0]
+        lowered = request.user_text.lower().strip()
+
+        if request.interaction_kind == "teaching":
+            topic = self._topic_from_request(request.user_text)
+            return (
+                f"Here is a practical way to approach {topic}: start with the core action from "
+                f"[{primary.label}] {primary.excerpt}"
+            )
+
+        if request.is_follow_up and any(
+            phrase in lowered for phrase in {"what should i emphasize first", "what matters first"}
+        ):
+            if request.active_topic:
+                return (
+                    f"For the earlier topic about {request.active_topic}, start with the most practical point from "
+                    f"[{primary.label}] {primary.excerpt}"
+                )
+
+        return (
+            f"I found relevant local material in {top_labels}. "
+            f"{self._summary_from_sources(request.citations)}"
+        )
+
     def _specialist_response(self, request: AssistantGenerationRequest) -> str:
         lowered = request.user_text.lower().strip()
         cleaned = self._clean_specialist_text(request.specialist_analysis_text or "")
         low_items = self._low_items_from_analysis(cleaned)
+        if self._looks_like_video_sampling_summary(cleaned):
+            if any(
+                token in lowered
+                for token in {"illegal", "unsafe", "track", "tracking", "monitor", "detect"}
+            ):
+                return (
+                    "I loaded the video locally and sampled a few frames into a contact sheet for review. "
+                    "That fallback can help us inspect what is visible frame by frame, but I would avoid stronger claims "
+                    "about unsafe or illegal behavior until the local tracking backend is available."
+                )
+            return (
+                "I loaded the video locally and sampled a few frames into a contact sheet for review. "
+                "I can help inspect those sampled frames conservatively, but I cannot do full tracking or behavior inference "
+                "from this fallback path alone."
+            )
 
         if any(
             phrase in lowered
@@ -114,6 +161,23 @@ class MockAssistantRuntime:
             return (
                 f"The two clearest shortages are {first} and {second}. "
                 "Those matter most before departure because the local review marks them low and both affect basic field operations."
+            )
+
+        if any(
+            phrase in lowered
+            for phrase in {
+                "which shortage mattered most",
+                "which shortage matters most",
+                "what shortage mattered most",
+                "what shortage matters most",
+                "what stood out first",
+                "which shortage stood out first",
+            }
+        ) and low_items:
+            first = low_items[0]
+            return (
+                f"The clearest shortage is {first}. "
+                "It stands out first because the local review marks it low and frames it like an immediate field-readiness risk."
             )
 
         if "visible text" in (request.specialist_analysis_text or "").lower():
@@ -136,6 +200,9 @@ class MockAssistantRuntime:
 
     def _general_local_response(self, request: AssistantGenerationRequest) -> str:
         lowered = request.user_text.lower().strip()
+        work_product_reply = self._work_product_follow_up(request, lowered)
+        if work_product_reply:
+            return work_product_reply
         if any(token in lowered for token in {"thank you", "thanks"}):
             return "You're welcome. We can keep talking normally, or turn the next step into a local action if useful."
         if any(token == lowered or token in lowered for token in {"hi", "hello", "hey", "how are you"}):
@@ -147,11 +214,22 @@ class MockAssistantRuntime:
                 "Pick one small next step, then stop there. If you want, tell me what part feels heaviest and we can just handle that one piece."
             )
         if request.is_follow_up:
-            prior_topic = self._recent_topic(request.messages, request.user_text)
+            prior_topic = request.active_topic or self._recent_topic(
+                request.messages, request.user_text
+            )
             if "what do you mean by that" in lowered:
+                if prior_topic:
+                    return (
+                        f"I mean we can keep the conversation natural while still preserving continuity with the earlier thread about {prior_topic}, "
+                        "and only switch into local retrieval, media analysis, or saved actions when that actually helps."
+                    )
                 return (
                     "I mean we can keep the conversation natural, and only switch into local retrieval, analysis, or saved actions when that actually helps."
                 )
+            if any(phrase in lowered for phrase in {"bring that up again", "go back to that", "come back to that"}):
+                if prior_topic:
+                    return f"Yes. The main thread we were on was {prior_topic}. We can stay with that and go deeper."
+                return "Yes. We can stay with the earlier thread and go deeper."
             if any(phrase in lowered for phrase in {"what should i emphasize first", "what matters first"}):
                 if prior_topic:
                     return (
@@ -174,6 +252,111 @@ class MockAssistantRuntime:
             "Yes. We can have a normal conversation here, and I can also switch into local analysis or task execution when you want."
         )
 
+    def _work_product_follow_up(
+        self, request: AssistantGenerationRequest, lowered: str
+    ) -> str | None:
+        if request.referent_kind not in {"pending_output", "saved_output"}:
+            return None
+
+        title = request.referent_title or "Untitled draft"
+        label = self._tool_label(request.referent_tool or "")
+
+        if any(
+            phrase in lowered
+            for phrase in {
+                "what title are you using",
+                "what title is that",
+                "what did you call that",
+                "what are you calling that",
+            }
+        ):
+            if request.referent_kind == "pending_output":
+                return (
+                    f'The current {label} draft is titled "{title}". '
+                    "If you want, I can help tighten the title or the body before you save it."
+                )
+            return f'The most recent saved {label} is titled "{title}".'
+
+        if any(
+            phrase in lowered
+            for phrase in {
+                "make that shorter",
+                "shorter",
+                "tighten",
+                "edit",
+                "rename",
+                "retitle",
+                "revise",
+                "rewrite",
+            }
+        ):
+            if request.referent_kind == "pending_output":
+                revised_bits = [f'I tightened the current {label} draft.']
+                if title:
+                    revised_bits.append(f'It is now titled "{title}".')
+                if request.referent_excerpt:
+                    revised_bits.append(
+                        f"It now centers on: {request.referent_excerpt}"
+                    )
+                revised_bits.append("It is still waiting for your approval.")
+                return " ".join(revised_bits)
+            return (
+                f'The most recent saved {label} is "{title}". '
+                "If you want a revised version, I can prepare an updated draft."
+            )
+
+        if any(
+            phrase in lowered
+            for phrase in {
+                "what is in that draft",
+                "what's in that draft",
+                "what is in that export",
+                "what's in that export",
+                "summarize that draft",
+                "summarise that draft",
+                "summarize that export",
+                "summarise that export",
+            }
+        ):
+            if request.referent_excerpt:
+                return (
+                    f'The current {label} is "{title}". '
+                    f"It currently centers on: {request.referent_excerpt}"
+                )
+            return (
+                f'The current {label} draft is "{title}". '
+                "You can review the full content in the draft panel, and I can help tighten the wording before you save it."
+            )
+
+        return None
+
+    def _workspace_response(self, text: str) -> str:
+        cleaned = text.strip()
+        if not cleaned:
+            return ""
+        paragraphs = [
+            paragraph.strip() for paragraph in re.split(r"\n\s*\n", cleaned) if paragraph.strip()
+        ]
+        if not paragraphs:
+            return cleaned
+
+        remaining = paragraphs
+        if paragraphs[0].lower().startswith("i reviewed "):
+            remaining = paragraphs[1:] or paragraphs
+
+        if remaining and remaining[0].lower().startswith("key points:"):
+            return "Here is a concise briefing:\n\n" + "\n\n".join(remaining)
+
+        return "\n\n".join(remaining)
+
+    def _join_sections(self, sections: list[str]) -> str:
+        cleaned = [section.strip() for section in sections if section and section.strip()]
+        if not cleaned:
+            return ""
+        if any("\n" in section for section in cleaned):
+            return "\n\n".join(cleaned)
+        return " ".join(cleaned)
+
     def _tool_result_summary(self, result: dict[str, object]) -> str:
         message = str(result.get("message") or "").strip()
         if message:
@@ -193,6 +376,25 @@ class MockAssistantRuntime:
             "generate_heatmap_overlay": "heatmap overlay",
         }
         return mapping.get(tool_name, tool_name.replace("_", " "))
+
+    def _tighter_title(self, title: str) -> str | None:
+        lowered = title.lower()
+        replacements = (
+            ("current ", ""),
+            ("relevant ", ""),
+            ("workspace ", ""),
+            ("architecture overview", "architecture brief"),
+            ("briefing", "brief"),
+        )
+        revised = title
+        for old, new in replacements:
+            revised = re.sub(old, new, revised, flags=re.IGNORECASE)
+        revised = re.sub(r"\s{2,}", " ", revised).strip(" -")
+        if not revised:
+            return None
+        if revised.lower() == lowered:
+            return None
+        return revised
 
     def _clean_specialist_text(self, text: str) -> str:
         cleaned = text.strip()
@@ -232,6 +434,10 @@ class MockAssistantRuntime:
                     seen.add(normalized)
                     items.append(item)
         return items
+
+    def _looks_like_video_sampling_summary(self, cleaned_text: str) -> bool:
+        lowered = cleaned_text.lower()
+        return lowered.startswith("video loaded locally:") and "contact sheet" in lowered
 
     def _recent_topic(self, messages: list[dict[str, str]], current_user_text: str) -> str | None:
         current = current_user_text.strip().lower().rstrip("?.! ")

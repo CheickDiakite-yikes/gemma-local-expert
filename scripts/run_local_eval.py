@@ -103,6 +103,12 @@ def run_conversation_eval() -> int:
             "Village route briefing\nConfirm translator contact sheet before departure.\n",
             encoding="utf-8",
         )
+        (workspace_root / "field-assistant-architecture.md").write_text(
+            "Field Assistant architecture overview\n"
+            "Local-first assistant built on Gemma.\n"
+            "Uses a bounded orchestrator with retrieval, vision, and approvals.\n",
+            encoding="utf-8",
+        )
         settings = Settings(
             database_path=str(temp_root / "conversation-eval.db"),
             workspace_root=str(workspace_root),
@@ -121,12 +127,13 @@ def run_conversation_eval() -> int:
                 "/v1/conversations",
                 json={"title": case["title"], "mode": case["mode"]},
             ).json()
-            turn_outputs: list[str] = []
+            assistant_outputs: list[str] = []
             approval_payload_content = ""
             approval_id = None
             cached_assets: dict[str, str] = {}
+            case_failed = False
 
-            for turn in case["turns"]:
+            for index, turn in enumerate(case["turns"], start=1):
                 asset_ids = [
                     _ensure_eval_asset(client, cached_assets, asset_kind)
                     for asset_kind in turn.get("assets", [])
@@ -142,16 +149,32 @@ def run_conversation_eval() -> int:
                         "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
                     },
                 )
-                turn_outputs.append(response.text)
+                events = _parse_stream(response.text)
+                assistant_text = _completed_assistant_text(events)
+                assistant_outputs.append(assistant_text)
                 if '"type":"approval.required"' in response.text:
                     approval_line = next(
-                        json.loads(line)
-                        for line in response.text.splitlines()
-                        if '"type":"approval.required"' in line
+                        event
+                        for event in events
+                        if event["type"] == "approval.required"
                     )
                     approval_id = approval_line["payload"]["id"]
                     approval_payload_content = str(
                         approval_line["payload"]["payload"].get("content", "")
+                    )
+                turn_contains = turn.get("expected_contains", [])
+                turn_forbidden = turn.get("expected_forbidden", [])
+                if any(needle.lower() not in assistant_text.lower() for needle in turn_contains):
+                    case_failed = True
+                    print(
+                        f"FAIL {case['id']} turn {index}: missing expected text in assistant reply. "
+                        f"expected={turn_contains} actual={assistant_text}"
+                    )
+                if any(needle.lower() in assistant_text.lower() for needle in turn_forbidden):
+                    case_failed = True
+                    print(
+                        f"FAIL {case['id']} turn {index}: found forbidden text in assistant reply. "
+                        f"forbidden={turn_forbidden} actual={assistant_text}"
                     )
 
             note_content = ""
@@ -168,7 +191,16 @@ def run_conversation_eval() -> int:
             transcript = client.get(f"/v1/conversations/{conversation['id']}/messages").json()
             actual = {
                 "assistant_turns": sum(1 for message in transcript if message["role"] == "assistant"),
-                "contains": [needle for needle in case["expected_contains"] if any(needle.lower() in output.lower() for output in turn_outputs)],
+                "contains": [
+                    needle
+                    for needle in case["expected_contains"]
+                    if any(needle.lower() in output.lower() for output in assistant_outputs)
+                ],
+                "forbidden": [
+                    needle
+                    for needle in case.get("expected_forbidden", [])
+                    if any(needle.lower() in output.lower() for output in assistant_outputs)
+                ],
                 "approval_contains": [
                     needle
                     for needle in case.get("expected_approval_contains", [])
@@ -181,13 +213,18 @@ def run_conversation_eval() -> int:
                 ],
             }
             if (
-                actual["assistant_turns"] != case["expected_assistant_turns"]
+                case_failed
+                or actual["forbidden"]
+                or actual["assistant_turns"] != case["expected_assistant_turns"]
                 or len(actual["contains"]) != len(case["expected_contains"])
                 or len(actual["approval_contains"]) != len(case.get("expected_approval_contains", []))
                 or len(actual["note_contains"]) != len(case.get("expected_note_contains", []))
             ):
                 failures += 1
-                print(f"FAIL {case['id']}: expected={case['expected_contains']} actual={actual}")
+                print(
+                    f"FAIL {case['id']}: expected={case['expected_contains']} "
+                    f"forbidden={case.get('expected_forbidden', [])} actual={actual}"
+                )
             else:
                 print(f"PASS {case['id']}")
 
@@ -205,6 +242,18 @@ def main() -> int:
     if suite == "retrieval":
         return run_retrieval_eval()
     return run_conversation_eval()
+
+
+def _parse_stream(response_text: str) -> list[dict[str, object]]:
+    return [json.loads(line) for line in response_text.splitlines() if line.strip()]
+
+
+def _completed_assistant_text(events: list[dict[str, object]]) -> str:
+    for event in reversed(events):
+        if event.get("type") == "assistant.message.completed":
+            payload = event.get("payload") or {}
+            return str(payload.get("text") or "")
+    return ""
 
 
 def _guess_eval_asset_kind(asset_id: str) -> AssetKind:

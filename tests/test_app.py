@@ -5,7 +5,8 @@ from fastapi.testclient import TestClient
 
 from engine.api.app import build_container, create_app
 from engine.config.settings import Settings
-from engine.models.video import VideoAnalysisResult
+from engine.contracts.api import AssetCareContext, AssetKind
+from engine.models.video import VideoAnalysisResult, VideoArtifact
 from engine.models.vision import VisionAnalysisResult
 
 
@@ -707,8 +708,9 @@ def test_workspace_agent_turn_persists_completed_run(tmp_path: Path) -> None:
     )
 
     assert response.status_code == 200
-    assert "I reviewed" in response.text
+    assert "Here is a concise briefing:" in response.text
     assert "Key points:" in response.text
+    assert "I reviewed" not in response.text
     assert "Goal:" not in response.text
     assert "Workspace scope:" not in response.text
 
@@ -842,9 +844,124 @@ def test_workspace_agent_can_export_brief_as_markdown(tmp_path: Path) -> None:
     approval = decision_response.json()
     assert approval["status"] == "executed"
     assert approval["result"]["entity_type"] == "export"
+    assert approval["result"]["title"] == "Workspace Briefing"
     assert approval["result"]["destination_path"].endswith(".md")
     assert Path(approval["result"]["destination_path"]).exists()
     assert "Key points:" in Path(approval["result"]["destination_path"]).read_text(encoding="utf-8")
+
+
+def test_pending_export_follow_up_can_answer_title_without_reusing_media_context(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    (workspace_root / "field-assistant-architecture.md").write_text(
+        "Field Assistant architecture overview\n"
+        "Local-first assistant built on Gemma.\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings(
+        database_path=str(tmp_path / "test-export-follow-up.db"),
+        workspace_root=str(workspace_root),
+    )
+    client = TestClient(create_app(settings))
+    conversation = client.post(
+        "/v1/conversations",
+        json={"title": "Export Follow-up", "mode": "research"},
+    ).json()
+
+    first = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Prepare a short workspace briefing about the current field assistant architecture and export it as markdown.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+        },
+    )
+    assert first.status_code == 200
+
+    follow_up = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "What title are you using for that draft?",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+        },
+    )
+    assert follow_up.status_code == 200
+    lines = [json.loads(line) for line in follow_up.text.splitlines() if line.strip()]
+    completed = next(line for line in lines if line["type"] == "assistant.message.completed")
+    text = completed["payload"]["text"]
+    assert "Field Assistant Architecture Briefing" in text
+    assert "pit edge" not in text.lower()
+
+    summary_follow_up = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "What's in that draft again?",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+        },
+    )
+    assert summary_follow_up.status_code == 200
+    summary_lines = [json.loads(line) for line in summary_follow_up.text.splitlines() if line.strip()]
+    summary_completed = next(
+        line for line in summary_lines if line["type"] == "assistant.message.completed"
+    )
+    summary_text = summary_completed["payload"]["text"]
+    assert "currently centers on" in summary_text.lower()
+    assert "local-first assistant built on gemma" in summary_text.lower()
+    assert "pit edge" not in summary_text.lower()
+
+    tighten_follow_up = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Keep the same draft, but make that shorter before I save it.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+        },
+    )
+    assert tighten_follow_up.status_code == 200
+    tighten_lines = [json.loads(line) for line in tighten_follow_up.text.splitlines() if line.strip()]
+    tighten_completed = next(
+        line for line in tighten_lines if line["type"] == "assistant.message.completed"
+    )
+    tighten_approval = next(line for line in tighten_lines if line["type"] == "approval.required")
+    tighten_text = tighten_completed["payload"]["text"]
+    assert "i tightened the current markdown export draft" in tighten_text.lower()
+    assert "field assistant architecture brief" in tighten_text.lower()
+    assert "pit edge" not in tighten_text.lower()
+    assert (
+        tighten_approval["payload"]["payload"]["title"]
+        == "Field Assistant Architecture Brief"
+    )
+    assert "Files reviewed:" not in tighten_approval["payload"]["payload"]["content"]
+
+    transcript = client.get(f"/v1/conversations/{conversation['id']}/messages").json()
+    assistant_with_pending = next(
+        message
+        for message in transcript
+        if message["role"] == "assistant"
+        and message.get("approval")
+        and message["approval"]["status"] == "pending"
+    )
+    assert (
+        assistant_with_pending["approval"]["payload"]["title"]
+        == "Field Assistant Architecture Brief"
+    )
 
 
 def test_multimodal_conversation_handles_topic_pivots_follow_ups_and_workspace_output(
@@ -890,6 +1007,8 @@ def test_multimodal_conversation_handles_topic_pivots_follow_ups_and_workspace_o
         backend_name = "fake-video"
 
         def analyze(self, request):
+            contact_sheet_path = tmp_path / "mine-contact-sheet.png"
+            contact_sheet_path.write_bytes(_tiny_png_bytes())
             return VideoAnalysisResult(
                 text=(
                     "Reviewed the attached mining clip conservatively. "
@@ -899,6 +1018,16 @@ def test_multimodal_conversation_handles_topic_pivots_follow_ups_and_workspace_o
                 model_name=request.tracking_model_name,
                 model_source="/tmp/fake-sam",
                 available=True,
+                artifacts=[
+                    VideoArtifact(
+                        display_name="mine-contact-sheet.png",
+                        local_path=str(contact_sheet_path),
+                        media_type="image/png",
+                        kind=AssetKind.IMAGE,
+                        care_context=AssetCareContext.GENERAL,
+                        analysis_summary="Sampled contact sheet from the uploaded video for local review.",
+                    )
+                ],
             )
 
     app.state.container.orchestrator.vision_runtime = FakeVisionRuntime()
@@ -1010,6 +1139,258 @@ def test_multimodal_conversation_handles_topic_pivots_follow_ups_and_workspace_o
     assert not notes[0]["content"].startswith("I reviewed")
     assert "Goal:" not in notes[0]["content"]
     assert "Workspace scope:" not in notes[0]["content"]
+
+
+def test_mixed_multimodal_conversation_handles_topic_pivots_without_magic_reset_phrase(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    (workspace_root / "field-assistant-architecture.md").write_text(
+        "Field Assistant architecture overview\n"
+        "Local-first assistant built on Gemma.\n"
+        "Uses a bounded orchestrator with retrieval, vision, and approvals.\n",
+        encoding="utf-8",
+    )
+    (workspace_root / "field-assistant-product-spec.md").write_text(
+        "Field Assistant product spec\n"
+        "Primary goal is grounded field help with conversational fallback.\n",
+        encoding="utf-8",
+    )
+    settings = Settings(
+        database_path=str(tmp_path / "test-multimodal-topic-pivots.db"),
+        workspace_root=str(workspace_root),
+        asset_storage_dir=str(tmp_path / "uploads"),
+        specialist_backend="mock",
+        tracking_backend="mock",
+    )
+    app = create_app(settings)
+
+    class FakeVisionRuntime:
+        backend_name = "fake-vision"
+
+        def analyze(self, request):
+            return VisionAnalysisResult(
+                text=(
+                    "Visible text extracted from the image:\n"
+                    "Lantern batteries low\n"
+                    "Translator phone credits low"
+                ),
+                backend="fake-vision",
+                model_name=request.specialist_model_name,
+                model_source="/tmp/fake-paligemma",
+                available=True,
+            )
+
+    class FakeVideoRuntime:
+        backend_name = "fake-video"
+
+        def analyze(self, request):
+            return VideoAnalysisResult(
+                text=(
+                    "Reviewed the attached mining clip conservatively. "
+                    "I can see workers near excavation equipment and repeated tool handling around the pit edge."
+                ),
+                backend="fake-video",
+                model_name=request.tracking_model_name,
+                model_source="/tmp/fake-sam",
+                available=True,
+            )
+
+    app.state.container.orchestrator.vision_runtime = FakeVisionRuntime()
+    app.state.container.orchestrator.video_runtime = FakeVideoRuntime()
+    client = TestClient(app)
+
+    image_asset = client.post(
+        "/v1/assets/upload",
+        data={"care_context": "general"},
+        files={"file": ("board.png", _tiny_png_bytes(), "image/png")},
+    ).json()["asset"]
+    video_asset = client.post(
+        "/v1/assets/upload",
+        data={"care_context": "general"},
+        files={"file": ("mine.mov", b"fake-video-bytes", "video/quicktime")},
+    ).json()["asset"]
+    conversation = client.post(
+        "/v1/conversations",
+        json={"title": "Mixed pivots", "mode": "research"},
+    ).json()
+
+    turns = [
+        ("Describe the attached supply image conservatively.", [image_asset["id"]]),
+        ("Which two shortages matter most before departure?", []),
+        ("Teach me how to explain oral rehydration solution to a new volunteer.", []),
+        ("Review the attached mining video conservatively.", [video_asset["id"]]),
+        (
+            "Honestly I'm a little anxious about tomorrow. "
+            "No checklist right now, just help me calm down for a second.",
+            [],
+        ),
+        ("Prepare a short workspace briefing about the current field assistant architecture and export it as markdown.", []),
+    ]
+
+    turn_responses: list[str] = []
+    approval_id = None
+    approval_content = ""
+    for text, asset_ids in turns:
+        response = client.post(
+            f"/v1/conversations/{conversation['id']}/turns",
+            json={
+                "conversation_id": conversation["id"],
+                "mode": "research",
+                "text": text,
+                "asset_ids": asset_ids,
+                "enabled_knowledge_pack_ids": [],
+                "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+            },
+        )
+        assert response.status_code == 200
+        turn_responses.append(response.text)
+        if '"type":"approval.required"' in response.text:
+            approval_line = next(
+                json.loads(line)
+                for line in response.text.splitlines()
+                if '"type":"approval.required"' in line
+            )
+            approval_id = approval_line["payload"]["id"]
+            approval_content = approval_line["payload"]["payload"]["content"]
+            assert approval_line["payload"]["tool_name"] == "export_brief"
+
+    assert "from the image" in turn_responses[0].lower()
+    assert "two clearest shortages" in turn_responses[1].lower()
+    assert "ors guidance" in turn_responses[2].lower()
+    assert "lantern batteries" not in turn_responses[2].lower()
+    assert "workers near excavation equipment" in turn_responses[3].lower()
+    assert "take a breath" in turn_responses[4].lower()
+    assert "workers near excavation equipment" not in turn_responses[4].lower()
+    assert approval_id is not None
+    assert "Key points:" in approval_content
+    assert "Files reviewed:" in approval_content
+    assert "Related docs:" not in approval_content
+    assert "Related brief:" not in approval_content
+    assert "Working title:" not in approval_content
+    assert "Visible text extracted from the image" not in approval_content
+    assert "workers near excavation equipment" not in approval_content
+
+    decision = client.post(
+        f"/v1/approvals/{approval_id}/decisions",
+        json={"action": "approve", "edited_payload": {}},
+    )
+    assert decision.status_code == 200
+    approval = decision.json()
+    assert approval["status"] == "executed"
+    assert approval["result"]["entity_type"] == "export"
+    export_path = Path(approval["result"]["destination_path"])
+    assert export_path.exists()
+    exported = export_path.read_text(encoding="utf-8")
+    assert "Key points:" in exported
+    assert "Files reviewed:" in exported
+    assert "Related docs:" not in exported
+    assert "Related brief:" not in exported
+    assert "Working title:" not in exported
+    assert "Visible text extracted from the image" not in exported
+    assert "workers near excavation equipment" not in exported
+
+
+def test_multimodal_conversation_can_return_to_earlier_image_after_video_turn(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        database_path=str(tmp_path / "test-multimodal-rereference.db"),
+        asset_storage_dir=str(tmp_path / "uploads"),
+        specialist_backend="mock",
+        tracking_backend="mock",
+    )
+    app = create_app(settings)
+
+    class FakeVisionRuntime:
+        backend_name = "fake-vision"
+
+        def analyze(self, request):
+            asset_name = request.assets[0].display_name.lower()
+            if "board" in asset_name:
+                text = (
+                    "Visible text extracted from the image:\n"
+                    "Lantern batteries low\n"
+                    "Translator phone credits low"
+                )
+            else:
+                text = "Visible text extracted from the image:\nGeneric field note"
+            return VisionAnalysisResult(
+                text=text,
+                backend="fake-vision",
+                model_name=request.specialist_model_name,
+                model_source="/tmp/fake-paligemma",
+                available=True,
+            )
+
+    class FakeVideoRuntime:
+        backend_name = "fake-video"
+
+        def analyze(self, request):
+            return VideoAnalysisResult(
+                text=(
+                    "Reviewed the attached mining clip conservatively. "
+                    "I can see workers near excavation equipment and repeated tool handling around the pit edge."
+                ),
+                backend="fake-video",
+                model_name=request.tracking_model_name,
+                model_source="/tmp/fake-sam",
+                available=True,
+            )
+
+    app.state.container.orchestrator.vision_runtime = FakeVisionRuntime()
+    app.state.container.orchestrator.video_runtime = FakeVideoRuntime()
+    client = TestClient(app)
+
+    image_asset = client.post(
+        "/v1/assets/upload",
+        data={"care_context": "general"},
+        files={"file": ("board.png", _tiny_png_bytes(), "image/png")},
+    ).json()["asset"]
+    video_asset = client.post(
+        "/v1/assets/upload",
+        data={"care_context": "general"},
+        files={"file": ("mine.mov", b"fake-video-bytes", "video/quicktime")},
+    ).json()["asset"]
+    conversation = client.post(
+        "/v1/conversations",
+        json={"title": "Multimodal Re-reference", "mode": "general"},
+    ).json()
+
+    for text, asset_ids in [
+        ("Describe the attached supply image conservatively.", [image_asset["id"]]),
+        ("Review the attached mining video conservatively.", [video_asset["id"]]),
+    ]:
+        response = client.post(
+            f"/v1/conversations/{conversation['id']}/turns",
+            json={
+                "conversation_id": conversation["id"],
+                "mode": "general",
+                "text": text,
+                "asset_ids": asset_ids,
+                "enabled_knowledge_pack_ids": [],
+                "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+            },
+        )
+        assert response.status_code == 200
+
+    third = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "general",
+            "text": "Go back to the earlier image for a second. Which shortage mattered most?",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+        },
+    )
+    assert third.status_code == 200
+    third_text = third.text.lower()
+    assert "lantern batteries" in third_text
+    assert "pit edge" not in third_text
+    assert "eater" not in third_text
 
 
 def _tiny_png_bytes() -> bytes:

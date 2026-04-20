@@ -510,12 +510,14 @@ function approvalMeaningfulLines(text) {
   return String(text || "")
     .replace(/\r\n?/g, "\n")
     .split("\n")
-    .map((line) => stripMarkdownToText(line))
-    .map((line) => line.trim())
+    .map((line) => ({ raw: line, clean: stripMarkdownToText(line).trim() }))
+    .filter((entry) => entry.clean)
+    .filter((entry) => !/^\s*[-*+]\s+\[[^\]]+\]\([^)]+\)\s*$/.test(entry.raw))
+    .map((entry) => entry.clean)
     .filter(Boolean)
     .filter(
       (line) =>
-        !/^(goal|workspace scope|top-level scope entries|workspace findings|related docs|related local docs|date|status):/i.test(
+        !/^(goal|workspace scope|top-level scope entries|workspace findings|related docs|related local docs|related brief|working title|date|status):/i.test(
           line,
         ),
     )
@@ -594,6 +596,9 @@ function approvalSummaryText(approval, overridePayload = undefined) {
     case "failed":
       return title ? `Could not save "${title}".` : "Could not save locally.";
     default:
+      if (approval.tool_name === "export_brief" && title) {
+        return title;
+      }
       return excerpt || `Ready to save this ${approvalSurfaceNoun(approval.tool_name)}.`;
   }
 }
@@ -1094,7 +1099,10 @@ function shouldSuppressMessage(message) {
     return false;
   }
   const plain = stripMarkdownToText(String(message.content || "")).trim().toLowerCase();
-  return plain === "workspace agent actions are limited to the configured local workspace scope.";
+  return (
+    plain === "workspace agent actions are limited to the configured local workspace scope." ||
+    plain === "exports should produce an audit record."
+  );
 }
 
 function shouldCollapseMessageContent(message, content) {
@@ -1288,12 +1296,12 @@ function renderMessageContent(message, overrideContent = undefined) {
 
   return `
     <div class="message-content-shell${collapsible ? " is-collapsible" : ""}${expanded ? " is-expanded" : ""}">
+      <div class="message-content${richTextRoles.has(message.role) ? " rich-text" : ""}">${body}</div>
       ${
         collapsible
-          ? `<button class="message-content-toggle" data-message-content-toggle="${escapeHtml(messagePanelKey(message, "context"))}" type="button">${expanded ? "Hide context" : "Context"}</button>`
+          ? `<button class="message-content-toggle" data-message-content-toggle="${escapeHtml(messagePanelKey(message, "context"))}" type="button">${expanded ? "Show less" : "Show more"}</button>`
           : ""
       }
-      <div class="message-content${richTextRoles.has(message.role) ? " rich-text" : ""}">${body}</div>
     </div>
   `;
 }
@@ -3082,10 +3090,29 @@ function handleStreamEvent(event) {
       return;
     }
     assistantMessage.loading = false;
-    syncRunFromEvent(event.conversation_id, assistantMessage, event.payload);
     const approvalPayload = { ...event.payload };
+    const runPayload = approvalPayload.run || null;
     delete approvalPayload.run;
-    assistantMessage.approval = approvalPayload;
+    clearApprovalDraft(approvalPayload.id);
+    const targetMessage =
+      activeMessages().find(
+        (message) =>
+          message.approval?.id === approvalPayload.id ||
+          (message.role === "assistant" && message.turnId === approvalPayload.turn_id),
+      ) || null;
+    if (targetMessage) {
+      if (runPayload) {
+        const storedRun = upsertAgentRun(event.conversation_id, runPayload);
+        targetMessage.agentRun = storedRun;
+      }
+      targetMessage.approval = approvalPayload;
+      if (targetMessage !== assistantMessage) {
+        assistantMessage.agentRun = null;
+      }
+    } else {
+      syncRunFromEvent(event.conversation_id, assistantMessage, event.payload);
+      assistantMessage.approval = approvalPayload;
+    }
     state.approvals.set(approvalPayload.id, approvalPayload);
     const detail = "A durable action is ready for review and approval.";
     mergeMessageProcess(assistantMessage, {

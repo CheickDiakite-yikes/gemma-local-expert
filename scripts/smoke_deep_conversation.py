@@ -21,6 +21,12 @@ def build_sample_workspace(root: Path) -> None:
         "Village route briefing\nConfirm translator contact sheet before departure.\n",
         encoding="utf-8",
     )
+    (root / "field-assistant-architecture.md").write_text(
+        "Field Assistant architecture overview\n"
+        "Local-first assistant built on Gemma.\n"
+        "Uses bounded routing, retrieval, vision, and approvals.\n",
+        encoding="utf-8",
+    )
 
 
 def main() -> None:
@@ -70,7 +76,12 @@ def main() -> None:
                 [],
             ),
             ("Review the attached mining video conservatively.", [video_asset["id"]]),
-            ("Prepare a briefing from the relevant workspace files.", []),
+            ("Go back to the earlier image for a second. Which shortage mattered most?", []),
+            ("Teach me how to explain oral rehydration solution to a new volunteer.", []),
+            ("Prepare a short workspace briefing about the current field assistant architecture and export it as markdown.", []),
+            ("What title are you using for that draft?", []),
+            ("What's in that draft again?", []),
+            ("Keep the same draft, but make that shorter before I save it.", []),
         ]
 
         approval_id = None
@@ -106,7 +117,7 @@ def main() -> None:
                         "content": (
                             "Reviewed field briefing\n"
                             "- Pack oral rehydration salts\n"
-                            "- Pack backup batteries\n"
+                            "- Uses bounded routing, retrieval, vision, and approvals\n"
                             "- Confirm translator contact sheet before departure\n"
                         ),
                     },

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from engine.context.service import ConversationContextSnapshot
 from engine.contracts.api import (
     AssetCareContext,
     AssetKind,
@@ -120,6 +121,74 @@ class RouterService:
         "review",
         "inspect",
     }
+    _MEDIA_REFERENCE_PHRASES = {
+        "this image",
+        "that image",
+        "the image",
+        "this picture",
+        "that picture",
+        "the picture",
+        "this photo",
+        "that photo",
+        "the photo",
+        "this screenshot",
+        "that screenshot",
+        "the screenshot",
+        "this x-ray",
+        "that x-ray",
+        "the x-ray",
+        "this video",
+        "that video",
+        "the video",
+        "this clip",
+        "that clip",
+        "the clip",
+        "from the image",
+        "from the video",
+        "in the image",
+        "in the video",
+        "what does this say",
+        "what stands out",
+        "what do you notice",
+        "anything look off",
+        "what is shown",
+        "what's shown",
+        "which shortages",
+        "which tools",
+        "which machine",
+        "which machines",
+        "compare this",
+        "same image",
+        "same video",
+    }
+    _MEDIA_FOLLOW_UP_CUES = {
+        "before departure",
+        "item",
+        "items",
+        "shortage",
+        "shortages",
+        "urgent",
+        "visible",
+        "shown",
+        "notice",
+        "stands out",
+        "looks off",
+        "look off",
+        "matters most",
+        "most important",
+        "prioritize",
+        "prioritise",
+        "first thing",
+        "people",
+        "worker",
+        "workers",
+        "equipment",
+        "machine",
+        "machines",
+        "tool",
+        "tools",
+        "pit edge",
+    }
     _SOURCE_SEEKING_TOKENS = {
         "find",
         "search",
@@ -137,6 +206,64 @@ class RouterService:
         "checklist",
         "summarize",
         "summarise",
+    }
+    _WORK_PRODUCT_REFERENCE_PHRASES = {
+        "that draft",
+        "this draft",
+        "the draft",
+        "that note",
+        "this note",
+        "the note",
+        "that checklist",
+        "this checklist",
+        "the checklist",
+        "that task",
+        "this task",
+        "the task",
+        "that export",
+        "this export",
+        "the export",
+        "that markdown",
+        "this markdown",
+        "the markdown",
+        "that document",
+        "this document",
+        "the document",
+        "before i save",
+        "before you save",
+        "save locally",
+        "ready to save",
+        "what title are you using",
+        "what did you call that",
+        "rename that",
+        "retitle that",
+        "make that shorter",
+        "tighten that draft",
+    }
+    _WORK_PRODUCT_NOUNS = {
+        "draft",
+        "note",
+        "checklist",
+        "task",
+        "export",
+        "markdown",
+        "document",
+        "file",
+        "title",
+    }
+    _WORK_PRODUCT_EDIT_TOKENS = {
+        "edit",
+        "rename",
+        "retitle",
+        "revise",
+        "rewrite",
+        "shorten",
+        "shorter",
+        "lengthen",
+        "longer",
+        "tighten",
+        "update",
+        "save",
     }
     _LOCAL_KNOWLEDGE_TOPICS = {
         "ors",
@@ -231,6 +358,7 @@ class RouterService:
         assets: list[AssetSummary] | None = None,
         history: list[ConversationMessage] | None = None,
         contextual_assets: list[AssetSummary] | None = None,
+        conversation_context: ConversationContextSnapshot | None = None,
     ) -> RouteDecision:
         lowered = turn.text.lower().strip()
         decision = RouteDecision()
@@ -259,19 +387,33 @@ class RouterService:
         explicit_workspace_request = self._looks_like_workspace_agent_request(lowered)
         explicit_topic_reset = self._looks_like_topic_reset(lowered)
         explicit_conversation_override = self._looks_like_conversation_override(lowered)
+        explicit_teaching_request = self._looks_like_teaching_request(lowered)
+        explicit_source_request = any(token in lowered for token in self._SOURCE_SEEKING_TOKENS)
+        explicit_media_reference = self._looks_like_explicit_media_reference(lowered)
+        explicit_work_product_reference = self._looks_like_work_product_reference(
+            lowered, conversation_context
+        )
+        explicit_non_media_override = (
+            explicit_workspace_request
+            or explicit_topic_reset
+            or explicit_conversation_override
+            or explicit_work_product_reference
+            or (explicit_teaching_request and not explicit_media_reference)
+            or (explicit_source_request and not explicit_media_reference)
+        )
 
-        if (explicit_workspace_request or explicit_topic_reset or explicit_conversation_override) and (
-            has_visual_context or has_video_context
+        if explicit_non_media_override and (
+            contextual_image_assets or contextual_video_assets
         ):
-            attached_image_assets = []
             contextual_image_assets = []
-            attached_video_assets = []
             contextual_video_assets = []
-            image_assets = []
-            video_assets = []
-            medical_image_assets = []
-            has_visual_context = False
-            has_video_context = False
+            image_assets = attached_image_assets
+            video_assets = attached_video_assets
+            medical_image_assets = [
+                asset for asset in image_assets if asset.care_context == AssetCareContext.MEDICAL
+            ]
+            has_visual_context = bool(image_assets)
+            has_video_context = bool(video_assets)
             decision.reasons.append(
                 "Explicit user intent overrides the most recent media context."
             )
@@ -286,6 +428,7 @@ class RouterService:
         decision.is_follow_up = self._looks_like_follow_up(
             lowered,
             history=history,
+            conversation_context=conversation_context,
             has_visual_context=has_visual_context,
             has_video_context=has_video_context,
             explicit_topic_reset=explicit_topic_reset or explicit_workspace_request,
@@ -293,9 +436,12 @@ class RouterService:
         if decision.is_follow_up:
             decision.reasons.append("Turn looks like a follow-up to recent conversation context.")
 
-        if self._looks_like_teaching_request(lowered):
+        if explicit_teaching_request:
             decision.interaction_kind = "teaching"
             decision.reasons.append("Turn looks like a teaching or explanation request.")
+        elif explicit_work_product_reference:
+            decision.interaction_kind = "draft_follow_up"
+            decision.reasons.append("Turn refers to the current local draft or saved output.")
         elif general_conversation:
             decision.interaction_kind = "conversation"
             decision.reasons.append("Turn looks like ordinary conversation.")
@@ -323,8 +469,11 @@ class RouterService:
             decision.interaction_kind = "translation"
             decision.reasons.append("Turn looks like a translation workflow.")
 
-        contextual_media_follow_up = decision.is_follow_up or any(
-            word in lowered for word in {"same", "that", "those", "shown", "visible", "there", "it"}
+        contextual_media_follow_up = self._looks_like_contextual_media_follow_up(
+            lowered,
+            is_follow_up=decision.is_follow_up,
+            explicit_media_reference=explicit_media_reference,
+            explicit_non_media_override=explicit_non_media_override,
         )
 
         if decision.specialist_model not in {"medgemma", "translategemma"} and (
@@ -437,6 +586,50 @@ class RouterService:
         has_action = any(token in lowered for token in self._WORKSPACE_ACTION_TOKENS)
         return has_scope and has_action
 
+    def _looks_like_explicit_media_reference(self, lowered: str) -> bool:
+        if any(phrase in lowered for phrase in self._MEDIA_REFERENCE_PHRASES):
+            return True
+        return any(
+            token in lowered
+            for token in {
+                "image",
+                "picture",
+                "photo",
+                "screenshot",
+                "xray",
+                "x-ray",
+                "video",
+                "clip",
+                "frame",
+            }
+        )
+
+    def _looks_like_contextual_media_follow_up(
+        self,
+        lowered: str,
+        *,
+        is_follow_up: bool,
+        explicit_media_reference: bool,
+        explicit_non_media_override: bool,
+    ) -> bool:
+        if explicit_non_media_override:
+            return False
+        if explicit_media_reference:
+            return True
+        if any(cue in lowered for cue in self._MEDIA_FOLLOW_UP_CUES):
+            return True
+        return is_follow_up and any(
+            cue in lowered
+            for cue in {
+                "what about",
+                "which one",
+                "is that",
+                "is there",
+                "does that",
+                "do those",
+            }
+        )
+
     def _matches_phrase(self, lowered: str, phrase: str) -> bool:
         if " " in phrase:
             return phrase in lowered
@@ -448,15 +641,38 @@ class RouterService:
         lowered: str,
         *,
         history: list[ConversationMessage],
+        conversation_context: ConversationContextSnapshot | None,
         has_visual_context: bool,
         has_video_context: bool,
         explicit_topic_reset: bool,
     ) -> bool:
-        if not history:
+        has_prior_context = bool(history) or bool(
+            conversation_context
+            and (
+                conversation_context.active_topic
+                or conversation_context.pending_approval_tool
+                or conversation_context.last_completed_output_tool
+            )
+        )
+        if not has_prior_context:
             return False
         if explicit_topic_reset:
             return False
+        if self._looks_like_work_product_reference(lowered, conversation_context):
+            return True
         if lowered.startswith(self._FOLLOW_UP_PREFIXES):
+            return True
+        if any(
+            phrase in lowered
+            for phrase in {
+                "what do you mean by that",
+                "what did you mean by that",
+                "can you explain that",
+                "tell me more about that",
+                "go back to that",
+                "bring that up again",
+            }
+        ):
             return True
         if len(lowered.split()) <= 12 and any(
             lowered.startswith(prefix)
@@ -476,3 +692,21 @@ class RouterService:
                 "can we switch gears",
             }
         )
+
+    def _looks_like_work_product_reference(
+        self,
+        lowered: str,
+        conversation_context: ConversationContextSnapshot | None,
+    ) -> bool:
+        if not conversation_context:
+            return False
+        if not (
+            conversation_context.pending_approval_tool
+            or conversation_context.last_completed_output_tool
+        ):
+            return False
+        if any(phrase in lowered for phrase in self._WORK_PRODUCT_REFERENCE_PHRASES):
+            return True
+        has_noun = any(token in lowered for token in self._WORK_PRODUCT_NOUNS)
+        has_edit_intent = any(token in lowered for token in self._WORK_PRODUCT_EDIT_TOKENS)
+        return has_noun and has_edit_intent

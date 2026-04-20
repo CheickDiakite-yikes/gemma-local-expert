@@ -6,6 +6,7 @@ from pathlib import Path
 from engine.agent.service import WorkspaceAgentError, WorkspaceAgentService
 from engine.audit.service import AuditService
 from engine.config.settings import Settings
+from engine.context.service import ConversationContextService
 from engine.contracts.api import (
     AgentRun,
     AgentRunStatus,
@@ -60,6 +61,7 @@ class OrchestratorService:
         self.tool_runtime = tool_runtime
         self.workspace_agent = workspace_agent
         self.audit = audit
+        self.context_service = ConversationContextService()
 
     async def stream_turn(
         self, turn: ConversationTurnRequest
@@ -75,9 +77,12 @@ class OrchestratorService:
             limit=self.settings.conversation_history_limit,
         )
         attached_assets = self.store.list_assets(turn.asset_ids)
-        contextual_assets = self._recent_media_context_assets(prior_transcript)
-        if attached_assets:
-            contextual_assets = []
+        conversation_context = self.context_service.build(
+            turn_text=turn.text,
+            transcript=prior_transcript,
+            attached_assets=attached_assets,
+        )
+        contextual_assets = conversation_context.selected_context_assets
         routed_assets = self._merge_assets(attached_assets, contextual_assets)
         attached_asset_ids = [asset.id for asset in attached_assets]
         self.store.append_transcript(
@@ -92,9 +97,10 @@ class OrchestratorService:
             assets=attached_assets,
             contextual_assets=contextual_assets,
             history=history,
+            conversation_context=conversation_context,
         )
-        if contextual_assets:
-            route.reasons.append("Using recent image attachment from conversation context.")
+        if contextual_assets and conversation_context.selected_context_reason:
+            route.reasons.append(conversation_context.selected_context_reason)
         policy = self.policy.evaluate(turn, route)
         model_selection = self.models.select(route)
         assistant_asset_ids: list[str] = []
@@ -103,7 +109,10 @@ class OrchestratorService:
         workspace_summary: str | None = None
         prepared_tool_name: str | None = None
         prepared_tool_plan = None
-        approval_required = policy.approval_required
+        active_pending_approval = self._pending_approval_for_context(conversation_context)
+        approval_required = policy.approval_required or bool(
+            active_pending_approval and active_pending_approval.status == "pending"
+        )
 
         self.audit.record(
             "turn.received",
@@ -128,6 +137,44 @@ class OrchestratorService:
                 turn_id=turn_id,
                 payload={"message": warning},
             )
+
+        if route.interaction_kind == "draft_follow_up" and active_pending_approval:
+            revised_approval = self._apply_pending_draft_revision(
+                approval=active_pending_approval,
+                instruction=turn.text,
+                conversation_context=conversation_context,
+            )
+            if revised_approval:
+                active_pending_approval = revised_approval
+                approval_required = True
+                agent_run = (
+                    self.store.get_agent_run(revised_approval.run_id)
+                    if revised_approval.run_id
+                    else None
+                )
+                self.audit.record(
+                    "approval.updated",
+                    approval_id=revised_approval.id,
+                    tool_name=revised_approval.tool_name,
+                    conversation_id=turn.conversation_id,
+                    turn_id=turn_id,
+                )
+                yield self._status_event(
+                    conversation_id=turn.conversation_id,
+                    turn_id=turn_id,
+                    kind="tool",
+                    label="Updated local draft",
+                    detail="Revised the pending draft while keeping the local save gated.",
+                )
+                yield ConversationStreamEvent(
+                    type=StreamEventType.APPROVAL_REQUIRED,
+                    conversation_id=turn.conversation_id,
+                    turn_id=turn_id,
+                    payload={
+                        **revised_approval.model_dump(mode="json"),
+                        "run": agent_run.model_dump(mode="json") if agent_run else None,
+                    },
+                )
 
         if policy.blocked:
             blocked_message = (
@@ -517,6 +564,7 @@ class OrchestratorService:
             history=history,
             assets=attached_assets,
             context_assets=contextual_assets,
+            conversation_context=conversation_context,
             specialist_analysis=specialist_analysis.text if specialist_analysis else None,
             workspace_summary=workspace_summary,
             route=route,
@@ -536,6 +584,13 @@ class OrchestratorService:
                 citations=results,
                 interaction_kind=route.interaction_kind,
                 is_follow_up=route.is_follow_up,
+                active_topic=conversation_context.active_topic,
+                conversation_context_summary="\n".join(conversation_context.prompt_lines()) or None,
+                referent_kind=conversation_context.selected_referent_kind,
+                referent_tool=conversation_context.selected_referent_tool,
+                referent_title=conversation_context.selected_referent_title,
+                referent_summary=conversation_context.selected_referent_summary,
+                referent_excerpt=conversation_context.selected_referent_excerpt,
                 proposed_tool=planned_tool_name,
                 approval_required=approval_required,
                 tool_result=tool_result,
@@ -737,6 +792,44 @@ class OrchestratorService:
         if len(cleaned) <= 220:
             return cleaned
         return cleaned[:219].rstrip() + "…"
+
+    def _pending_approval_for_context(
+        self, conversation_context: object
+    ):
+        approval_id = getattr(conversation_context, "pending_approval_id", None)
+        if not approval_id:
+            return None
+        approval = self.store.get_approval(approval_id)
+        if approval is None or approval.status != "pending":
+            return None
+        return approval
+
+    def _apply_pending_draft_revision(
+        self,
+        *,
+        approval,
+        instruction: str,
+        conversation_context,
+    ):
+        revised_payload = self.tool_runtime.revise_pending_payload(
+            approval.tool_name,
+            approval.payload,
+            instruction,
+        )
+        if not revised_payload or revised_payload == approval.payload:
+            return None
+        revised_approval = self.store.update_approval_payload(approval.id, revised_payload)
+        summary, excerpt = self.context_service.describe_payload(revised_payload)
+        conversation_context.pending_approval_id = revised_approval.id
+        conversation_context.pending_approval_tool = revised_approval.tool_name
+        conversation_context.pending_approval_summary = summary
+        conversation_context.pending_approval_excerpt = excerpt
+        if conversation_context.selected_referent_kind == "pending_output":
+            conversation_context.selected_referent_tool = revised_approval.tool_name
+            conversation_context.selected_referent_title = summary
+            conversation_context.selected_referent_summary = summary
+            conversation_context.selected_referent_excerpt = excerpt
+        return revised_approval
 
     def _tool_result_summary(self, result: dict[str, object]) -> str:
         if result.get("title") and result.get("entity_type"):
