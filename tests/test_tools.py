@@ -312,6 +312,7 @@ def test_create_report_plan_and_execute_persists_report_kind() -> None:
     result = runtime.execute("create_report", plan.payload)
 
     assert plan.payload["kind"] == "report"
+    assert plan.payload["title"] == "Field Assistant Architecture Report"
     assert str(plan.payload["content"]).startswith("# ")
     assert result["entity_type"] == "report"
     assert result["kind"] == "report"
@@ -364,6 +365,7 @@ def test_message_draft_planner_prefers_context_summary_over_raw_ocr_text() -> No
         context_assets=[],
     )
 
+    assert plan.payload["title"] == "Logistics Lead Shortage Update Draft"
     lowered = str(plan.payload["content"]).lower()
     assert "lantern batteries and translator phone credits" in lowered
     assert "ors packets" not in lowered

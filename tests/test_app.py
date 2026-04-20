@@ -254,6 +254,7 @@ def test_report_turn_requires_approval_and_persists_report_kind(tmp_path: Path) 
     approval_event = next(line for line in lines if '"type":"approval.required"' in line)
     approval_payload = json.loads(approval_event)
     assert approval_payload["payload"]["tool_name"] == "create_report"
+    assert approval_payload["payload"]["payload"]["title"] == "Field Assistant Architecture Report"
     approval_id = approval_payload["payload"]["id"]
 
     decision = client.post(
@@ -362,6 +363,10 @@ def test_message_draft_turn_after_image_requires_approval_and_persists_message_d
     approval_event = next(line for line in lines if '"type":"approval.required"' in line)
     approval_payload = json.loads(approval_event)
     assert approval_payload["payload"]["tool_name"] == "create_message_draft"
+    assert (
+        approval_payload["payload"]["payload"]["title"]
+        == "Logistics Lead Shortage Update Draft"
+    )
     assert "lantern batteries" in approval_payload["payload"]["payload"]["content"].lower()
     assert "translator phone credits" in approval_payload["payload"]["payload"]["content"].lower()
     assert "ors packets" not in approval_payload["payload"]["payload"]["content"].lower()

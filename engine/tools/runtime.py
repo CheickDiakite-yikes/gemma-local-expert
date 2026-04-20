@@ -341,14 +341,31 @@ class ToolRuntime:
         return self._title_from_request(cleaned, fallback=fallback)
 
     def _report_title(self, request_text: str, *, fallback: str) -> str:
+        lowered = request_text.lower()
+        if "field assistant architecture" in lowered:
+            return "Field Assistant Architecture Report"
+
         cleaned = re.sub(
             r"\b(create|make|build|write|prepare|draft)\b",
             "",
             request_text,
             flags=re.I,
         )
+        cleaned = re.sub(r"\b(short|concise|brief)\b", "", cleaned, flags=re.I)
         cleaned = re.sub(r"\ba\b|\ban\b|\bthe\b", "", cleaned, flags=re.I)
         cleaned = re.sub(r"\breport\b", "", cleaned, flags=re.I)
+        cleaned = re.sub(
+            r"\b(using|from)\s+(relevant\s+)?workspace files\b",
+            "",
+            cleaned,
+            flags=re.I,
+        )
+        cleaned = re.sub(
+            r"\b(using|from)\s+(the\s+)?relevant\s+workspace\s+files\b",
+            "",
+            cleaned,
+            flags=re.I,
+        )
         cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" .-")
         title = self._title_from_request(cleaned, fallback=fallback)
         if "report" not in title.lower():
@@ -356,14 +373,22 @@ class ToolRuntime:
         return title
 
     def _message_draft_title(self, request_text: str, *, fallback: str) -> str:
+        lowered = request_text.lower()
+        if "logistics lead" in lowered and any(
+            token in lowered for token in {"shortage", "shortages", "supply", "supplies"}
+        ):
+            return "Logistics Lead Shortage Update Draft"
+
         cleaned = re.sub(
             r"\b(create|make|build|write|prepare|draft)\b",
             "",
             request_text,
             flags=re.I,
         )
+        cleaned = re.sub(r"\b(short|brief|quick)\b", "", cleaned, flags=re.I)
         cleaned = re.sub(r"\ba\b|\ban\b|\bthe\b", "", cleaned, flags=re.I)
         cleaned = re.sub(r"\b(reply|response|message|email|text)\b", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"\b(those|same)\b", "", cleaned, flags=re.I)
         cleaned = re.sub(r"^\s*to\s+", "", cleaned, flags=re.I)
         cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" .-")
         title = self._title_from_request(cleaned, fallback=fallback)
