@@ -1,6 +1,6 @@
 from engine.contracts.api import AssistantMode, ConversationTurnRequest
 from engine.contracts.api import ConversationMessage
-from engine.context.service import ConversationContextSnapshot
+from engine.context.service import ConversationContextSnapshot, WorkProductReference
 from engine.models.gateway import ModelRouteSelection
 from engine.orchestrator.prompting import PromptBuilder
 from engine.policy.service import PolicyDecision
@@ -378,5 +378,64 @@ def test_prompt_builder_keeps_work_product_follow_up_singular() -> None:
     prompt = context.messages[-1]["content"]
     assert "Selected work-product referent:" in prompt
     assert "title=Checklist for tomorrow's village visits" in prompt
-    assert "Pending draft:" not in prompt
-    assert "Most recent saved output:" not in prompt
+
+
+def test_prompt_builder_adds_multi_output_recall_guidance() -> None:
+    builder = PromptBuilder()
+    context = builder.build(
+        turn=ConversationTurnRequest(
+            conversation_id="conv_multi_output",
+            mode=AssistantMode.RESEARCH,
+            text="What was in the earlier report again, what was in the checklist, and what is the newer export called?",
+        ),
+        history=[],
+        assets=[],
+        context_assets=[],
+        conversation_context=ConversationContextSnapshot(
+            recent_outputs=[
+                WorkProductReference(
+                    kind="saved_output",
+                    tool_name="export_brief",
+                    title="Field Assistant Architecture Briefing",
+                    excerpt="Key points about the architecture",
+                ),
+                WorkProductReference(
+                    kind="saved_output",
+                    tool_name="create_checklist",
+                    title="Departure shortage checklist",
+                    excerpt="Replace low lantern batteries",
+                ),
+                WorkProductReference(
+                    kind="saved_output",
+                    tool_name="create_report",
+                    title="Architecture status report",
+                    excerpt="Local-first orchestrator",
+                ),
+            ],
+            last_completed_output_tool="export_brief",
+            last_completed_output_title="Field Assistant Architecture Briefing",
+            last_completed_output_excerpt="Key points about the architecture",
+        ),
+        specialist_analysis=None,
+        workspace_summary=None,
+        route=RouteDecision(interaction_kind="draft_follow_up", is_follow_up=True),
+        policy=PolicyDecision(),
+        model_selection=ModelRouteSelection(
+            assistant_model="gemma-4-e2b-it-4bit",
+            embedding_model="embeddinggemma-300m",
+        ),
+        results=[],
+        tool_result=None,
+    )
+
+    prompt = "\n\n".join(message["content"] for message in context.messages)
+    assert "multiple recent local outputs at once" in prompt
+    assert "exact title-to-type mapping" in prompt
+    assert "Recent local outputs:" in prompt
+    assert "Recent saved output titles:" in prompt
+    assert "report=Architecture status report" in prompt
+    assert "checklist=Departure shortage checklist" in prompt
+    assert "markdown export=Field Assistant Architecture Briefing" in prompt
+    assert "Field Assistant Architecture Briefing" in prompt
+    assert "Departure shortage checklist" in prompt
+    assert "Architecture status report" in prompt

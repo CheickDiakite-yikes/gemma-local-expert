@@ -209,6 +209,17 @@ class PromptBuilder:
             lines.append(
                 "If the continuity snapshot identifies a checklist, note, task, or export specifically, answer about that exact work product and do not switch to a different output just because it is newer."
             )
+            if (
+                conversation_context
+                and conversation_context.selected_referent_kind not in {"pending_output", "saved_output"}
+                and len(conversation_context.recent_outputs) > 1
+            ):
+                lines.append(
+                    "The user may be referring to multiple recent local outputs at once. Use the titles from Recent local outputs explicitly, distinguish report versus checklist versus export by name, and do not prepare a new write action unless the user clearly asks you to create, save, or export something new."
+                )
+                lines.append(
+                    "If Recent saved output titles are provided, treat them as the exact title-to-type mapping and repeat them literally instead of paraphrasing."
+                )
 
         if route.is_follow_up:
             lines.append(
@@ -322,6 +333,17 @@ class PromptBuilder:
                     "Conversation continuity snapshot:\n- "
                     + "\n- ".join(continuity_lines)
                 )
+            if (
+                conversation_context.selected_referent_kind not in {"pending_output", "saved_output"}
+                and len(conversation_context.recent_outputs) > 1
+            ):
+                title_lines = self._recent_output_title_lines(
+                    conversation_context.recent_outputs
+                )
+                if title_lines:
+                    sections.append(
+                        "Recent saved output titles:\n- " + "\n- ".join(title_lines)
+                    )
             if conversation_context.selected_referent_kind in {"pending_output", "saved_output"}:
                 referent_lines: list[str] = []
                 if conversation_context.selected_referent_tool:
@@ -378,6 +400,43 @@ class PromptBuilder:
                 detail_bits.append(asset.analysis_summary)
             asset_lines.append(f"[{asset.display_name}] " + " | ".join(detail_bits))
         return asset_lines
+
+    def _tool_label(self, tool_name: str | None) -> str:
+        mapping = {
+            "create_note": "note",
+            "create_report": "report",
+            "create_message_draft": "message draft",
+            "create_checklist": "checklist",
+            "create_task": "task",
+            "export_brief": "markdown export",
+            "log_observation": "observation",
+        }
+        if tool_name in mapping:
+            return mapping[tool_name]
+        if not tool_name:
+            return "output"
+        return tool_name.replace("_", " ")
+
+    def _recent_output_title_lines(self, recent_outputs) -> list[str]:
+        order = {
+            "report": 0,
+            "checklist": 1,
+            "message draft": 2,
+            "note": 3,
+            "task": 4,
+            "markdown export": 5,
+            "observation": 6,
+        }
+        typed_titles: dict[str, str] = {}
+        for output in recent_outputs:
+            label = self._tool_label(output.tool_name)
+            if output.title and label not in typed_titles:
+                typed_titles[label] = output.title
+
+        return [
+            f"{label}={typed_titles[label]}"
+            for label in sorted(typed_titles, key=lambda item: (order.get(item, 99), item))
+        ]
 
     def _format_tool_result(self, tool_result: dict[str, object]) -> str:
         lines: list[str] = []

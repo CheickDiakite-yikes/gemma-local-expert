@@ -66,6 +66,19 @@ def test_message_draft_turn_proposes_message_draft_tool() -> None:
     assert route.proposed_tool == "create_message_draft"
 
 
+def test_export_reference_question_does_not_propose_export_tool() -> None:
+    router = RouterService(ToolRegistry())
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.GENERAL,
+        text="What was in the earlier report again, what was in the checklist, and what is the newer export called?",
+    )
+
+    route = router.decide(request)
+
+    assert route.proposed_tool is None
+
+
 def test_image_description_routes_to_vision_specialist() -> None:
     router = RouterService(ToolRegistry())
     request = ConversationTurnRequest(

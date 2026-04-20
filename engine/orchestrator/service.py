@@ -19,7 +19,11 @@ from engine.contracts.api import (
 )
 from engine.contracts.api import ConversationStreamEvent, ConversationTurnRequest, StreamEventType, new_id
 from engine.models.gateway import ModelGateway
-from engine.models.runtime import AssistantGenerationRequest, AssistantRuntime
+from engine.models.runtime import (
+    AssistantGenerationRequest,
+    AssistantGenerationResult,
+    AssistantRuntime,
+)
 from engine.models.video import VideoAnalysisRequest, VideoAsset, VideoRuntime
 from engine.models.vision import VisionAnalysisRequest, VisionAsset, VisionRuntime
 from engine.orchestrator.prompting import PromptBuilder
@@ -562,58 +566,70 @@ class OrchestratorService:
             label="Drafting the answer",
             detail="Turning grounded context into the final response.",
         )
-        prompt_context = self.prompt_builder.build(
-            turn=turn,
-            history=history,
-            assets=attached_assets,
-            context_assets=contextual_assets,
-            conversation_context=conversation_context,
-            specialist_analysis=specialist_analysis.text if specialist_analysis else None,
-            workspace_summary=workspace_summary,
-            route=route,
-            policy=policy,
-            model_selection=model_selection,
-            results=results,
-            tool_result=tool_result,
+        deterministic_reply = self._multi_output_recall_reply(
+            turn.text, conversation_context
         )
-
-        generation = self.runtime.generate(
-            AssistantGenerationRequest(
-                conversation_id=turn.conversation_id,
-                turn_id=turn_id,
-                mode=turn.mode,
-                user_text=turn.text,
-                messages=prompt_context.messages,
-                citations=results,
-                interaction_kind=route.interaction_kind,
-                is_follow_up=route.is_follow_up,
-                active_topic=conversation_context.active_topic,
-                conversation_context_summary="\n".join(conversation_context.prompt_lines()) or None,
-                referent_kind=conversation_context.selected_referent_kind,
-                referent_tool=conversation_context.selected_referent_tool,
-                referent_title=conversation_context.selected_referent_title,
-                referent_summary=conversation_context.selected_referent_summary,
-                referent_excerpt=conversation_context.selected_referent_excerpt,
-                proposed_tool=planned_tool_name,
-                approval_required=approval_required,
-                tool_result=tool_result,
-                assistant_model_name=model_selection.assistant_model,
-                assistant_model_source=model_selection.assistant_model_source,
-                specialist_model_name=model_selection.specialist_model,
-                specialist_analysis_text=specialist_analysis.text if specialist_analysis else None,
-                workspace_summary_text=workspace_summary,
-                max_tokens=self.settings.assistant_max_tokens,
-                temperature=self.settings.assistant_temperature,
-                top_p=self.settings.assistant_top_p,
+        prompt_context = None
+        if deterministic_reply and not planned_tool_name:
+            generation = AssistantGenerationResult(
+                text=deterministic_reply,
+                backend="deterministic",
+                model_name="continuity-shortcut",
+                model_source=None,
             )
-        )
+        else:
+            prompt_context = self.prompt_builder.build(
+                turn=turn,
+                history=history,
+                assets=attached_assets,
+                context_assets=contextual_assets,
+                conversation_context=conversation_context,
+                specialist_analysis=specialist_analysis.text if specialist_analysis else None,
+                workspace_summary=workspace_summary,
+                route=route,
+                policy=policy,
+                model_selection=model_selection,
+                results=results,
+                tool_result=tool_result,
+            )
+
+            generation = self.runtime.generate(
+                AssistantGenerationRequest(
+                    conversation_id=turn.conversation_id,
+                    turn_id=turn_id,
+                    mode=turn.mode,
+                    user_text=turn.text,
+                    messages=prompt_context.messages,
+                    citations=results,
+                    interaction_kind=route.interaction_kind,
+                    is_follow_up=route.is_follow_up,
+                    active_topic=conversation_context.active_topic,
+                    conversation_context_summary="\n".join(conversation_context.prompt_lines()) or None,
+                    referent_kind=conversation_context.selected_referent_kind,
+                    referent_tool=conversation_context.selected_referent_tool,
+                    referent_title=conversation_context.selected_referent_title,
+                    referent_summary=conversation_context.selected_referent_summary,
+                    referent_excerpt=conversation_context.selected_referent_excerpt,
+                    proposed_tool=planned_tool_name,
+                    approval_required=approval_required,
+                    tool_result=tool_result,
+                    assistant_model_name=model_selection.assistant_model,
+                    assistant_model_source=model_selection.assistant_model_source,
+                    specialist_model_name=model_selection.specialist_model,
+                    specialist_analysis_text=specialist_analysis.text if specialist_analysis else None,
+                    workspace_summary_text=workspace_summary,
+                    max_tokens=self.settings.assistant_max_tokens,
+                    temperature=self.settings.assistant_temperature,
+                    top_p=self.settings.assistant_top_p,
+                )
+            )
         self.audit.record(
             "assistant.generated",
             conversation_id=turn.conversation_id,
             turn_id=turn_id,
             backend=generation.backend,
             assistant_model=generation.model_name,
-            source_count=prompt_context.source_count,
+            source_count=prompt_context.source_count if prompt_context else 0,
         )
         assistant_message = generation.text
         completed_asset_ids = assistant_asset_ids + specialist_asset_ids
@@ -641,6 +657,64 @@ class OrchestratorService:
             turn_id=turn_id,
             asset_ids=completed_asset_ids,
         )
+
+    def _multi_output_recall_reply(
+        self,
+        turn_text: str,
+        conversation_context,
+    ) -> str | None:
+        if not conversation_context or len(conversation_context.recent_outputs) < 2:
+            return None
+
+        lowered = turn_text.lower().strip()
+        requested_labels: list[str] = []
+        if "report" in lowered:
+            requested_labels.append("report")
+        if "checklist" in lowered:
+            requested_labels.append("checklist")
+        if any(token in lowered for token in {"export", "markdown", "document"}):
+            requested_labels.append("markdown export")
+        if len(set(requested_labels)) < 2:
+            return None
+        if not any(
+            token in lowered
+            for token in {"title", "titles", "called", "name", "named", "what was", "what's", "what is"}
+        ):
+            return None
+
+        typed_outputs: dict[str, str] = {}
+        for output in conversation_context.recent_outputs:
+            label = self._tool_label(output.tool_name)
+            if output.title and label not in typed_outputs:
+                typed_outputs[label] = output.title
+
+        parts: list[str] = []
+        if "report" in requested_labels and typed_outputs.get("report"):
+            parts.append(f'The earlier report is titled "{typed_outputs["report"]}".')
+        if "checklist" in requested_labels and typed_outputs.get("checklist"):
+            parts.append(f'The checklist is titled "{typed_outputs["checklist"]}".')
+        if "markdown export" in requested_labels and typed_outputs.get("markdown export"):
+            parts.append(f'The newer export is titled "{typed_outputs["markdown export"]}".')
+
+        if len(parts) < 2:
+            return None
+        return "\n".join(parts)
+
+    def _tool_label(self, tool_name: str | None) -> str:
+        mapping = {
+            "create_note": "note",
+            "create_report": "report",
+            "create_message_draft": "message draft",
+            "create_checklist": "checklist",
+            "create_task": "task",
+            "export_brief": "markdown export",
+            "log_observation": "observation",
+        }
+        if tool_name in mapping:
+            return mapping[tool_name]
+        if not tool_name:
+            return "output"
+        return tool_name.replace("_", " ")
 
     def _merge_assets(
         self,

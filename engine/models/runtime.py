@@ -259,6 +259,10 @@ class MockAssistantRuntime:
     def _work_product_follow_up(
         self, request: AssistantGenerationRequest, lowered: str
     ) -> str | None:
+        multi_output_reply = self._multi_output_work_product_follow_up(request, lowered)
+        if multi_output_reply:
+            return multi_output_reply
+
         if request.referent_kind not in {"pending_output", "saved_output"}:
             return None
 
@@ -351,6 +355,49 @@ class MockAssistantRuntime:
             )
 
         return None
+
+    def _multi_output_work_product_follow_up(
+        self, request: AssistantGenerationRequest, lowered: str
+    ) -> str | None:
+        mentioned_labels: list[str] = []
+        if "report" in lowered:
+            mentioned_labels.append("report")
+        if "checklist" in lowered:
+            mentioned_labels.append("checklist")
+        if any(token in lowered for token in {"export", "markdown", "document"}):
+            mentioned_labels.append("markdown export")
+        if len(set(mentioned_labels)) < 2:
+            return None
+        if not any(
+            token in lowered
+            for token in {"what", "again", "called", "title", "summarize", "summarise", "summary"}
+        ):
+            return None
+
+        outputs = self._recent_outputs_from_summary(request.conversation_context_summary or "")
+        if not outputs:
+            return None
+
+        by_label = {label: title for label, title in outputs}
+        parts: list[str] = []
+        if "report" in mentioned_labels and by_label.get("report"):
+            parts.append(f'The earlier report was "{by_label["report"]}".')
+        if "checklist" in mentioned_labels and by_label.get("checklist"):
+            parts.append(f'The checklist was "{by_label["checklist"]}".')
+        if "markdown export" in mentioned_labels and by_label.get("markdown export"):
+            parts.append(f'The newer export was "{by_label["markdown export"]}".')
+        if not parts:
+            return None
+        return " ".join(parts)
+
+    def _recent_outputs_from_summary(self, summary: str) -> list[tuple[str, str]]:
+        if not summary:
+            return []
+        return re.findall(
+            r'(report|checklist|markdown export|message draft|note|task)\s+"([^"]+)"',
+            summary,
+            flags=re.IGNORECASE,
+        )
 
     def _workspace_response(self, text: str) -> str:
         cleaned = text.strip()

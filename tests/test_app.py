@@ -1062,6 +1062,114 @@ def test_pending_export_follow_up_can_answer_title_without_reusing_media_context
     )
 
 
+def test_multi_output_recall_question_does_not_trigger_new_export(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    (workspace_root / "field-assistant-architecture.md").write_text(
+        "Field Assistant architecture overview\n"
+        "Local-first assistant built on Gemma.\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings(
+        database_path=str(tmp_path / "test-multi-output-recall.db"),
+        workspace_root=str(workspace_root),
+    )
+    client = TestClient(create_app(settings))
+    conversation = client.post(
+        "/v1/conversations",
+        json={"title": "Multi-output Recall", "mode": "research"},
+    ).json()
+
+    report = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Create a report summarizing the current field assistant architecture.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+        },
+    )
+    report_lines = [json.loads(line) for line in report.text.splitlines() if line.strip()]
+    report_approval = next(line for line in report_lines if line["type"] == "approval.required")
+    client.post(
+        f"/v1/approvals/{report_approval['payload']['id']}/decisions",
+        json={
+            "action": "approve",
+            "edited_payload": {"title": "Architecture status report"},
+        },
+    )
+
+    checklist = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Create a checklist for tomorrow's departure.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+        },
+    )
+    checklist_lines = [json.loads(line) for line in checklist.text.splitlines() if line.strip()]
+    checklist_approval = next(
+        line for line in checklist_lines if line["type"] == "approval.required"
+    )
+    client.post(
+        f"/v1/approvals/{checklist_approval['payload']['id']}/decisions",
+        json={
+            "action": "approve",
+            "edited_payload": {
+                "title": "Departure shortage checklist",
+                "content": "- [ ] Replace low lantern batteries\n- [ ] Confirm consent forms",
+            },
+        },
+    )
+
+    export = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Prepare a short workspace briefing about the current field assistant architecture and export it as markdown.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+        },
+    )
+    export_lines = [json.loads(line) for line in export.text.splitlines() if line.strip()]
+    export_approval = next(line for line in export_lines if line["type"] == "approval.required")
+    client.post(
+        f"/v1/approvals/{export_approval['payload']['id']}/decisions",
+        json={
+            "action": "approve",
+            "edited_payload": {"title": "Field Assistant Architecture Briefing"},
+        },
+    )
+
+    follow_up = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "What was in the earlier report again, what was in the checklist, and what is the newer export called?",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+        },
+    )
+    assert follow_up.status_code == 200
+    follow_up_lines = [json.loads(line) for line in follow_up.text.splitlines() if line.strip()]
+    assert not any(line["type"] == "approval.required" for line in follow_up_lines)
+    completed = next(line for line in follow_up_lines if line["type"] == "assistant.message.completed")
+    text = completed["payload"]["text"]
+    assert "Architecture status report" in text
+    assert "Departure shortage checklist" in text
+    assert "Field Assistant Architecture Briefing" in text
+
+
 def test_multimodal_conversation_handles_topic_pivots_follow_ups_and_workspace_output(
     tmp_path: Path,
 ) -> None:

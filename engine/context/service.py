@@ -672,6 +672,8 @@ class ConversationContextService:
 
         if self._looks_like_work_product_reference(lowered):
             requested_tools = self._requested_work_product_tools(lowered)
+            if self._looks_like_multi_output_reference(lowered, requested_tools):
+                return None, None, None, None, None
             if requested_tools:
                 matched_output = self._match_recent_output(
                     snapshot.recent_outputs,
@@ -743,6 +745,17 @@ class ConversationContextService:
         if any(token in lowered for token in {"export", "markdown", "document"}):
             requested_tools.add("export_brief")
         return requested_tools
+
+    def _looks_like_multi_output_reference(
+        self, lowered: str, requested_tools: set[str]
+    ) -> bool:
+        if len(requested_tools) < 2:
+            return False
+        if any(token in lowered for token in {"compare", "both", "all three", "each"}):
+            return True
+        if " and " in lowered:
+            return True
+        return any(token in lowered for token in _EARLIER_REFERENCE_TOKENS | _LATEST_REFERENCE_TOKENS)
 
     def _match_recent_output(
         self,

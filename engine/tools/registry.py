@@ -90,12 +90,30 @@ class ToolRegistry:
             word in lowered for word in {"save", "create", "write", "make", "build", "draft", "prepare"}
         ):
             return "create_message_draft"
-        if any(token in lowered for token in {"export", "markdown", "document"}) and any(
-            word in lowered for word in {"save", "create", "write", "export", "make"}
-        ):
+        if self._looks_like_export_action(lowered):
             return "export_brief"
         if "observation" in lowered or "log this" in lowered:
             return "log_observation"
         if "case summary" in lowered and "medical" in lowered:
             return "medical_case_summary"
         return None
+
+    def _looks_like_export_action(self, lowered: str) -> bool:
+        explicit_export_phrases = {
+            "export a",
+            "export an",
+            "export the",
+            "export this",
+            "export that",
+            "please export",
+            "can you export",
+        }
+        if "export" in lowered and any(phrase in lowered for phrase in explicit_export_phrases):
+            return True
+
+        if any(token in lowered for token in {"markdown", "document"}) and any(
+            word in lowered for word in {"save", "create", "write", "make", "build", "draft", "prepare", "export"}
+        ):
+            return True
+
+        return False

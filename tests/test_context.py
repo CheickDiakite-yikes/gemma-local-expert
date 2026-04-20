@@ -532,3 +532,75 @@ def test_context_service_can_select_earlier_report_among_multiple_reports() -> N
     assert snapshot.selected_referent_title == "Architecture status report"
     assert snapshot.selected_referent_excerpt is not None
     assert "local-first orchestrator" in snapshot.selected_referent_excerpt.lower()
+
+
+def test_context_service_does_not_force_single_referent_for_multi_output_recall() -> None:
+    service = ConversationContextService()
+    report = ApprovalState(
+        id="approval_report",
+        conversation_id="conv_1",
+        turn_id="turn_report",
+        tool_name="create_report",
+        reason="save locally",
+        status="executed",
+        payload={
+            "title": "Architecture status report",
+            "content": "# Architecture status report\n\n- Local-first orchestrator.\n",
+        },
+        result={"title": "Architecture status report"},
+    )
+    checklist = ApprovalState(
+        id="approval_checklist",
+        conversation_id="conv_1",
+        turn_id="turn_checklist",
+        tool_name="create_checklist",
+        reason="save locally",
+        status="executed",
+        payload={
+            "title": "Departure shortage checklist",
+            "content": "- [ ] Replace low lantern batteries\n",
+        },
+        result={"title": "Departure shortage checklist"},
+    )
+    export = ApprovalState(
+        id="approval_export",
+        conversation_id="conv_1",
+        turn_id="turn_export",
+        tool_name="export_brief",
+        reason="save locally",
+        status="executed",
+        payload={
+            "title": "Field Assistant Architecture Briefing",
+            "content": "# Field Assistant Architecture Briefing\n\nKey points:\n",
+        },
+        result={"title": "Field Assistant Architecture Briefing"},
+    )
+
+    snapshot = service.build(
+        turn_text="What was in the earlier report again, what was in the checklist, and what is the newer export called?",
+        transcript=[
+            TranscriptMessage(
+                id="msg1",
+                role="assistant",
+                content="I saved the architecture report locally.",
+                approval=report,
+            ),
+            TranscriptMessage(
+                id="msg2",
+                role="assistant",
+                content="I saved the checklist locally.",
+                approval=checklist,
+            ),
+            TranscriptMessage(
+                id="msg3",
+                role="assistant",
+                content="I saved the markdown export locally.",
+                approval=export,
+            ),
+        ],
+        attached_assets=[],
+    )
+
+    assert snapshot.selected_referent_kind is None
+    assert snapshot.selected_referent_tool is None
+    assert len(snapshot.recent_outputs) == 3
