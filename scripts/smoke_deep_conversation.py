@@ -82,6 +82,9 @@ def main() -> None:
             ("What title are you using for that draft?", []),
             ("What's in that draft again?", []),
             ("Keep the same draft, but make that shorter before I save it.", []),
+            ("Actually, just talk normally with me for a second.", []),
+            ("Go back to the earlier image for a second. Which shortage mattered most?", []),
+            ("And what is the draft called now?", []),
         ]
 
         approval_id = None

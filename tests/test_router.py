@@ -626,3 +626,43 @@ def test_pending_draft_reference_overrides_recent_video_context() -> None:
     assert route.specialist_model is None
     assert route.interaction_kind == "draft_follow_up"
     assert route.is_follow_up is True
+
+
+def test_work_product_follow_up_does_not_reopen_retrieval() -> None:
+    router = RouterService(ToolRegistry())
+    context_service = ConversationContextService()
+    approval = ApprovalState(
+        id="approval_1",
+        conversation_id="conv_test",
+        turn_id="turn_1",
+        tool_name="create_checklist",
+        reason="save locally",
+        status="pending",
+        payload={"title": "Departure checklist", "content": "- Pack batteries"},
+    )
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.RESEARCH,
+        text="What was in that checklist again?",
+    )
+    context = context_service.build(
+        turn_text=request.text,
+        transcript=[
+            TranscriptMessage(
+                id="m1",
+                role="assistant",
+                content="I prepared a checklist draft for approval.",
+                approval=approval,
+            )
+        ],
+        attached_assets=[],
+    )
+
+    route = router.decide(
+        request,
+        contextual_assets=context.selected_context_assets,
+        conversation_context=context,
+    )
+
+    assert route.interaction_kind == "draft_follow_up"
+    assert route.needs_retrieval is False

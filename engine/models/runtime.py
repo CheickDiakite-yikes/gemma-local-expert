@@ -61,8 +61,12 @@ class MockAssistantRuntime:
 
     def generate(self, request: AssistantGenerationRequest) -> AssistantGenerationResult:
         lines = []
+        lowered = request.user_text.lower().strip()
+        work_product_reply = self._work_product_follow_up(request, lowered)
 
-        if request.workspace_summary_text:
+        if work_product_reply:
+            lines.append(work_product_reply)
+        elif request.workspace_summary_text:
             lines.append(self._workspace_response(request.workspace_summary_text))
         elif request.specialist_analysis_text:
             lines.append(self._specialist_response(request))
@@ -266,6 +270,10 @@ class MockAssistantRuntime:
             for phrase in {
                 "what title are you using",
                 "what title is that",
+                "what is the draft called",
+                "what is that draft called",
+                "what is the title now",
+                "what is the draft title",
                 "what did you call that",
                 "what are you calling that",
             }
@@ -310,8 +318,22 @@ class MockAssistantRuntime:
             for phrase in {
                 "what is in that draft",
                 "what's in that draft",
+                "what was in that draft",
                 "what is in that export",
                 "what's in that export",
+                "what was in that export",
+                "what is in that checklist",
+                "what's in that checklist",
+                "what was in that checklist",
+                "what is in that note",
+                "what's in that note",
+                "what was in that note",
+                "what is in that task",
+                "what's in that task",
+                "what was in that task",
+                "what is in that document",
+                "what's in that document",
+                "what was in that document",
                 "summarize that draft",
                 "summarise that draft",
                 "summarize that export",

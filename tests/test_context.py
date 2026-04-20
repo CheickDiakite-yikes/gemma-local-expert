@@ -225,6 +225,117 @@ def test_context_service_selects_last_saved_output_referent() -> None:
     assert "field assistant architecture overview" in snapshot.selected_referent_excerpt.lower()
 
 
+def test_context_service_prefers_matching_output_kind_over_newer_pending_draft() -> None:
+    service = ConversationContextService()
+    checklist_approval = ApprovalState(
+        id="approval_checklist",
+        conversation_id="conv_1",
+        turn_id="turn_checklist",
+        tool_name="create_checklist",
+        reason="save locally",
+        status="executed",
+        payload={
+            "title": "Departure checklist",
+            "content": "- Pack lantern batteries\n- Bring consent forms\n",
+        },
+        result={"title": "Departure checklist"},
+    )
+    export_approval = ApprovalState(
+        id="approval_export",
+        conversation_id="conv_1",
+        turn_id="turn_export",
+        tool_name="export_brief",
+        reason="save locally",
+        status="pending",
+        payload={
+            "title": "Field Assistant Architecture Briefing",
+            "content": "Field Assistant architecture overview\nUses bounded routing and approvals.\n",
+        },
+    )
+
+    snapshot = service.build(
+        turn_text="What was in that checklist again?",
+        transcript=[
+            TranscriptMessage(
+                id="msg1",
+                role="assistant",
+                content="I created the checklist locally.",
+                approval=checklist_approval,
+            ),
+            TranscriptMessage(
+                id="msg2",
+                role="assistant",
+                content="I prepared a markdown export for approval.",
+                approval=export_approval,
+            ),
+        ],
+        attached_assets=[],
+    )
+
+    assert snapshot.pending_approval_tool == "export_brief"
+    assert snapshot.selected_referent_kind == "saved_output"
+    assert snapshot.selected_referent_tool == "create_checklist"
+    assert snapshot.selected_referent_title == "Departure checklist"
+    assert snapshot.selected_referent_excerpt is not None
+    assert "lantern batteries" in snapshot.selected_referent_excerpt.lower()
+
+
+def test_context_service_keeps_matching_pending_output_preview_when_newer_pending_exists() -> None:
+    service = ConversationContextService()
+    checklist_approval = ApprovalState(
+        id="approval_checklist_pending",
+        conversation_id="conv_1",
+        turn_id="turn_checklist_pending",
+        tool_name="create_checklist",
+        reason="save locally",
+        status="pending",
+        payload={
+            "title": "Checklist for tomorrow's village visits",
+            "content": "- Pack oral rehydration salts\n- Confirm translator contact sheet before departure\n",
+        },
+    )
+    export_approval = ApprovalState(
+        id="approval_export_pending",
+        conversation_id="conv_1",
+        turn_id="turn_export_pending",
+        tool_name="export_brief",
+        reason="save locally",
+        status="pending",
+        payload={
+            "title": "Field Assistant Architecture Briefing",
+            "content": "This document converts the v1 product spec into an implementation architecture.\n",
+        },
+    )
+
+    snapshot = service.build(
+        turn_text="What was in that checklist again?",
+        transcript=[
+            TranscriptMessage(
+                id="msg1",
+                role="assistant",
+                content="I prepared a checklist draft for approval.",
+                approval=checklist_approval,
+            ),
+            TranscriptMessage(
+                id="msg2",
+                role="assistant",
+                content="I prepared a markdown export for approval.",
+                approval=export_approval,
+            ),
+        ],
+        attached_assets=[],
+    )
+
+    assert snapshot.pending_approval_tool == "export_brief"
+    assert snapshot.selected_referent_kind == "pending_output"
+    assert snapshot.selected_referent_tool == "create_checklist"
+    assert snapshot.selected_referent_title == "Checklist for tomorrow's village visits"
+    assert snapshot.selected_referent_summary == "Checklist for tomorrow's village visits"
+    assert snapshot.selected_referent_excerpt is not None
+    assert "translator contact sheet" in snapshot.selected_referent_excerpt.lower()
+    assert "implementation architecture" not in snapshot.selected_referent_excerpt.lower()
+
+
 def test_context_service_can_refer_back_to_first_image_when_two_images_exist() -> None:
     service = ConversationContextService()
     first_image = AssetSummary(
@@ -272,5 +383,97 @@ def test_context_service_can_refer_back_to_first_image_when_two_images_exist() -
     assert snapshot.selected_context_kind == "image"
     assert snapshot.selected_context_assets
     assert snapshot.selected_context_assets[0].id == "asset_image_first"
+    assert snapshot.selected_context_summary is not None
+    assert "lantern batteries" in snapshot.selected_context_summary.lower()
+
+
+def test_context_service_preserves_earlier_image_across_longer_transcript_with_casual_pivot() -> None:
+    service = ConversationContextService()
+    image_asset = AssetSummary(
+        id="asset_image",
+        display_name="board.png",
+        source_path="board.png",
+        kind=AssetKind.IMAGE,
+    )
+    video_asset = AssetSummary(
+        id="asset_video",
+        display_name="mine.mov",
+        source_path="mine.mov",
+        kind=AssetKind.VIDEO,
+    )
+    transcript = [
+        TranscriptMessage(
+            id="msg1",
+            role="user",
+            content="Describe the attached supply image conservatively.",
+            assets=[image_asset],
+        ),
+        TranscriptMessage(
+            id="msg2",
+            role="assistant",
+            content="From the image, lantern batteries look low.",
+        ),
+        TranscriptMessage(
+            id="msg3",
+            role="user",
+            content="Which two shortages matter most before departure?",
+        ),
+        TranscriptMessage(
+            id="msg4",
+            role="assistant",
+            content="The two clearest shortages are lantern batteries and translator phone credits.",
+        ),
+        TranscriptMessage(
+            id="msg5",
+            role="user",
+            content="Review the attached mining video conservatively.",
+            assets=[video_asset],
+        ),
+        TranscriptMessage(
+            id="msg6",
+            role="assistant",
+            content="From the video, I noticed workers near excavation equipment.",
+        ),
+        TranscriptMessage(
+            id="msg7",
+            role="user",
+            content="Prepare a short workspace briefing about the current field assistant architecture and export it as markdown.",
+        ),
+        TranscriptMessage(
+            id="msg8",
+            role="assistant",
+            content="Here is a concise briefing with key points and files reviewed.",
+        ),
+        TranscriptMessage(
+            id="msg9",
+            role="user",
+            content="Keep the same draft, but make that shorter before I save it.",
+        ),
+        TranscriptMessage(
+            id="msg10",
+            role="assistant",
+            content="I tightened the current markdown export draft.",
+        ),
+        TranscriptMessage(
+            id="msg11",
+            role="user",
+            content="Actually, just talk normally with me for a second.",
+        ),
+        TranscriptMessage(
+            id="msg12",
+            role="assistant",
+            content="Yes. We can have a normal conversation here.",
+        ),
+    ]
+
+    snapshot = service.build(
+        turn_text="Go back to the earlier image for a second. Which shortage mattered most?",
+        transcript=transcript,
+        attached_assets=[],
+    )
+
+    assert snapshot.selected_context_kind == "image"
+    assert snapshot.selected_context_assets
+    assert snapshot.selected_context_assets[0].id == "asset_image"
     assert snapshot.selected_context_summary is not None
     assert "lantern batteries" in snapshot.selected_context_summary.lower()

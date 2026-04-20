@@ -234,6 +234,10 @@ class RouterService:
         "save locally",
         "ready to save",
         "what title are you using",
+        "what is the draft called",
+        "what is that draft called",
+        "what is the title now",
+        "what is the draft title",
         "what did you call that",
         "rename that",
         "retitle that",
@@ -262,6 +266,7 @@ class RouterService:
         "lengthen",
         "longer",
         "tighten",
+        "called",
         "update",
         "save",
     }
@@ -520,6 +525,17 @@ class RouterService:
         ):
             decision.needs_retrieval = True
             decision.reasons.append("Turn benefits from local retrieval before synthesis.")
+
+        if explicit_work_product_reference and decision.needs_retrieval:
+            decision.needs_retrieval = False
+            decision.reasons = [
+                reason
+                for reason in decision.reasons
+                if reason != "Turn benefits from local retrieval before synthesis."
+            ]
+            decision.reasons.append(
+                "Stayed anchored to the referenced local output instead of reopening retrieval."
+            )
 
         decision.proposed_tool = self.tools.propose(turn.text)
         if decision.proposed_tool == "generate_heatmap_overlay" and not has_visual_context:

@@ -74,7 +74,10 @@ class OrchestratorService:
         )
         prior_transcript = self.store.list_transcript(
             turn.conversation_id,
-            limit=self.settings.conversation_history_limit,
+            limit=max(
+                self.settings.continuity_history_limit,
+                self.settings.conversation_history_limit,
+            ),
         )
         attached_assets = self.store.list_assets(turn.asset_ids)
         conversation_context = self.context_service.build(

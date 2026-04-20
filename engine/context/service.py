@@ -87,6 +87,10 @@ _WORK_PRODUCT_REFERENCE_PHRASES = {
     "ready to save",
     "what title are you using",
     "what title is that",
+    "what is the draft called",
+    "what is that draft called",
+    "what is the title now",
+    "what is the draft title",
     "what did you call that",
     "rename that",
     "retitle that",
@@ -117,6 +121,7 @@ _WORK_PRODUCT_EDIT_TOKENS = {
     "lengthen",
     "longer",
     "tighten",
+    "called",
     "update",
     "save",
 }
@@ -170,6 +175,7 @@ class ConversationContextSnapshot:
     last_completed_output_title: str | None = None
     last_completed_output_excerpt: str | None = None
     last_agent_summary: str | None = None
+    recent_outputs: list["WorkProductReference"] = field(default_factory=list)
 
     def prompt_lines(self) -> list[str]:
         lines: list[str] = []
@@ -205,7 +211,10 @@ class ConversationContextSnapshot:
             if self.last_video_assets:
                 available.append("video")
             lines.append("Recent media available: " + ", ".join(available))
-        if self.pending_approval_tool and self.selected_referent_kind != "pending_output":
+        if (
+            self.pending_approval_tool
+            and self.selected_referent_kind not in {"pending_output", "saved_output"}
+        ):
             lines.append(
                 "Pending draft: "
                 + self._format_referent(
@@ -219,7 +228,7 @@ class ConversationContextSnapshot:
         if (
             self.last_completed_output_tool
             and self.last_completed_output_title
-            and self.selected_referent_kind != "saved_output"
+            and self.selected_referent_kind not in {"pending_output", "saved_output"}
         ):
             lines.append(
                 "Most recent saved output: "
@@ -270,6 +279,15 @@ class ConversationContextSnapshot:
         return tool_name.replace("_", " ")
 
 
+@dataclass(slots=True)
+class WorkProductReference:
+    kind: str
+    tool_name: str | None
+    title: str | None
+    excerpt: str | None
+    approval_id: str | None = None
+
+
 class ConversationContextService:
     def describe_payload(
         self, payload: dict[str, object] | None
@@ -296,6 +314,7 @@ class ConversationContextService:
         snapshot.last_user_request = snapshot.active_topic
         snapshot.last_assistant_reply = self._last_message_text(transcript, role="assistant")
         snapshot.last_agent_summary = self._last_agent_summary(transcript)
+        snapshot.recent_outputs = self._recent_work_products(transcript)
         (
             snapshot.pending_approval_id,
             snapshot.pending_approval_tool,
@@ -337,14 +356,13 @@ class ConversationContextService:
             snapshot.selected_referent_kind,
             snapshot.selected_referent_tool,
             snapshot.selected_referent_title,
+            snapshot.selected_referent_excerpt,
             snapshot.selected_referent_reason,
         ) = self._select_referent(turn_text=turn_text, snapshot=snapshot)
         if snapshot.selected_referent_kind == "pending_output":
-            snapshot.selected_referent_summary = snapshot.pending_approval_summary
-            snapshot.selected_referent_excerpt = snapshot.pending_approval_excerpt
+            snapshot.selected_referent_summary = snapshot.selected_referent_title
         elif snapshot.selected_referent_kind == "saved_output":
-            snapshot.selected_referent_summary = snapshot.last_completed_output_title
-            snapshot.selected_referent_excerpt = snapshot.last_completed_output_excerpt
+            snapshot.selected_referent_summary = snapshot.selected_referent_title
         elif snapshot.selected_referent_kind in {"image", "video"}:
             snapshot.selected_referent_summary = snapshot.selected_context_summary
             snapshot.selected_referent_excerpt = snapshot.selected_context_summary
@@ -420,27 +438,55 @@ class ConversationContextService:
             approval = message.approval
             if approval is None or approval.status != "executed":
                 continue
-            title = None
-            if isinstance(approval.result, dict):
-                result_title = approval.result.get("title")
-                if isinstance(result_title, str) and result_title.strip():
-                    title = self._trim(self._compact(result_title), 96)
-            if title is None and isinstance(approval.payload, dict):
-                payload_title = approval.payload.get("title")
-                if isinstance(payload_title, str) and payload_title.strip():
-                    title = self._trim(self._compact(payload_title), 96)
-            payload_excerpt = None
-            if isinstance(approval.payload, dict):
-                payload_excerpt = self._work_product_excerpt(approval.payload)
-            excerpt = None
-            if isinstance(approval.result, dict):
-                excerpt = self._work_product_excerpt(approval.result)
-            if payload_excerpt and (
-                excerpt is None or (title and excerpt.lower() == title.lower())
-            ):
-                excerpt = payload_excerpt
+            title, excerpt = self._approval_referent_details(approval)
             return approval.tool_name, title, excerpt
         return None, None, None
+
+    def _recent_work_products(
+        self, transcript: list[TranscriptMessage]
+    ) -> list[WorkProductReference]:
+        outputs: list[WorkProductReference] = []
+        seen_ids: set[str] = set()
+        for message in reversed(transcript):
+            approval = message.approval
+            if approval is None or approval.id in seen_ids:
+                continue
+            if approval.status not in {"pending", "executed"}:
+                continue
+            seen_ids.add(approval.id)
+            title, excerpt = self._approval_referent_details(approval)
+            outputs.append(
+                WorkProductReference(
+                    kind="pending_output" if approval.status == "pending" else "saved_output",
+                    tool_name=approval.tool_name,
+                    title=title,
+                    excerpt=excerpt,
+                    approval_id=approval.id,
+                )
+            )
+            if len(outputs) == 6:
+                break
+        return outputs
+
+    def _approval_referent_details(self, approval) -> tuple[str | None, str | None]:
+        payload = approval.payload if isinstance(approval.payload, dict) else None
+        result = approval.result if isinstance(approval.result, dict) else None
+
+        title = None
+        if result:
+            result_title = result.get("title")
+            if isinstance(result_title, str) and result_title.strip():
+                title = self._trim(self._compact(result_title), 96)
+        if title is None and payload:
+            payload_title = payload.get("title")
+            if isinstance(payload_title, str) and payload_title.strip():
+                title = self._trim(self._compact(payload_title), 96)
+
+        payload_excerpt = self._work_product_excerpt(payload)
+        excerpt = self._work_product_excerpt(result)
+        if payload_excerpt and (excerpt is None or (title and excerpt.lower() == title.lower())):
+            excerpt = payload_excerpt
+        return title, excerpt
 
     def _recent_reference_assets_by_kind(
         self, transcript: list[TranscriptMessage], kind: AssetKind
@@ -540,17 +586,32 @@ class ConversationContextService:
         *,
         turn_text: str,
         snapshot: ConversationContextSnapshot,
-    ) -> tuple[str | None, str | None, str | None, str | None]:
+    ) -> tuple[str | None, str | None, str | None, str | None, str | None]:
         lowered = turn_text.lower().strip()
         if not lowered:
-            return None, None, None, None
+            return None, None, None, None, None
 
         if self._looks_like_work_product_reference(lowered):
+            requested_tools = self._requested_work_product_tools(lowered)
+            if requested_tools:
+                matched_output = self._match_recent_output(
+                    snapshot.recent_outputs,
+                    requested_tools=requested_tools,
+                )
+                if matched_output:
+                    return (
+                        matched_output.kind,
+                        matched_output.tool_name,
+                        matched_output.title,
+                        matched_output.excerpt,
+                        f"User referred back to the recent {self._tool_label(matched_output.tool_name)} output.",
+                    )
             if snapshot.pending_approval_tool:
                 return (
                     "pending_output",
                     snapshot.pending_approval_tool,
                     snapshot.pending_approval_summary,
+                    snapshot.pending_approval_excerpt,
                     "User referred to the current local draft.",
                 )
             if snapshot.last_completed_output_tool:
@@ -558,6 +619,7 @@ class ConversationContextService:
                     "saved_output",
                     snapshot.last_completed_output_tool,
                     snapshot.last_completed_output_title,
+                    snapshot.last_completed_output_excerpt,
                     "User referred back to the most recent saved local output.",
                 )
 
@@ -569,6 +631,7 @@ class ConversationContextService:
                 snapshot.selected_context_kind,
                 None,
                 title,
+                None,
                 snapshot.selected_context_reason,
             )
 
@@ -577,10 +640,50 @@ class ConversationContextService:
                 "topic",
                 None,
                 self._trim(snapshot.active_topic, 96),
+                None,
                 "User is referring back to the earlier topic.",
             )
 
-        return None, None, None, None
+        return None, None, None, None, None
+
+    def _requested_work_product_tools(self, lowered: str) -> set[str]:
+        requested_tools: set[str] = set()
+        if "checklist" in lowered:
+            requested_tools.add("create_checklist")
+        if "task" in lowered:
+            requested_tools.add("create_task")
+        if "observation" in lowered:
+            requested_tools.add("log_observation")
+        if "note" in lowered:
+            requested_tools.add("create_note")
+        if any(token in lowered for token in {"export", "markdown", "document"}):
+            requested_tools.add("export_brief")
+        return requested_tools
+
+    def _match_recent_output(
+        self,
+        recent_outputs: list[WorkProductReference],
+        *,
+        requested_tools: set[str],
+    ) -> WorkProductReference | None:
+        for output in recent_outputs:
+            if output.tool_name in requested_tools:
+                return output
+        return None
+
+    def _tool_label(self, tool_name: str | None) -> str:
+        mapping = {
+            "create_note": "note",
+            "create_checklist": "checklist",
+            "create_task": "task",
+            "export_brief": "markdown export",
+            "log_observation": "observation",
+        }
+        if tool_name in mapping:
+            return mapping[tool_name]
+        if not tool_name:
+            return "output"
+        return tool_name.replace("_", " ")
 
     def _last_media_assets(
         self, transcript: list[TranscriptMessage]

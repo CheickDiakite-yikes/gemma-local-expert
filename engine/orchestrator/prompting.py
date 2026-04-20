@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
 from engine.context.service import ConversationContextSnapshot
 from engine.contracts.api import (
@@ -22,6 +23,70 @@ class PromptContext:
 
 
 class PromptBuilder:
+    _RECENT_HISTORY_WINDOW = 6
+    _MAX_USER_HISTORY_CHARS = 320
+    _MAX_ASSISTANT_HISTORY_CHARS = 520
+    _HISTORY_STOPWORDS = {
+        "about",
+        "again",
+        "also",
+        "assistant",
+        "before",
+        "built",
+        "brief",
+        "briefing",
+        "called",
+        "current",
+        "draft",
+        "earlier",
+        "field",
+        "first",
+        "from",
+        "image",
+        "keep",
+        "local",
+        "markdown",
+        "most",
+        "note",
+        "output",
+        "please",
+        "reviewed",
+        "same",
+        "save",
+        "short",
+        "shorter",
+        "that",
+        "them",
+        "this",
+        "title",
+        "video",
+        "what",
+        "with",
+        "workspace",
+    }
+    _LOW_SIGNAL_HISTORY_PREFIXES = (
+        "please confirm",
+        "please approve",
+        "policy status:",
+        "router notes:",
+        "workspace scope:",
+        "goal:",
+        "related local docs:",
+        "working title:",
+        "tool action detected:",
+        "tool writes durable state",
+        "approve the draft below",
+        "approve the draft",
+        "approve the creation",
+    )
+    _LOW_SIGNAL_HISTORY_EXACT_LINES = {
+        "context",
+        "draft ready",
+        "ready to save",
+        "needs approval",
+        "working locally",
+    }
+
     def build(
         self,
         *,
@@ -38,6 +103,14 @@ class PromptBuilder:
         results: list[SearchResultItem],
         tool_result: dict[str, object] | None = None,
     ) -> PromptContext:
+        history_messages = self._select_history_messages(
+            history=history,
+            route=route,
+            conversation_context=conversation_context,
+        )
+        history_trimmed = len(history_messages) < len(
+            [message for message in history if message.content.strip()]
+        )
         messages: list[dict[str, str]] = [
             {
                 "role": "system",
@@ -52,12 +125,12 @@ class PromptBuilder:
                     specialist_analysis,
                     workspace_summary,
                     tool_result,
+                    history_trimmed,
                 ),
             }
         ]
 
-        for message in history:
-            messages.append({"role": message.role, "content": message.content})
+        messages.extend(history_messages)
 
         messages.append(
             {
@@ -90,6 +163,7 @@ class PromptBuilder:
         specialist_analysis: str | None,
         workspace_summary: str | None,
         tool_result: dict[str, object] | None,
+        history_trimmed: bool,
     ) -> str:
         lines = [
             "You are Field Assistant, a local-first offline work assistant.",
@@ -127,12 +201,22 @@ class PromptBuilder:
                 "If the user asks what it is called, answer with the current title. If they ask to tighten or rename it, keep the reply practical and pre-save."
             )
             lines.append(
+                "When the user only asks for the current title, answer with the title directly and do not add an extra body summary."
+            )
+            lines.append(
                 "If the continuity snapshot includes a draft preview, use it directly. When the user asks what is in the draft, summarize that preview. When they ask to shorten it, propose a tighter title or opening instead of only saying you can help."
+            )
+            lines.append(
+                "If the continuity snapshot identifies a checklist, note, task, or export specifically, answer about that exact work product and do not switch to a different output just because it is newer."
             )
 
         if route.is_follow_up:
             lines.append(
                 "This is a follow-up turn. Preserve continuity with the recent conversation instead of restarting from scratch."
+            )
+        if history_trimmed:
+            lines.append(
+                "Only a bounded slice of earlier chat is included below. Use the continuity snapshot as the primary anchor for older references instead of reviving stale details."
             )
         if conversation_context and conversation_context.prompt_lines():
             lines.append(
@@ -238,6 +322,25 @@ class PromptBuilder:
                     "Conversation continuity snapshot:\n- "
                     + "\n- ".join(continuity_lines)
                 )
+            if conversation_context.selected_referent_kind in {"pending_output", "saved_output"}:
+                referent_lines: list[str] = []
+                if conversation_context.selected_referent_tool:
+                    referent_lines.append(
+                        f"tool={conversation_context.selected_referent_tool}"
+                    )
+                if conversation_context.selected_referent_title:
+                    referent_lines.append(
+                        f"title={conversation_context.selected_referent_title}"
+                    )
+                if conversation_context.selected_referent_excerpt:
+                    referent_lines.append(
+                        f"preview={conversation_context.selected_referent_excerpt}"
+                    )
+                if referent_lines:
+                    sections.append(
+                        "Selected work-product referent:\n- "
+                        + "\n- ".join(referent_lines)
+                    )
 
         if specialist_analysis:
             sections.append("Specialist visual analysis:\n" + specialist_analysis)
@@ -335,3 +438,157 @@ class PromptBuilder:
             or route.needs_retrieval
             or route.is_follow_up
         )
+
+    def _select_history_messages(
+        self,
+        *,
+        history: list[ConversationMessage],
+        route: RouteDecision,
+        conversation_context: ConversationContextSnapshot | None,
+    ) -> list[dict[str, str]]:
+        cleaned = [message for message in history if message.content.strip()]
+        if not cleaned:
+            return []
+
+        if (
+            route.interaction_kind == "draft_follow_up"
+            and conversation_context
+            and conversation_context.selected_referent_kind in {"pending_output", "saved_output"}
+        ):
+            return []
+
+        recent_start = max(0, len(cleaned) - self._RECENT_HISTORY_WINDOW)
+        selected_indices = set(range(recent_start, len(cleaned)))
+        if recent_start > 0:
+            selected_indices.update(
+                self._anchor_history_indices(
+                    history=cleaned[:recent_start],
+                    route=route,
+                    conversation_context=conversation_context,
+                )
+            )
+
+        selected_messages: list[dict[str, str]] = []
+        for index, message in enumerate(cleaned):
+            if index not in selected_indices:
+                continue
+            compressed = self._compress_history_content(message.role, message.content)
+            if not compressed:
+                continue
+            selected_messages.append({"role": message.role, "content": compressed})
+        return selected_messages
+
+    def _anchor_history_indices(
+        self,
+        *,
+        history: list[ConversationMessage],
+        route: RouteDecision,
+        conversation_context: ConversationContextSnapshot | None,
+    ) -> set[int]:
+        if not history:
+            return set()
+
+        keywords = self._history_anchor_keywords(route, conversation_context)
+        if not keywords:
+            if route.interaction_kind == "draft_follow_up":
+                start = max(0, len(history) - 2)
+                return set(range(start, len(history)))
+            return set()
+
+        for index in range(len(history) - 1, -1, -1):
+            lowered = history[index].content.lower()
+            if any(keyword in lowered for keyword in keywords):
+                indices = {index}
+                if history[index].role == "assistant" and index > 0:
+                    indices.add(index - 1)
+                elif history[index].role == "user" and index + 1 < len(history):
+                    indices.add(index + 1)
+                return indices
+        return set()
+
+    def _history_anchor_keywords(
+        self,
+        route: RouteDecision,
+        conversation_context: ConversationContextSnapshot | None,
+    ) -> list[str]:
+        texts: list[str] = []
+        if conversation_context:
+            texts.extend(
+                text
+                for text in (
+                    conversation_context.selected_referent_title,
+                    conversation_context.selected_referent_summary,
+                    conversation_context.selected_referent_excerpt,
+                    conversation_context.selected_context_summary,
+                    conversation_context.active_topic,
+                )
+                if text
+            )
+            if conversation_context.selected_referent_kind not in {"pending_output", "saved_output"}:
+                texts.extend(
+                    text
+                    for text in (
+                        conversation_context.pending_approval_summary,
+                        conversation_context.pending_approval_excerpt,
+                    )
+                    if text
+                )
+
+        if route.interaction_kind == "draft_follow_up":
+            texts.extend(["draft", "ready to save", "save locally"])
+        elif route.interaction_kind == "video":
+            texts.extend(["video", "clip", "workers near excavation equipment"])
+        elif route.interaction_kind == "vision":
+            texts.extend(["image", "shortage", "lantern batteries"])
+
+        keywords: list[str] = []
+        seen: set[str] = set()
+        for text in texts:
+            lowered = text.lower().strip()
+            if lowered and len(lowered) <= 120 and lowered not in seen:
+                keywords.append(lowered)
+                seen.add(lowered)
+            for token in re.findall(r"[a-z0-9]{4,}", lowered):
+                if token in self._HISTORY_STOPWORDS or token in seen:
+                    continue
+                keywords.append(token)
+                seen.add(token)
+                if len(keywords) >= 10:
+                    return keywords
+        return keywords
+
+    def _compress_history_content(self, role: str, content: str) -> str:
+        if role == "assistant":
+            stripped = self._strip_low_signal_history_lines(content)
+            return self._clip_text(
+                self._compact(stripped or content),
+                self._MAX_ASSISTANT_HISTORY_CHARS,
+            )
+        return self._clip_text(self._compact(content), self._MAX_USER_HISTORY_CHARS)
+
+    def _strip_low_signal_history_lines(self, content: str) -> str:
+        lines: list[str] = []
+        for raw_line in content.replace("\r\n", "\n").split("\n"):
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            lowered = stripped.lower()
+            if lowered in self._LOW_SIGNAL_HISTORY_EXACT_LINES:
+                continue
+            if any(lowered.startswith(prefix) for prefix in self._LOW_SIGNAL_HISTORY_PREFIXES):
+                continue
+            lines.append(stripped)
+        return "\n".join(lines).strip()
+
+    def _compact(self, text: str) -> str:
+        compacted = re.sub(r"\s+", " ", text).strip()
+        return compacted
+
+    def _clip_text(self, text: str, limit: int) -> str:
+        if len(text) <= limit:
+            return text
+        clipped = text[: limit - 1].rstrip()
+        last_break = max(clipped.rfind(". "), clipped.rfind("; "), clipped.rfind(", "))
+        if last_break >= int(limit * 0.55):
+            clipped = clipped[:last_break].rstrip(" ,;.")
+        return clipped + "…"

@@ -1393,6 +1393,201 @@ def test_multimodal_conversation_can_return_to_earlier_image_after_video_turn(
     assert "eater" not in third_text
 
 
+def test_mixed_conversation_can_revisit_media_and_pending_draft_after_pivot(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    (workspace_root / "field-assistant-architecture.md").write_text(
+        "Field Assistant architecture overview\n"
+        "Local-first assistant built on Gemma.\n"
+        "Uses bounded routing, retrieval, vision, and approvals.\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings(
+        database_path=str(tmp_path / "test-mixed-context-recovery.db"),
+        workspace_root=str(workspace_root),
+        asset_storage_dir=str(tmp_path / "uploads"),
+        specialist_backend="mock",
+        tracking_backend="mock",
+    )
+    app = create_app(settings)
+
+    class FakeVisionRuntime:
+        backend_name = "fake-vision"
+
+        def analyze(self, request):
+            return VisionAnalysisResult(
+                text=(
+                    "Visible text extracted from the image:\n"
+                    "Lantern batteries low\n"
+                    "Translator phone credits low"
+                ),
+                backend="fake-vision",
+                model_name=request.specialist_model_name,
+                model_source="/tmp/fake-paligemma",
+                available=True,
+            )
+
+    class FakeVideoRuntime:
+        backend_name = "fake-video"
+
+        def analyze(self, request):
+            return VideoAnalysisResult(
+                text=(
+                    "Reviewed the attached mining clip conservatively. "
+                    "I can see workers near excavation equipment and repeated tool handling around the pit edge."
+                ),
+                backend="fake-video",
+                model_name=request.tracking_model_name,
+                model_source="/tmp/fake-sam",
+                available=True,
+            )
+
+    app.state.container.orchestrator.vision_runtime = FakeVisionRuntime()
+    app.state.container.orchestrator.video_runtime = FakeVideoRuntime()
+    client = TestClient(app)
+
+    image_asset = client.post(
+        "/v1/assets/upload",
+        data={"care_context": "general"},
+        files={"file": ("board.png", _tiny_png_bytes(), "image/png")},
+    ).json()["asset"]
+    video_asset = client.post(
+        "/v1/assets/upload",
+        data={"care_context": "general"},
+        files={"file": ("mine.mov", b"fake-video-bytes", "video/quicktime")},
+    ).json()["asset"]
+    conversation = client.post(
+        "/v1/conversations",
+        json={"title": "Mixed context recovery", "mode": "research"},
+    ).json()
+
+    turns = [
+        ("Describe the attached supply image conservatively.", [image_asset["id"]]),
+        ("Which two shortages matter most before departure?", []),
+        ("Review the attached mining video conservatively.", [video_asset["id"]]),
+        ("Prepare a short workspace briefing about the current field assistant architecture and export it as markdown.", []),
+        ("What's in that draft again?", []),
+        ("Keep the same draft, but make that shorter before I save it.", []),
+        ("Actually, just talk normally with me for a second.", []),
+        ("Go back to the earlier image for a second. Which shortage mattered most?", []),
+        ("And what is the draft called now?", []),
+    ]
+
+    responses: list[str] = []
+    latest_approval_payload = None
+    completed_texts: list[str] = []
+    for text, asset_ids in turns:
+        response = client.post(
+            f"/v1/conversations/{conversation['id']}/turns",
+            json={
+                "conversation_id": conversation["id"],
+                "mode": "research",
+                "text": text,
+                "asset_ids": asset_ids,
+                "enabled_knowledge_pack_ids": [],
+                "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+            },
+        )
+        assert response.status_code == 200
+        responses.append(response.text)
+        completed_line = next(
+            json.loads(line)
+            for line in response.text.splitlines()
+            if '"type":"assistant.message.completed"' in line
+        )
+        completed_texts.append(completed_line["payload"]["text"])
+        if '"type":"approval.required"' in response.text:
+            latest_approval_payload = next(
+                json.loads(line)["payload"]
+                for line in response.text.splitlines()
+                if '"type":"approval.required"' in line
+            )
+
+    assert "workers near excavation equipment" in responses[2].lower()
+    assert latest_approval_payload is not None
+    assert latest_approval_payload["payload"]["title"] == "Field Assistant Architecture Brief"
+    assert "pit edge" not in completed_texts[6].lower()
+    assert "field assistant architecture brief" not in completed_texts[6].lower()
+    assert "lantern batteries" in completed_texts[7].lower()
+    assert "pit edge" not in completed_texts[7].lower()
+
+
+def test_follow_up_can_target_earlier_checklist_even_after_newer_export_draft(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    (workspace_root / "field-assistant-architecture.md").write_text(
+        "Field Assistant architecture overview\n"
+        "Local-first assistant built on Gemma.\n"
+        "Uses bounded routing, retrieval, vision, and approvals.\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings(
+        database_path=str(tmp_path / "test-output-kind-resolution.db"),
+        workspace_root=str(workspace_root),
+        asset_storage_dir=str(tmp_path / "uploads"),
+    )
+    client = TestClient(create_app(settings))
+    conversation = client.post(
+        "/v1/conversations",
+        json={"title": "Output kind resolution", "mode": "research"},
+    ).json()
+
+    checklist_turn = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Create a checklist for tomorrow's village visits.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+        },
+    )
+    assert checklist_turn.status_code == 200
+
+    export_turn = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Prepare a short workspace briefing about the current field assistant architecture and export it as markdown.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+        },
+    )
+    assert export_turn.status_code == 200
+
+    follow_up = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "What was in that checklist again?",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+        },
+    )
+    assert follow_up.status_code == 200
+
+    completed_line = next(
+        json.loads(line)
+        for line in follow_up.text.splitlines()
+        if '"type":"assistant.message.completed"' in line
+    )
+    text = completed_line["payload"]["text"].lower()
+    assert "current checklist" in text
+    assert "checklist for tomorrow's village visits" in text
+    assert "markdown export" not in text
+
+
 def _tiny_png_bytes() -> bytes:
     return (
         b"\x89PNG\r\n\x1a\n"

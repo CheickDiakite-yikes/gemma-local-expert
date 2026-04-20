@@ -39,6 +39,7 @@ class Settings(BaseModel):
     assistant_temperature: float = 0.2
     assistant_top_p: float = 0.95
     conversation_history_limit: int = 8
+    continuity_history_limit: int = 32
     enable_function_gemma: bool = False
     enable_medical_mode: bool = True
     max_stream_chunk_chars: int = 180
@@ -105,6 +106,9 @@ def load_settings() -> Settings:
         assistant_top_p=float(os.getenv("FIELD_ASSISTANT_ASSISTANT_TOP_P", "0.95")),
         conversation_history_limit=int(
             os.getenv("FIELD_ASSISTANT_CONVERSATION_HISTORY_LIMIT", "8")
+        ),
+        continuity_history_limit=int(
+            os.getenv("FIELD_ASSISTANT_CONTINUITY_HISTORY_LIMIT", "32")
         ),
         ingestion_chunk_max_chars=int(
             os.getenv("FIELD_ASSISTANT_INGESTION_CHUNK_MAX_CHARS", "420")

@@ -124,7 +124,7 @@
       },
       {
         "text": "Keep the same draft, but make that shorter before I save it.",
-        "expected_contains": ["A tighter title would be"],
+        "expected_contains": ["I tightened the current markdown export draft"],
         "expected_forbidden": ["pit edge", "contact sheet"]
       }
     ],
@@ -132,11 +132,34 @@
     "expected_contains": [
       "Field Assistant Architecture Briefing",
       "currently centers on",
-      "A tighter title would be"
+      "I tightened the current markdown export draft"
     ],
     "expected_approval_contains": [
-      "Key points:",
-      "Files reviewed:"
+      "Key points:"
+    ]
+  },
+  {
+    "id": "long_context_recovery_after_draft_revision",
+    "title": "Long Context Recovery",
+    "mode": "research",
+    "turns": [
+      {"text": "Describe the attached supply image conservatively.", "assets": ["image"]},
+      {"text": "Which two shortages matter most before departure?", "expected_contains": ["two clearest shortages"]},
+      {"text": "Review the attached mining video conservatively.", "assets": ["video"]},
+      {"text": "Prepare a short workspace briefing about the current field assistant architecture and export it as markdown.", "expected_forbidden": ["Goal:", "Workspace scope:"]},
+      {"text": "What's in that draft again?", "expected_contains": ["currently centers on"]},
+      {"text": "Keep the same draft, but make that shorter before I save it.", "expected_contains": ["I tightened the current markdown export draft"]},
+      {"text": "Actually, just talk normally with me for a second.", "expected_contains": ["normal conversation"]},
+      {"text": "Go back to the earlier image for a second. Which shortage mattered most?", "expected_contains": ["clearest shortage"], "expected_forbidden": ["pit edge", "contact sheet"]},
+      {"text": "And what is the draft called now?", "expected_contains": ["Field Assistant Architecture Brief"], "expected_forbidden": ["pit edge", "contact sheet"]}
+    ],
+    "expected_assistant_turns": 9,
+    "expected_contains": [
+      "Lantern batteries low",
+      "workers near excavation equipment",
+      "currently centers on",
+      "I tightened the current markdown export draft",
+      "Field Assistant Architecture Brief"
     ]
   }
 ]
