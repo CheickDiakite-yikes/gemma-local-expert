@@ -1,4 +1,11 @@
-from engine.contracts.api import AssistantMode, ConversationTurnRequest
+from engine.contracts.api import (
+    AssetAnalysisStatus,
+    AssetCareContext,
+    AssetKind,
+    AssetSummary,
+    AssistantMode,
+    ConversationTurnRequest,
+)
 from engine.contracts.api import ConversationMessage
 from engine.context.service import ConversationContextSnapshot, WorkProductReference
 from engine.models.gateway import ModelRouteSelection
@@ -215,6 +222,71 @@ def test_prompt_builder_adds_selected_work_product_referent_block() -> None:
     assert "title=Departure checklist" in prompt
     assert "answer with the current title" in prompt
     assert "summarize that preview" in prompt
+
+
+def test_prompt_builder_treats_media_grounded_tool_turn_as_already_grounded() -> None:
+    builder = PromptBuilder()
+    context = builder.build(
+        turn=ConversationTurnRequest(
+            conversation_id="conv_media_tool",
+            mode=AssistantMode.FIELD,
+            text="Create a checklist for tomorrow's departure based on the supply board shortages.",
+        ),
+        history=[],
+        assets=[],
+        context_assets=[
+            AssetSummary(
+                id="asset_board",
+                display_name="board.png",
+                kind=AssetKind.IMAGE,
+                media_type="image/png",
+                    source_path="/tmp/board.png",
+                    content_url="/content/board.png",
+                    care_context=AssetCareContext.GENERAL,
+                    analysis_status=AssetAnalysisStatus.READY,
+                    analysis_summary="Lantern batteries low; translator phone credits low",
+                )
+            ],
+            conversation_context=ConversationContextSnapshot(
+            selected_context_assets=[
+                AssetSummary(
+                    id="asset_board",
+                    display_name="board.png",
+                    kind=AssetKind.IMAGE,
+                    media_type="image/png",
+                        source_path="/tmp/board.png",
+                        content_url="/content/board.png",
+                        care_context=AssetCareContext.GENERAL,
+                        analysis_status=AssetAnalysisStatus.READY,
+                        analysis_summary="Lantern batteries low; translator phone credits low",
+                    )
+                ],
+            selected_context_kind="image",
+            selected_context_summary=(
+                "The two clearest shortages are lantern batteries and translator phone credits."
+            ),
+        ),
+        specialist_analysis=None,
+        workspace_summary=None,
+        route=RouteDecision(
+            interaction_kind="task",
+            specialist_model="paligemma",
+            proposed_tool="create_checklist",
+            is_follow_up=True,
+        ),
+        policy=PolicyDecision(approval_required=True),
+        results=[],
+        tool_result=None,
+        model_selection=ModelRouteSelection(
+            assistant_model="gemma-4-e2b-it-4bit",
+            embedding_model="embeddinggemma-300m",
+            specialist_model="paligemma",
+        ),
+    )
+
+    system_prompt = context.messages[0]["content"]
+    assert "already has a usable local summary" in system_prompt
+    assert "do not ask the user to restate the image or video" in system_prompt
 
 
 def test_prompt_builder_keeps_draft_follow_up_anchor_without_replaying_history() -> None:

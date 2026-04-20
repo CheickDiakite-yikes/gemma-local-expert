@@ -61,8 +61,8 @@ def test_checklist_planner_prefers_priority_lines_from_specialist_analysis() -> 
         context_assets=[],
     )
 
-    assert "Restock Lantern batteries" in plan.payload["content"]
-    assert "Top up Translator phone credits" in plan.payload["content"]
+    assert "Restock lantern batteries" in plan.payload["content"]
+    assert "Top up translator phone credits" in plan.payload["content"]
     assert "Buy batteries" in plan.payload["content"]
 
 
@@ -92,6 +92,58 @@ def test_checklist_planner_uses_action_lines_for_schedule_images() -> None:
     assert "Load water filter demo kits" in plan.payload["content"]
     assert "Meet translator at Mako junction" in plan.payload["content"]
     assert "Visible text extracted from the image" not in plan.payload["content"]
+
+
+def test_checklist_planner_uses_context_summary_when_specialist_text_is_missing() -> None:
+    runtime = ToolRuntime(_UnusedStore())
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.GENERAL,
+        text="Create a checklist for tomorrow's departure based on the supply board shortages.",
+    )
+
+    plan = runtime.plan(
+        request,
+        "create_checklist",
+        [],
+        specialist_analysis_text=None,
+        context_assets=[],
+        context_summary=(
+            "The two clearest shortages are lantern batteries and translator phone credits. "
+            "Those matter most before departure because both affect field readiness."
+        ),
+    )
+
+    assert "Restock lantern batteries" in plan.payload["content"]
+    assert "Top up translator phone credits" in plan.payload["content"]
+
+
+def test_checklist_planner_prefers_sharper_context_summary_over_generic_specialist_text() -> None:
+    runtime = ToolRuntime(_UnusedStore())
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.GENERAL,
+        text="Create a checklist for tomorrow's departure based on the shortages you just identified.",
+    )
+
+    plan = runtime.plan(
+        request,
+        "create_checklist",
+        [],
+        specialist_analysis_text=(
+            'The immediate priority is to address the items marked as "LOW" or needing urgent attention before departure. '
+            "First Action for Volunteer Buy batteries. Lantern batteries are marked as LOW. "
+            "Items That Can Wait"
+        ),
+        context_assets=[],
+        context_summary=(
+            "Shortages: Lantern batteries. Translator phone credits. "
+            "Prioritized actions: Buy batteries. Top up translator credit."
+        ),
+    )
+
+    assert "Top up translator phone credits" in plan.payload["content"]
+    assert "Items That Can Wait" not in plan.payload["content"]
 
 
 def test_note_planner_uses_specialist_lines_when_available() -> None:
@@ -261,7 +313,7 @@ def test_create_report_plan_and_execute_persists_report_kind() -> None:
 
     assert plan.payload["kind"] == "report"
     assert str(plan.payload["content"]).startswith("# ")
-    assert result["entity_type"] == "note"
+    assert result["entity_type"] == "report"
     assert result["kind"] == "report"
 
 
@@ -282,6 +334,39 @@ def test_create_message_draft_plan_builds_message_shape() -> None:
 
     assert plan.payload["kind"] == "message_draft"
     assert str(plan.payload["content"]).startswith("Hi,\n\nConfirming tomorrow's field visit at 8am")
+
+
+def test_message_draft_planner_prefers_context_summary_over_raw_ocr_text() -> None:
+    runtime = ToolRuntime(_UnusedStore())
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.GENERAL,
+        text="Draft a short message to the logistics lead about those same two shortages before departure.",
+    )
+
+    plan = runtime.plan(
+        request,
+        "create_message_draft",
+        [],
+        specialist_analysis_text=(
+            "Visible text extracted from the image:\n"
+            "Village Visit Supply Board\n"
+            "Before departure at 7:30 PM\n"
+            "ORS packets 18\n"
+            "Water tablets 9\n"
+            "Latex gloves 2 boxes\n"
+            "Lantern batteries LOW\n"
+        ),
+        context_summary=(
+            "Shortages: Lantern batteries. Translator phone credits. "
+            "Prioritized actions: Buy batteries. Top up translator phone credits."
+        ),
+        context_assets=[],
+    )
+
+    lowered = str(plan.payload["content"]).lower()
+    assert "lantern batteries and translator phone credits" in lowered
+    assert "ors packets" not in lowered
 
 
 def test_revise_pending_export_payload_can_tighten_title_and_content() -> None:

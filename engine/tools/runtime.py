@@ -48,6 +48,7 @@ class ToolRuntime:
         *,
         specialist_analysis_text: str | None = None,
         context_assets: list[AssetSummary] | None = None,
+        context_summary: str | None = None,
     ) -> ToolPlan:
         if tool_name == "create_note":
             return ToolPlan(
@@ -83,6 +84,7 @@ class ToolRuntime:
                     "content": self._build_message_draft_content(
                         turn,
                         specialist_analysis_text=specialist_analysis_text,
+                        context_summary=context_summary,
                     ),
                     "kind": "message_draft",
                 },
@@ -111,6 +113,7 @@ class ToolRuntime:
                         retrieval_results,
                         specialist_analysis_text=specialist_analysis_text,
                         context_assets=context_assets or [],
+                        context_summary=context_summary,
                     ),
                     "kind": "checklist",
                 },
@@ -176,7 +179,7 @@ class ToolRuntime:
                 kind=str(payload.get("kind", "note")),
             )
             return {
-                "entity_type": "note",
+                "entity_type": self._note_entity_type(note.kind),
                 "entity_id": note.id,
                 "title": note.title,
                 "kind": note.kind,
@@ -404,11 +407,17 @@ class ToolRuntime:
         turn: ConversationTurnRequest,
         *,
         specialist_analysis_text: str | None = None,
+        context_summary: str | None = None,
     ) -> str:
-        if specialist_analysis_text and not self._looks_like_workspace_synthesis_request(turn.text):
-            cleaned = self._clean_specialist_text(specialist_analysis_text).strip()
-            if cleaned and "visible text extracted from the image" not in cleaned.lower():
-                return self._format_message_draft(cleaned)
+        if not self._looks_like_workspace_synthesis_request(turn.text):
+            context_message = self._message_draft_from_context_summary(context_summary)
+            if context_message:
+                return self._format_message_draft(context_message)
+
+            if specialist_analysis_text:
+                cleaned = self._clean_specialist_text(specialist_analysis_text).strip()
+                if cleaned and not self._looks_like_raw_message_source(cleaned):
+                    return self._format_message_draft(cleaned)
 
         request = turn.text.strip().rstrip(".")
         request = re.sub(
@@ -429,6 +438,83 @@ class ToolRuntime:
         if compact.lower().startswith(("hi,", "hello,", "dear ")):
             return compact
         return f"Hi,\n\n{compact}\n\nBest,"
+
+    def _message_draft_from_context_summary(self, context_summary: str | None) -> str | None:
+        cleaned = self._clean_specialist_text(context_summary or "").strip()
+        if not cleaned or self._looks_like_raw_message_source(cleaned):
+            return None
+
+        shortages = self._labeled_section_items(cleaned, [r"shortages?"])
+        actions = self._labeled_section_items(
+            cleaned,
+            [r"prioritized\s+actions?", r"recommended\s+actions?", r"next\s+actions?"],
+        )
+
+        if shortages:
+            body = f"Before departure, we still need {self._join_human_list(shortages)}."
+            if actions:
+                primary_action = actions[0].rstrip(".")
+                body += f" First priority is to {self._lowercase_leading_token(primary_action)}."
+                if len(actions) > 1:
+                    follow_up = actions[1].rstrip(".")
+                    body += f" After that, {self._lowercase_leading_token(follow_up)}."
+            return body
+
+        return cleaned
+
+    def _labeled_section_items(self, text: str, label_patterns: list[str]) -> list[str]:
+        normalized = " ".join(text.replace("\r", "\n").replace("\n", " ").split())
+        if not normalized:
+            return []
+
+        items: list[str] = []
+        label_group = "|".join(label_patterns)
+        match = re.search(
+            rf"(?:{label_group})\s*:\s*(.+?)(?:(?:shortages?|prioritized\s+actions?|recommended\s+actions?|next\s+actions?)\s*:|$)",
+            normalized,
+            flags=re.I,
+        )
+        if not match:
+            return []
+
+        for raw_item in re.split(r"[.;]|,|\band\b", match.group(1), flags=re.I):
+            cleaned = raw_item.strip(" .:-")
+            if len(cleaned) < 3:
+                continue
+            items.append(cleaned)
+        return items[:4]
+
+    def _join_human_list(self, items: list[str]) -> str:
+        if not items:
+            return ""
+        normalized = [self._lowercase_leading_token(item.strip()) for item in items if item.strip()]
+        if not normalized:
+            return ""
+        if len(normalized) == 1:
+            return normalized[0]
+        if len(normalized) == 2:
+            return f"{normalized[0]} and {normalized[1]}"
+        return f"{', '.join(normalized[:-1])}, and {normalized[-1]}"
+
+    def _looks_like_raw_message_source(self, text: str) -> bool:
+        lowered = " ".join(text.split()).lower()
+        if "visible text extracted from the image" in lowered:
+            return True
+        digit_count = sum(char.isdigit() for char in lowered)
+        uppercase_tokens = re.findall(r"\b[A-Z0-9]{2,}\b", text)
+        short_line_tokens = len(re.findall(r"\b[a-z]{2,}\b", lowered))
+        return digit_count >= 3 and bool(uppercase_tokens) and short_line_tokens >= 6
+
+    def _note_entity_type(self, kind: str) -> str:
+        normalized = kind.strip().lower()
+        mapping = {
+            "note": "note",
+            "report": "report",
+            "message_draft": "message draft",
+            "checklist": "checklist",
+            "observation": "observation",
+        }
+        return mapping.get(normalized, "note")
 
     def _edited_text(self, value: object, *, max_chars: int) -> str | None:
         if value is None:
@@ -590,13 +676,26 @@ class ToolRuntime:
         *,
         specialist_analysis_text: str | None,
         context_assets: list[AssetSummary],
+        context_summary: str | None,
     ) -> str:
-        if specialist_analysis_text:
+        candidate_item_sets: list[list[str]] = []
+        if specialist_analysis_text and not self._looks_like_unavailable_specialist_text(
+            specialist_analysis_text
+        ):
             specialist_items = self._checklist_items_from_specialist_analysis(
                 specialist_analysis_text
             )
             if specialist_items:
-                return "\n".join(specialist_items)
+                candidate_item_sets.append(specialist_items)
+
+        if context_summary:
+            context_items = self._checklist_items_from_specialist_analysis(context_summary)
+            if context_items:
+                candidate_item_sets.append(context_items)
+
+        if candidate_item_sets:
+            best_items = max(candidate_item_sets, key=self._checklist_item_set_score)
+            return "\n".join(best_items)
 
         if any(asset.kind == AssetKind.IMAGE for asset in context_assets):
             return "\n".join(
@@ -629,7 +728,21 @@ class ToolRuntime:
             ]
         )
 
+    def _checklist_item_set_score(self, items: list[str]) -> tuple[int, int, int]:
+        actionable = sum(
+            1
+            for item in items
+            if any(
+                token in item.lower()
+                for token in {"restock", "top up", "confirm", "buy", "purchase"}
+            )
+        )
+        concise = sum(1 for item in items if len(item) <= 80)
+        return (len(items), actionable, concise)
+
     def _checklist_items_from_specialist_analysis(self, text: str) -> list[str]:
+        if self._looks_like_unavailable_specialist_text(text):
+            return []
         priority_items = self._priority_items_from_specialist_analysis(text)
         if priority_items:
             return priority_items
@@ -640,6 +753,8 @@ class ToolRuntime:
 
         raw_segments = re.split(r"[\n;]+", text)
         items: list[str] = []
+        shortage_subjects: list[str] = []
+        shortage_subjects: list[str] = []
         for segment in raw_segments:
             sentences = re.split(r"(?<=[.!?])\s+", segment)
             for sentence in sentences:
@@ -741,6 +856,19 @@ class ToolRuntime:
         lowered = text.lower().strip()
         return lowered.startswith("visible text extracted from the image:")
 
+    def _looks_like_unavailable_specialist_text(self, text: str) -> bool:
+        lowered = " ".join(text.split()).lower()
+        return any(
+            marker in lowered
+            for marker in {
+                "no local vision specialist model is available",
+                "no local video specialist model is available",
+                "not available for this follow-up turn",
+                "attachment metadata only",
+                "cannot make pixel-level claims",
+            }
+        )
+
     def _workspace_note_from_synthesis(self, text: str) -> str | None:
         cleaned = text.strip()
         if not cleaned:
@@ -780,6 +908,7 @@ class ToolRuntime:
 
     def _priority_items_from_specialist_analysis(self, text: str) -> list[str]:
         items: list[str] = []
+        items.extend(self._labeled_summary_items(text))
         lines = self._normalized_specialist_lines(text)
 
         for line in lines:
@@ -794,13 +923,20 @@ class ToolRuntime:
 
             match_low = re.match(r"(.+?)\s+low$", line, flags=re.I)
             if match_low:
-                items.append(f"- [ ] Restock {match_low.group(1).strip()}")
+                subject = match_low.group(1).strip()
+                if ":" in subject:
+                    subject = subject.split(":", 1)[-1].strip()
+                checklist_item = self._checklist_item_for_shortage(subject)
+                if checklist_item:
+                    items.append(checklist_item)
                 continue
 
             if "needs top" in lowered and ":" not in line:
                 subject = re.split(r"_|needs", line, maxsplit=1, flags=re.I)[0].strip()
                 if subject:
-                    items.append(f"- [ ] Top up {subject}")
+                    items.append(f"- [ ] Top up {self._lowercase_leading_token(subject)}")
+
+        items.extend(self._shortage_sentence_items(text))
 
         deduped: list[str] = []
         seen: set[str] = set()
@@ -813,6 +949,156 @@ class ToolRuntime:
             if len(deduped) == 5:
                 break
         return deduped
+
+    def _labeled_summary_items(self, text: str) -> list[str]:
+        normalized = " ".join(text.replace("\r", "\n").replace("\n", " ").split())
+        if not normalized:
+            return []
+
+        items: list[str] = []
+        shortage_subjects: list[str] = []
+
+        shortage_match = re.search(
+            r"shortages?\s*:\s*(.+?)(?:(?:prioritized|recommended|next)\s+actions?\s*:|$)",
+            normalized,
+            flags=re.I,
+        )
+        if shortage_match:
+            raw_items = re.split(r"[.;]|,|\band\b", shortage_match.group(1), flags=re.I)
+            for raw_item in raw_items:
+                cleaned = raw_item.strip(" .:-")
+                if len(cleaned) < 4:
+                    continue
+                shortage_subjects.append(cleaned)
+                checklist_item = self._checklist_item_for_shortage(cleaned)
+                if checklist_item:
+                    items.append(checklist_item)
+
+        action_match = re.search(
+            r"(?:prioritized|recommended|next)\s+actions?\s*:\s*(.+?)(?:$)",
+            normalized,
+            flags=re.I,
+        )
+        if action_match:
+            raw_actions = re.split(r"[.;]|,|\band\b", action_match.group(1), flags=re.I)
+            for raw_action in raw_actions:
+                cleaned = raw_action.strip(" .:-")
+                if len(cleaned) < 4:
+                    continue
+                normalized_action = cleaned[:1].upper() + cleaned[1:]
+                if normalized_action.lower().startswith("top up "):
+                    matched_shortage = self._matching_shortage_subject(
+                        normalized_action[7:], shortage_subjects
+                    )
+                    if matched_shortage:
+                        normalized_action = f"Top up {self._lowercase_leading_token(matched_shortage)}"
+                items.append(f"- [ ] {normalized_action}")
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for item in items:
+            normalized_item = item.lower()
+            if normalized_item in seen:
+                continue
+            seen.add(normalized_item)
+            deduped.append(item)
+            if len(deduped) == 5:
+                break
+        return deduped
+
+    def _matching_shortage_subject(
+        self, action_subject: str, shortage_subjects: list[str]
+    ) -> str | None:
+        lowered_action = action_subject.lower()
+        action_tokens = {
+            token
+            for token in re.split(r"[^a-z0-9]+", lowered_action)
+            if token and token not in {"the", "a", "an", "up"}
+        }
+        if not action_tokens:
+            return None
+
+        best_match: str | None = None
+        best_score = 0
+        for shortage in shortage_subjects:
+            shortage_tokens = {
+                token
+                for token in re.split(r"[^a-z0-9]+", shortage.lower())
+                if token and token not in {"the", "a", "an"}
+            }
+            overlap = len(action_tokens & shortage_tokens)
+            if overlap > best_score:
+                best_score = overlap
+                best_match = shortage
+
+        if best_score == 0:
+            return None
+        return best_match
+
+    def _lowercase_leading_token(self, text: str) -> str:
+        if not text:
+            return text
+        return text[:1].lower() + text[1:]
+
+    def _shortage_sentence_items(self, text: str) -> list[str]:
+        normalized = " ".join(text.replace("\r", "\n").replace("\n", " ").split())
+        if not normalized:
+            return []
+
+        items: list[str] = []
+        patterns = (
+            r"(?:two|clearest|main|biggest|key)\s+shortages?\s+(?:are|were)\s+(.+?)(?:\.|$)",
+            r"shortages?\s+(?:are|were)\s+(.+?)(?:\.|$)",
+            r"shortage\s+(?:is|was)\s+(.+?)(?:\.|$)",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, normalized, flags=re.I)
+            if not match:
+                continue
+            raw_items = re.split(r",|\band\b", match.group(1), flags=re.I)
+            for raw_item in raw_items:
+                cleaned = re.sub(
+                    r"\b(?:because|since|which|that)\b.*$",
+                    "",
+                    raw_item,
+                    flags=re.I,
+                ).strip(" .:-")
+                cleaned = re.sub(r"^(the|a|an)\s+", "", cleaned, flags=re.I)
+                if len(cleaned) < 4:
+                    continue
+                checklist_item = self._checklist_item_for_shortage(cleaned)
+                if checklist_item:
+                    items.append(checklist_item)
+            if items:
+                break
+        return items
+
+    def _checklist_item_for_shortage(self, shortage: str) -> str | None:
+        cleaned = shortage.strip()
+        if not cleaned:
+            return None
+        display_text = self._lowercase_leading_token(cleaned)
+        lowered = cleaned.lower()
+        if any(token in lowered for token in {"credit", "credits", "airtime", "top-up", "top up"}):
+            return f"- [ ] Top up {display_text}"
+        if any(
+            token in lowered
+            for token in {
+                "battery",
+                "batteries",
+                "tablet",
+                "tablets",
+                "salt",
+                "salts",
+                "kit",
+                "kits",
+                "forms",
+                "supply",
+                "supplies",
+            }
+        ):
+            return f"- [ ] Restock {display_text}"
+        return f"- [ ] Confirm {display_text}"
 
     def _action_items_from_specialist_analysis(self, text: str) -> list[str]:
         items: list[str] = []
@@ -861,16 +1147,17 @@ class ToolRuntime:
     def _normalized_specialist_lines(self, text: str) -> list[str]:
         lines: list[str] = []
         for raw_line in text.splitlines():
-            cleaned = raw_line.strip().strip("*")
-            if not cleaned:
-                continue
-            lowered = cleaned.lower().rstrip(":")
-            if lowered in {
-                "visible text extracted from the image",
-                "visible text extracted from the medical image",
-            }:
-                continue
-            lines.append(cleaned.rstrip("."))
+            for segment in raw_line.split(";"):
+                cleaned = segment.strip().strip("*")
+                if not cleaned:
+                    continue
+                lowered = cleaned.lower().rstrip(":")
+                if lowered in {
+                    "visible text extracted from the image",
+                    "visible text extracted from the medical image",
+                }:
+                    continue
+                lines.append(cleaned.rstrip("."))
         return lines
 
     def _clean_specialist_text(self, text: str) -> str:

@@ -479,6 +479,63 @@ def test_context_service_preserves_earlier_image_across_longer_transcript_with_c
     assert "lantern batteries" in snapshot.selected_context_summary.lower()
 
 
+def test_context_service_prefers_later_image_follow_up_when_it_matches_current_need() -> None:
+    service = ConversationContextService()
+    image_asset = AssetSummary(
+        id="asset_image",
+        display_name="field_supply_board.png",
+        source_path="field_supply_board.png",
+        kind=AssetKind.IMAGE,
+    )
+
+    snapshot = service.build(
+        turn_text="Create a checklist for tomorrow's departure based on the supply board shortages.",
+        transcript=[
+            TranscriptMessage(
+                id="msg1",
+                role="user",
+                content="Describe the attached supply image conservatively.",
+                assets=[image_asset],
+            ),
+            TranscriptMessage(
+                id="msg2",
+                role="assistant",
+                content=(
+                    "Here is a conservative description of the supply board:\n"
+                    "Village Visit Supply Board\n\n"
+                    "This board lists supplies needed before a 7:30 PM departure.\n\n"
+                    "Supplies:\n"
+                    "- ORS packets: 18\n"
+                    "- Lantern batteries: LOW\n"
+                    "- Consent forms: 42\n\n"
+                    "Action Note:\n"
+                    "- Buy batteries and top up translator credit before leaving base.\n"
+                ),
+            ),
+            TranscriptMessage(
+                id="msg3",
+                role="user",
+                content="Which two shortages matter most before departure?",
+            ),
+            TranscriptMessage(
+                id="msg4",
+                role="assistant",
+                content=(
+                    "The two shortages that matter most before departure are:\n"
+                    "- Lantern batteries: Marked as LOW.\n"
+                    "- Translator phone credits: Explicitly noted as needing to be topped up.\n"
+                ),
+            ),
+        ],
+        attached_assets=[],
+    )
+
+    assert snapshot.selected_context_kind == "image"
+    assert snapshot.selected_context_summary is not None
+    assert "translator phone credits" in snapshot.selected_context_summary.lower()
+    assert "shortages that matter most" in snapshot.selected_context_summary.lower()
+
+
 def test_context_service_can_select_earlier_report_among_multiple_reports() -> None:
     service = ConversationContextService()
     earlier_report = ApprovalState(

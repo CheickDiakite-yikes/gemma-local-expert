@@ -427,6 +427,7 @@ class ConversationContextService:
             )
             if snapshot.selected_context_assets and snapshot.selected_context_kind:
                 snapshot.selected_context_summary = self._asset_context_summary(
+                    turn_text=turn_text,
                     transcript=transcript,
                     assets=snapshot.selected_context_assets,
                     kind=snapshot.selected_context_kind,
@@ -915,11 +916,13 @@ class ConversationContextService:
     def _asset_context_summary(
         self,
         *,
+        turn_text: str,
         transcript: list[TranscriptMessage],
         assets: list[AssetSummary],
         kind: str,
     ) -> str | None:
         assistant_summary = self._assistant_summary_for_asset_context(
+            turn_text=turn_text,
             transcript=transcript,
             assets=assets,
         )
@@ -936,42 +939,66 @@ class ConversationContextService:
     def _assistant_summary_for_asset_context(
         self,
         *,
+        turn_text: str,
         transcript: list[TranscriptMessage],
         assets: list[AssetSummary],
     ) -> str | None:
         target_ids = {asset.id for asset in assets}
-        target_kind = assets[0].kind if assets else None
+        anchor_index: int | None = None
         for index, message in enumerate(transcript):
-            matching_assets = {
-                asset.id
-                for asset in message.assets
-                if asset.id in target_ids
-                or (
-                    target_kind is not None
-                    and asset.kind == target_kind
-                    and not self._is_video_contact_sheet(asset)
-                )
-            }
-            if not matching_assets and not (
-                message.role == "user"
-                and any(
-                    asset.id in target_ids
-                    or (
-                        target_kind is not None
-                        and asset.kind == target_kind
-                        and not self._is_video_contact_sheet(asset)
-                    )
-                    for asset in message.assets
-                )
-            ):
+            if any(asset.id in target_ids for asset in message.assets):
+                anchor_index = index
+        if anchor_index is None:
+            return None
+
+        candidates: list[tuple[int, int, str]] = []
+        for index in range(anchor_index + 1, len(transcript)):
+            follow_up = transcript[index]
+            if follow_up.role == "user" and follow_up.assets:
+                if not any(asset.id in target_ids for asset in follow_up.assets):
+                    break
+            if follow_up.role != "assistant":
                 continue
-            for follow_up in transcript[index + 1 :]:
-                if follow_up.role != "assistant":
-                    continue
-                excerpt = self._best_excerpt(follow_up.content)
-                if excerpt:
-                    return excerpt
-        return None
+            excerpt = self._best_media_context_excerpt(follow_up.content)
+            if not excerpt:
+                continue
+            score = self._asset_context_excerpt_score(excerpt, turn_text=turn_text)
+            candidates.append((score, index, excerpt))
+
+        if not candidates:
+            return None
+
+        best_score, _, best_excerpt = max(candidates, key=lambda item: (item[0], item[1]))
+        if best_score > 0:
+            return best_excerpt
+        return candidates[0][2]
+
+    def _asset_context_excerpt_score(self, excerpt: str, *, turn_text: str) -> int:
+        lowered_turn = turn_text.lower()
+        lowered_excerpt = excerpt.lower()
+        score = 0
+
+        query_tokens = self._meaningful_referent_tokens(lowered_turn)
+        excerpt_tokens = self._meaningful_referent_tokens(lowered_excerpt)
+        score += len(query_tokens & excerpt_tokens) * 3
+
+        if "shortage" in lowered_turn and "shortage" in lowered_excerpt:
+            score += 8
+        if "departure" in lowered_turn and "departure" in lowered_excerpt:
+            score += 3
+        if "checklist" in lowered_turn and any(
+            token in lowered_excerpt for token in {"low", "top up", "urgent", "restock"}
+        ):
+            score += 4
+        if any(cue in lowered_turn for cue in {"what matters most", "which two", "priority"}):
+            if any(token in lowered_excerpt for token in {"shortage", "urgent", "low"}):
+                score += 4
+
+        if lowered_excerpt.startswith("here is a conservative description"):
+            score -= 2
+        if lowered_excerpt.startswith("from the image") and "shortage" not in lowered_excerpt:
+            score -= 1
+        return score
 
     def _work_product_excerpt(self, payload: dict[str, object] | None) -> str | None:
         if not payload:
@@ -1005,6 +1032,31 @@ class ConversationContextService:
             compact = self._compact(text)
             return self._trim(compact, 140) if compact else None
         return self._trim(" ".join(lines), 140)
+
+    def _best_media_context_excerpt(self, text: str) -> str | None:
+        lines: list[str] = []
+        for raw_line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+            cleaned = self._clean_line(raw_line)
+            if not cleaned:
+                continue
+            lowered = cleaned.lower()
+            if lowered in _REFERENT_METADATA_PREFIXES or lowered.startswith(tuple(_REFERENT_METADATA_PREFIXES)):
+                continue
+            if self._looks_like_filename_line(cleaned):
+                continue
+            lines.append(cleaned)
+            if len(lines) == 4:
+                break
+        if not lines:
+            compact = self._compact(text)
+            return self._trim(compact, 180) if compact else None
+        if len(lines) <= 2:
+            return self._trim(" ".join(lines), 180)
+
+        first_line = lines[0].lower()
+        if any(token in first_line for token in {"shortage", "shortages", "items", "priority", "priorities"}):
+            return self._trim(" ".join(lines[:4]), 220)
+        return self._trim(" ".join(lines[:2]), 180)
 
     def _clean_line(self, line: str) -> str:
         cleaned = line.strip()

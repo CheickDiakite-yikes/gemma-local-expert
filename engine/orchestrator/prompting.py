@@ -120,6 +120,7 @@ class PromptBuilder:
                     route,
                     policy,
                     conversation_context,
+                    context_assets,
                     model_selection,
                     results,
                     specialist_analysis,
@@ -158,6 +159,7 @@ class PromptBuilder:
         route: RouteDecision,
         policy: PolicyDecision,
         conversation_context: ConversationContextSnapshot | None,
+        context_assets: list[AssetSummary],
         model_selection: ModelRouteSelection,
         results: list[SearchResultItem],
         specialist_analysis: str | None,
@@ -254,6 +256,11 @@ class PromptBuilder:
                 f"The router detected a possible tool action: {route.proposed_tool}. "
                 "Do not claim the tool already ran unless approval and execution happened."
             )
+            if context_assets and conversation_context and conversation_context.selected_context_summary:
+                lines.append(
+                    "This action is grounded in earlier conversation media that already has a usable local summary. "
+                    "Use that summary directly and do not ask the user to restate the image or video unless the summary is too weak to act on safely."
+                )
         if route.agent_run:
             lines.append(
                 "A bounded workspace agent gathered local file findings for this turn. Use those findings directly and do not imply arbitrary shell access."

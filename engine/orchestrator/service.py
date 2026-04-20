@@ -379,6 +379,7 @@ class OrchestratorService:
                             results,
                             specialist_analysis_text=workspace_summary,
                             context_assets=routed_assets,
+                            context_summary=conversation_context.selected_context_summary,
                         )
                         approval_required = (
                             self.policy.tools.requires_confirmation(prepared_tool_name)
@@ -454,6 +455,7 @@ class OrchestratorService:
                     or (specialist_analysis.text if specialist_analysis else None)
                 ),
                 context_assets=routed_assets,
+                context_summary=conversation_context.selected_context_summary,
             )
             yield ConversationStreamEvent(
                 type=StreamEventType.TOOL_PROPOSED,

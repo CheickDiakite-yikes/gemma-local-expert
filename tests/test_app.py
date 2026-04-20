@@ -264,7 +264,7 @@ def test_report_turn_requires_approval_and_persists_report_kind(tmp_path: Path) 
     assert decision.status_code == 200
     approval = decision.json()
     assert approval["status"] == "executed"
-    assert approval["result"]["entity_type"] == "note"
+    assert approval["result"]["entity_type"] == "report"
     assert approval["result"]["kind"] == "report"
 
     transcript_response = client.get(f"/v1/conversations/{conversation['id']}/messages")
@@ -276,7 +276,39 @@ def test_message_draft_turn_after_image_requires_approval_and_persists_message_d
     tmp_path: Path,
 ) -> None:
     settings = Settings(database_path=str(tmp_path / "test-message-draft-approval.db"))
-    client = TestClient(create_app(settings))
+    app = create_app(settings)
+
+    class FlakyVisionRuntime:
+        backend_name = "fake-vision"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def analyze(self, request):
+            self.calls += 1
+            if self.calls <= 2:
+                return VisionAnalysisResult(
+                    text=(
+                        "Visible text extracted from the image:\n"
+                        "Lantern batteries low\n"
+                        "Translator phone credits low"
+                    ),
+                    backend="fake-vision",
+                    model_name=request.specialist_model_name,
+                    model_source="/tmp/fake-paligemma",
+                    available=True,
+                )
+            return VisionAnalysisResult(
+                text="No local vision specialist model is available for this follow-up turn.",
+                backend="metadata",
+                model_name=request.specialist_model_name,
+                model_source=None,
+                available=False,
+                unavailable_reason="No local vision specialist model is available.",
+            )
+
+    app.state.container.orchestrator.vision_runtime = FlakyVisionRuntime()
+    client = TestClient(app)
     conversation = client.post(
         "/v1/conversations",
         json={"title": "Message draft", "mode": "general"},
@@ -306,17 +338,33 @@ def test_message_draft_turn_after_image_requires_approval_and_persists_message_d
         json={
             "conversation_id": conversation["id"],
             "mode": "general",
-            "text": "Draft a short message to the logistics lead about the two shortages that matter most before departure.",
+            "text": "What shortages stand out in this image? Give me the main shortages first and then the first two actions you would prioritize.",
             "asset_ids": [],
             "enabled_knowledge_pack_ids": [],
             "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
         },
     )
     assert second_turn.status_code == 200
-    lines = [line for line in second_turn.text.splitlines() if line.strip()]
+
+    third_turn = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "general",
+            "text": "Draft a short message to the logistics lead about the two shortages that matter most before departure.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+    assert third_turn.status_code == 200
+    lines = [line for line in third_turn.text.splitlines() if line.strip()]
     approval_event = next(line for line in lines if '"type":"approval.required"' in line)
     approval_payload = json.loads(approval_event)
     assert approval_payload["payload"]["tool_name"] == "create_message_draft"
+    assert "lantern batteries" in approval_payload["payload"]["payload"]["content"].lower()
+    assert "translator phone credits" in approval_payload["payload"]["payload"]["content"].lower()
+    assert "ors packets" not in approval_payload["payload"]["payload"]["content"].lower()
     approval_id = approval_payload["payload"]["id"]
 
     decision = client.post(
@@ -326,7 +374,7 @@ def test_message_draft_turn_after_image_requires_approval_and_persists_message_d
     assert decision.status_code == 200
     approval = decision.json()
     assert approval["status"] == "executed"
-    assert approval["result"]["entity_type"] == "note"
+    assert approval["result"]["entity_type"] == "message draft"
     assert approval["result"]["kind"] == "message_draft"
 
     transcript_response = client.get(f"/v1/conversations/{conversation['id']}/messages")
@@ -337,7 +385,7 @@ def test_message_draft_turn_after_image_requires_approval_and_persists_message_d
     assert assistant_message["turn_id"]
     assert assistant_message["approval"]["id"] == approval_id
     assert assistant_message["approval"]["status"] == "executed"
-    assert assistant_message["approval"]["result"]["entity_type"] == "note"
+    assert assistant_message["approval"]["result"]["entity_type"] == "message draft"
 
 
 def test_build_container_supports_mlx_embedding_backend(
@@ -1345,6 +1393,106 @@ def test_multimodal_conversation_handles_topic_pivots_follow_ups_and_workspace_o
     assert not notes[0]["content"].startswith("I reviewed")
     assert "Goal:" not in notes[0]["content"]
     assert "Workspace scope:" not in notes[0]["content"]
+
+
+def test_checklist_follow_up_reuses_earlier_image_summary_when_current_vision_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        database_path=str(tmp_path / "test-checklist-from-context.db"),
+        asset_storage_dir=str(tmp_path / "uploads"),
+        specialist_backend="mock",
+    )
+    app = create_app(settings)
+
+    class FlakyVisionRuntime:
+        backend_name = "fake-vision"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def analyze(self, request):
+            self.calls += 1
+            if self.calls <= 2:
+                return VisionAnalysisResult(
+                    text=(
+                        "Visible text extracted from the image:\n"
+                        "Lantern batteries low\n"
+                        "Translator phone credits low"
+                    ),
+                    backend="fake-vision",
+                    model_name=request.specialist_model_name,
+                    model_source="/tmp/fake-paligemma",
+                    available=True,
+                )
+            return VisionAnalysisResult(
+                text="No local vision specialist model is available for this follow-up turn.",
+                backend="metadata",
+                model_name=request.specialist_model_name,
+                model_source=None,
+                available=False,
+                unavailable_reason="No local vision specialist model is available.",
+            )
+
+    app.state.container.orchestrator.vision_runtime = FlakyVisionRuntime()
+    client = TestClient(app)
+
+    image_asset = client.post(
+        "/v1/assets/upload",
+        data={"care_context": "general"},
+        files={"file": ("board.png", _tiny_png_bytes(), "image/png")},
+    ).json()["asset"]
+    conversation = client.post(
+        "/v1/conversations",
+        json={"title": "Checklist from context", "mode": "field"},
+    ).json()
+
+    describe = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "field",
+            "text": "Describe the attached supply image conservatively.",
+            "asset_ids": [image_asset["id"]],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+        },
+    )
+    assert describe.status_code == 200
+    assert "lantern batteries low" in describe.text.lower()
+
+    shortages = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "field",
+            "text": "Which two shortages matter most before departure?",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+        },
+    )
+    assert shortages.status_code == 200
+
+    checklist = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "field",
+            "text": "Create a checklist for tomorrow's departure based on the supply board shortages.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+        },
+    )
+    assert checklist.status_code == 200
+    checklist_lines = [json.loads(line) for line in checklist.text.splitlines() if line.strip()]
+    approval = next(line for line in checklist_lines if line["type"] == "approval.required")
+    payload = approval["payload"]["payload"]
+
+    assert "Restock lantern batteries" in payload["content"]
+    assert "Top up translator phone credits" in payload["content"]
+    assert "Confirm destination and route" not in payload["content"]
 
 
 def test_mixed_multimodal_conversation_handles_topic_pivots_without_magic_reset_phrase(
