@@ -92,12 +92,28 @@ class PromptBuilder:
             "Prefer grounded answers from provided local sources over model memory.",
             "Keep answers practical and concise unless the user asks for detail.",
             "Use clean markdown-style formatting when helpful: short headings, flat bullets, and compact sections.",
+            "Sound like a calm capable collaborator, not a memo or policy document.",
+            "Avoid stiff openings like 'Understood' or 'I can certainly' unless the user asked for formal tone.",
+            "Avoid decorative separators, raw tool ids, and operational boilerplate in normal replies.",
         ]
 
         if route.interaction_kind == "conversation":
             lines.append(
-                "This is ordinary conversation. Answer naturally and directly without operational boilerplate."
+                "This is ordinary conversation. Answer naturally, directly, and with minimal ceremony."
             )
+            lines.append(
+                "Do not explain obvious limitations unless they are necessary to answer the user's question."
+            )
+            if self._is_supportive_request(user_text):
+                lines.append(
+                    "The user wants reassurance or emotional grounding. Be warm, brief, and human."
+                )
+                lines.append(
+                    "Do not turn this into a checklist, numbered framework, or coaching worksheet unless the user asks for that structure."
+                )
+                lines.append(
+                    "Do not drag in earlier task context unless the user explicitly asks you to connect it."
+                )
 
         if route.is_follow_up:
             lines.append(
@@ -106,7 +122,10 @@ class PromptBuilder:
 
         if self._is_teaching_request(user_text):
             lines.append(
-                "The user is asking to learn. Answer like a capable field instructor: begin with a direct orientation, then give short ordered steps, include one practical tip or example, and end with a useful next-step question only if it helps."
+                "The user is asking to learn. Answer like a practical field instructor: use one short setup sentence, then 3 to 5 short steps or bullets, include one concrete example or caution, and keep the tone plain."
+            )
+            lines.append(
+                "Avoid handout-style headings like 'Orientation' or 'Practical Steps' unless the user explicitly wants a formal guide."
             )
 
         if results:
@@ -124,7 +143,7 @@ class PromptBuilder:
             )
         if policy.approval_required:
             lines.append(
-                "A gated action may require user approval. Make that explicit in the response."
+                "A gated action may require user approval. Keep that mention short, avoid raw tool names, and let the UI carry most of the workflow detail."
             )
         if route.specialist_model:
             lines.append(
@@ -153,6 +172,9 @@ class PromptBuilder:
         if workspace_summary:
             lines.append(
                 "Workspace-agent findings are provided in the user context. Prefer them over unsupported guesses about repository contents."
+            )
+            lines.append(
+                "Summarize workspace findings like assistant synthesis, not a serialized trace."
             )
         if not results and not specialist_analysis and not workspace_summary and not tool_result:
             lines.append(
@@ -248,6 +270,30 @@ class PromptBuilder:
         return any(
             phrase in lowered
             for phrase in {"teach me", "walk me through", "show me how", "how do i", "how to"}
+        )
+
+    def _is_supportive_request(self, text: str) -> bool:
+        lowered = text.lower()
+        return any(
+            phrase in lowered
+            for phrase in {
+                "i'm anxious",
+                "i am anxious",
+                "i'm nervous",
+                "i am nervous",
+                "i'm overwhelmed",
+                "i am overwhelmed",
+                "i'm stressed",
+                "i am stressed",
+                "i'm worried",
+                "i am worried",
+                "calm me down",
+                "help me calm down",
+                "talk me down",
+                "reassure me",
+                "no checklist right now",
+                "like a normal person would",
+            }
         )
 
     def _should_include_router_notes(self, route: RouteDecision) -> bool:

@@ -455,6 +455,38 @@ def test_general_conversation_turn_reads_naturally_without_retrieval_disclaimer(
     assert "retrieved local sources" not in response.text.lower()
 
 
+def test_supportive_field_turn_avoids_retrieval_even_with_enabled_local_packs(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(database_path=str(tmp_path / "test-supportive-conversation.db"))
+    client = TestClient(create_app(settings))
+    conversation = client.post(
+        "/v1/conversations",
+        json={"title": "Support", "mode": "field"},
+    ).json()
+
+    response = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "field",
+            "text": (
+                "Honestly I'm a little anxious about tomorrow. "
+                "No checklist right now, just help me calm down for a second."
+            ),
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": ["local-pack"],
+            "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+        },
+    )
+
+    assert response.status_code == 200
+    lines = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+    completed = next(line for line in lines if line["type"] == "assistant.message.completed")
+    assert "take a breath" in completed["payload"]["text"].lower()
+    assert not any(line["type"] == "citation.added" for line in lines)
+
+
 def test_long_mixed_conversation_handles_general_follow_up_and_workspace_action(
     tmp_path: Path,
 ) -> None:
@@ -764,6 +796,11 @@ def test_multimodal_conversation_handles_topic_pivots_follow_ups_and_workspace_o
         ("Describe the attached supply image conservatively.", [image_asset["id"]]),
         ("Which two shortages matter most before departure?", []),
         ("Also, can we switch topics and just chat normally again for a second?", []),
+        (
+            "Honestly I'm a little anxious about tomorrow. "
+            "No checklist right now, just help me calm down for a second.",
+            [],
+        ),
         ("Review the attached mining video conservatively.", [video_asset["id"]]),
         ("Prepare a briefing from the relevant workspace files and save it as a note.", []),
     ]
@@ -802,9 +839,11 @@ def test_multimodal_conversation_handles_topic_pivots_follow_ups_and_workspace_o
         phrase in turn_responses[5].lower()
         for phrase in {"talk normally", "normal conversation"}
     )
-    assert "workers near excavation equipment" in turn_responses[6].lower()
+    assert "take a breath" in turn_responses[6].lower()
+    assert "checklist" not in turn_responses[6].lower()
+    assert "workers near excavation equipment" in turn_responses[7].lower()
     assert "available specialist analysis" not in turn_responses[3].lower()
-    assert "available specialist analysis" not in turn_responses[6].lower()
+    assert "available specialist analysis" not in turn_responses[7].lower()
     assert approval_id is not None
     assert approval_content is not None
     assert "Key points:" in approval_content
@@ -819,7 +858,7 @@ def test_multimodal_conversation_handles_topic_pivots_follow_ups_and_workspace_o
     assert decision.status_code == 200
 
     transcript = client.get(f"/v1/conversations/{conversation['id']}/messages").json()
-    assert len(transcript) == 16
+    assert len(transcript) == 18
     assert transcript[-1]["approval"]["status"] == "executed"
 
     notes = client.get("/v1/notes").json()

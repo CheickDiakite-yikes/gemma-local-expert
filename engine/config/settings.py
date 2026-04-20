@@ -31,7 +31,7 @@ class Settings(BaseModel):
     assistant_backend: str = "mock"
     specialist_backend: str = "auto"
     tracking_backend: str = "auto"
-    assistant_max_tokens: int = 220
+    assistant_max_tokens: int = 360
     specialist_max_tokens: int = 180
     tracking_resolution: int = 384
     tracking_detect_every: int = 15
@@ -84,7 +84,7 @@ def load_settings() -> Settings:
             "FIELD_ASSISTANT_MEDICAL_MODEL_NAME", "medgemma-1.5-4b"
         ),
         medical_model_source=os.getenv("FIELD_ASSISTANT_MEDICAL_MODEL_SOURCE"),
-        assistant_max_tokens=int(os.getenv("FIELD_ASSISTANT_ASSISTANT_MAX_TOKENS", "220")),
+        assistant_max_tokens=int(os.getenv("FIELD_ASSISTANT_ASSISTANT_MAX_TOKENS", "360")),
         specialist_backend=os.getenv("FIELD_ASSISTANT_SPECIALIST_BACKEND", "auto"),
         tracking_backend=os.getenv("FIELD_ASSISTANT_TRACKING_BACKEND", "auto"),
         specialist_max_tokens=int(

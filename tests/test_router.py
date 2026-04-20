@@ -171,6 +171,25 @@ def test_general_conversation_stays_on_general_path() -> None:
     assert route.interaction_kind == "conversation"
 
 
+def test_supportive_field_turn_stays_conversational_without_retrieval() -> None:
+    router = RouterService(ToolRegistry())
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.FIELD,
+        text=(
+            "Honestly I'm a little anxious about tomorrow. "
+            "No checklist right now, just help me calm down for a second."
+        ),
+        enabled_knowledge_pack_ids=["local-pack"],
+    )
+
+    route = router.decide(request)
+
+    assert route.interaction_kind == "conversation"
+    assert route.needs_retrieval is False
+    assert route.specialist_model is None
+
+
 def test_follow_up_short_turn_is_marked_as_follow_up() -> None:
     router = RouterService(ToolRegistry())
     request = ConversationTurnRequest(

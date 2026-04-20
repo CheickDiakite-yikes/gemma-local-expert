@@ -642,7 +642,7 @@ function presentStatusUpdate(kind, label, detail = null) {
   }
   if (text.includes("ground")) {
     return {
-      label: "Grounding",
+      label: "Working locally",
       detail: "Reviewing local material for this turn.",
     };
   }
@@ -990,8 +990,11 @@ function stripAssistantApprovalBoilerplate(content) {
     }
     if (
       /^i can (save|create|write|log)\b/i.test(normalized) ||
+      /^tool action detected:?/i.test(normalized) ||
+      /^i will now\b/i.test(normalized) ||
       /^please approve\b/i.test(normalized) ||
       /^approval required:?/i.test(normalized) ||
+      /^please confirm if you approve this action\b/i.test(normalized) ||
       /^please confirm if you want me to proceed\b/i.test(normalized) ||
       /^action:\s+/i.test(normalized) ||
       /^content summary:/i.test(normalized)
@@ -1004,15 +1007,54 @@ function stripAssistantApprovalBoilerplate(content) {
   return filtered.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
+function sanitizeAssistantDisplayContent(content) {
+  const rawLines = String(content || "").replace(/\r\n?/g, "\n").split("\n");
+  const filtered = [];
+  let previousBlank = true;
+
+  for (const line of rawLines) {
+    const trimmed = line.trim();
+    const normalized = stripMarkdownToText(trimmed);
+
+    if (!trimmed) {
+      if (!previousBlank && filtered.length) {
+        filtered.push("");
+      }
+      previousBlank = true;
+      continue;
+    }
+
+    if (normalized === "*" || normalized === "-" || normalized === "---") {
+      continue;
+    }
+
+    filtered.push(line);
+    previousBlank = false;
+  }
+
+  return filtered.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 function messageDisplayContent(message) {
-  const content = String(message.content || "").trim();
+  let content = String(message.content || "").trim();
   if (!content) {
     return "";
   }
   if (message.role === "assistant" && message.approval) {
-    return stripAssistantApprovalBoilerplate(content);
+    content = stripAssistantApprovalBoilerplate(content);
+  }
+  if (message.role === "assistant") {
+    content = sanitizeAssistantDisplayContent(content);
   }
   return content;
+}
+
+function shouldSuppressMessage(message) {
+  if (!message || message.role !== "system") {
+    return false;
+  }
+  const plain = stripMarkdownToText(String(message.content || "")).trim().toLowerCase();
+  return plain === "workspace agent actions are limited to the configured local workspace scope.";
 }
 
 function shouldCollapseMessageContent(message, content) {
@@ -1439,16 +1481,8 @@ function runPrimarySummary(run, approval) {
 
 function runFactBits(run, approval) {
   const bits = [];
-  const executedCount = run.executed_steps?.length || 0;
-  const plannedCount = run.plan_steps?.length || executedCount;
-  if (executedCount && plannedCount) {
-    bits.push(`${executedCount}/${plannedCount} steps`);
-  }
   if (run.artifact_ids?.length) {
     bits.push(`${run.artifact_ids.length} artifact${run.artifact_ids.length === 1 ? "" : "s"}`);
-  }
-  if (approval?.status === "pending") {
-    bits.push("draft ready");
   }
   return bits;
 }
@@ -1721,6 +1755,9 @@ function renderMessages({ preserveScroll = false } = {}) {
   elements.emptyState.classList.toggle("is-hidden", messages.length > 0);
 
   for (const message of messages) {
+    if (shouldSuppressMessage(message)) {
+      continue;
+    }
     const visibleContent = messageDisplayContent(message);
     const row = document.createElement("article");
     row.className = [
@@ -2324,9 +2361,12 @@ function updateConversationPreview(conversationId, fallbackText) {
     return;
   }
   const conversation = state.conversations[index];
+  const sanitizedPreview = sanitizeAssistantDisplayContent(
+    stripAssistantApprovalBoilerplate(fallbackText || ""),
+  );
   state.conversations[index] = {
     ...conversation,
-    last_message_preview: fallbackText || conversation.last_message_preview,
+    last_message_preview: sanitizedPreview || fallbackText || conversation.last_message_preview,
   };
 }
 
@@ -2845,11 +2885,11 @@ function handleStreamEvent(event) {
     const detail = `Added ${event.payload.label} as grounding context.`;
     mergeMessageProcess(assistantMessage, {
       kind: "retrieval",
-      label: "Grounding from local sources",
+      label: "Reviewing local material",
       detail,
     });
-    recordProcessEvent("retrieval", "Grounding from local sources", detail);
-    updateStatus("thinking", "Grounding", detail);
+    recordProcessEvent("retrieval", "Reviewing local material", detail);
+    updateStatus("thinking", "Working locally", detail);
   } else if (event.type === "turn.status") {
     if (!assistantMessage) {
       render();

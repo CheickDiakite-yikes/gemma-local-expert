@@ -140,6 +140,12 @@ class MockAssistantRuntime:
             return "You're welcome. We can keep talking normally, or turn the next step into a local action if useful."
         if any(token == lowered or token in lowered for token in {"hi", "hello", "hey", "how are you"}):
             return "Hi. We can talk normally here, reason through a question, or switch into local research and tasks when needed."
+        if self._is_supportive_request(lowered):
+            return (
+                "Take a breath. You do not need to solve the whole day right this second. "
+                "You care, you have already been thinking it through, and it is okay to slow down for a minute. "
+                "Pick one small next step, then stop there. If you want, tell me what part feels heaviest and we can just handle that one piece."
+            )
         if request.is_follow_up:
             prior_topic = self._recent_topic(request.messages, request.user_text)
             if "what do you mean by that" in lowered:
@@ -249,6 +255,29 @@ class MockAssistantRuntime:
                 cleaned = cleaned[len(prefix):].strip(" :,-")
                 break
         return cleaned or "this"
+
+    def _is_supportive_request(self, lowered: str) -> bool:
+        return any(
+            phrase in lowered
+            for phrase in {
+                "i'm anxious",
+                "i am anxious",
+                "i'm nervous",
+                "i am nervous",
+                "i'm overwhelmed",
+                "i am overwhelmed",
+                "i'm stressed",
+                "i am stressed",
+                "i'm worried",
+                "i am worried",
+                "calm me down",
+                "help me calm down",
+                "talk me down",
+                "reassure me",
+                "no checklist right now",
+                "like a normal person would",
+            }
+        )
 
 
 class MLXAssistantRuntime:

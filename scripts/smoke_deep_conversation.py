@@ -64,6 +64,11 @@ def main() -> None:
             ("What should I emphasize first to a volunteer with no medical training?", []),
             ("Describe the attached supply image conservatively.", [image_asset["id"]]),
             ("Which two shortages matter most before departure?", []),
+            (
+                "Honestly I'm a little anxious about tomorrow. "
+                "No checklist right now, just help me calm down for a second.",
+                [],
+            ),
             ("Review the attached mining video conservatively.", [video_asset["id"]]),
             ("Prepare a briefing from the relevant workspace files.", []),
         ]

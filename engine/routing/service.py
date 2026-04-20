@@ -151,6 +151,24 @@ class RouterService:
         "tell me about yourself",
         "who are you",
     }
+    _SUPPORTIVE_CONVERSATION_PHRASES = {
+        "i'm anxious",
+        "i am anxious",
+        "i'm nervous",
+        "i am nervous",
+        "i'm overwhelmed",
+        "i am overwhelmed",
+        "i'm stressed",
+        "i am stressed",
+        "i'm worried",
+        "i am worried",
+        "calm me down",
+        "help me calm down",
+        "talk me down",
+        "reassure me",
+        "no checklist right now",
+        "like a normal person would",
+    }
     _TOPIC_RESET_PHRASES = {
         "switch topics",
         "switch gears",
@@ -199,8 +217,9 @@ class RouterService:
             phrase in lowered for phrase in self._WORKSPACE_AGENT_PHRASES
         )
         explicit_topic_reset = self._looks_like_topic_reset(lowered)
+        explicit_conversation_override = self._looks_like_conversation_override(lowered)
 
-        if (explicit_workspace_request or explicit_topic_reset) and (
+        if (explicit_workspace_request or explicit_topic_reset or explicit_conversation_override) and (
             has_visual_context or has_video_context
         ):
             image_assets = []
@@ -211,6 +230,13 @@ class RouterService:
             decision.reasons.append(
                 "Explicit user intent overrides the most recent media context."
             )
+
+        general_conversation = self._looks_like_general_conversation(
+            lowered,
+            mode=turn.mode,
+            has_visual_context=has_visual_context,
+            has_video_context=has_video_context,
+        )
 
         decision.is_follow_up = self._looks_like_follow_up(
             lowered,
@@ -225,12 +251,7 @@ class RouterService:
         if self._looks_like_teaching_request(lowered):
             decision.interaction_kind = "teaching"
             decision.reasons.append("Turn looks like a teaching or explanation request.")
-        elif self._looks_like_general_conversation(
-            lowered,
-            mode=turn.mode,
-            has_visual_context=has_visual_context,
-            has_video_context=has_video_context,
-        ):
+        elif general_conversation:
             decision.interaction_kind = "conversation"
             decision.reasons.append("Turn looks like ordinary conversation.")
 
@@ -283,20 +304,12 @@ class RouterService:
             and any(topic in lowered for topic in self._LOCAL_KNOWLEDGE_TOPICS)
         )
 
-        if not decision.agent_run and (
+        if not decision.agent_run and not general_conversation and (
             turn.enabled_knowledge_pack_ids
             or (
-                not self._looks_like_general_conversation(
-                    lowered,
-                    mode=turn.mode,
-                    has_visual_context=has_visual_context,
-                    has_video_context=has_video_context,
-                )
-                and (
-                    explicit_retrieval
-                    and ((not has_visual_context and not has_video_context) or image_safe_retrieval)
-                    or knowledge_guided_teaching
-                )
+                explicit_retrieval
+                and ((not has_visual_context and not has_video_context) or image_safe_retrieval)
+                or knowledge_guided_teaching
             )
         ):
             decision.needs_retrieval = True
@@ -334,7 +347,9 @@ class RouterService:
     ) -> bool:
         if has_visual_context or has_video_context:
             return False
-        if any(phrase == lowered or phrase in lowered for phrase in self._CASUAL_CONVERSATION_PHRASES):
+        if any(self._matches_phrase(lowered, phrase) for phrase in self._CASUAL_CONVERSATION_PHRASES):
+            return True
+        if any(self._matches_phrase(lowered, phrase) for phrase in self._SUPPORTIVE_CONVERSATION_PHRASES):
             return True
         if self._looks_like_topic_reset(lowered):
             return True
@@ -349,6 +364,19 @@ class RouterService:
         if mode == AssistantMode.GENERAL and len(lowered.split()) <= 14:
             return True
         return False
+
+    def _looks_like_conversation_override(self, lowered: str) -> bool:
+        return (
+            any(self._matches_phrase(lowered, phrase) for phrase in self._CASUAL_CONVERSATION_PHRASES)
+            or any(self._matches_phrase(lowered, phrase) for phrase in self._SUPPORTIVE_CONVERSATION_PHRASES)
+            or self._looks_like_topic_reset(lowered)
+        )
+
+    def _matches_phrase(self, lowered: str, phrase: str) -> bool:
+        if " " in phrase:
+            return phrase in lowered
+        words = lowered.replace("?", " ").replace("!", " ").replace(".", " ").split()
+        return phrase in words
 
     def _looks_like_follow_up(
         self,

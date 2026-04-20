@@ -201,6 +201,38 @@ def test_orchestrator_follow_up_turn_keeps_conversation_continuity_with_mock_run
         container.store.close()
 
 
+def test_orchestrator_supportive_turn_stays_warm_without_local_retrieval(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(database_path=str(tmp_path / "orchestrator-supportive.db"))
+    container = build_container(settings)
+    try:
+        conversation = container.store.create_conversation(
+            ConversationCreateRequest(title="Support", mode=AssistantMode.FIELD)
+        )
+        request = ConversationTurnRequest(
+            conversation_id=conversation.id,
+            mode=AssistantMode.FIELD,
+            text=(
+                "Honestly I'm a little anxious about tomorrow. "
+                "No checklist right now, just help me calm down for a second."
+            ),
+            enabled_knowledge_pack_ids=["local-pack"],
+        )
+
+        events = asyncio.run(_collect_events(container, request))
+        completed = [
+            event for event in events if event.type == StreamEventType.ASSISTANT_MESSAGE_COMPLETED
+        ]
+        assert completed
+        text = completed[0].payload["text"].lower()
+        assert "take a breath" in text
+        assert "checklist" not in text
+        assert not any(event.type == StreamEventType.CITATION_ADDED for event in events)
+    finally:
+        container.store.close()
+
+
 def test_orchestrator_workspace_summary_reads_like_assistant_synthesis(
     tmp_path: Path,
 ) -> None:

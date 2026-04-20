@@ -38,13 +38,15 @@
       {"text": "Describe the attached supply image conservatively.", "assets": ["image"]},
       {"text": "Which two shortages matter most before departure?"},
       {"text": "Also, can we switch topics and just chat normally again for a second?"},
+      {"text": "Honestly I'm a little anxious about tomorrow. No checklist right now, just help me calm down for a second."},
       {"text": "Review the attached mining video conservatively.", "assets": ["video"]},
       {"text": "Prepare a briefing from the relevant workspace files."}
     ],
     "approve_last_tool": true,
-    "expected_assistant_turns": 8,
+    "expected_assistant_turns": 9,
     "expected_contains": [
       "talk normally",
+      "take a breath",
       "ORS Guidance",
       "Lantern batteries low",
       "workers near excavation equipment"

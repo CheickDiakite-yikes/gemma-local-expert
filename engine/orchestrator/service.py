@@ -151,8 +151,8 @@ class OrchestratorService:
                 conversation_id=turn.conversation_id,
                 turn_id=turn_id,
                 kind="retrieval",
-                label="Grounding from local sources",
-                detail="Searching the offline library before synthesis.",
+                label="Reviewing local material",
+                detail="Checking local material that may help with this reply.",
             )
             results = self.retrieval.retrieve_for_turn(turn)
             for result in results:
@@ -412,8 +412,8 @@ class OrchestratorService:
                     conversation_id=turn.conversation_id,
                     turn_id=turn_id,
                     kind="tool",
-                    label="Preparing action for approval",
-                    detail=f"{planned_tool_name} needs explicit confirmation before it runs.",
+                    label="Preparing a draft for approval",
+                    detail="A local write is ready for review before it runs.",
                     extra={"run_id": agent_run.id if agent_run else None},
                 )
                 approval = self.store.create_approval(
