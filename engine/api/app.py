@@ -117,6 +117,7 @@ def build_container(settings: Settings | None = None) -> ServiceContainer:
     tool_runtime = ToolRuntime(
         store,
         asset_storage_dir=resolved_settings.asset_storage_dir,
+        export_storage_dir=str(Path(resolved_settings.asset_storage_dir).resolve().parent / "exports"),
     )
     workspace_agent = WorkspaceAgentService(
         workspace_root=resolved_settings.workspace_root,

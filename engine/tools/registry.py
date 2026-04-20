@@ -75,14 +75,16 @@ class ToolRegistry:
             return "create_task"
         if "note" in lowered and any(word in lowered for word in {"save", "create", "write"}):
             return "create_note"
+        if any(token in lowered for token in {"export", "markdown", "document"}) and any(
+            word in lowered for word in {"save", "create", "write", "export", "make"}
+        ):
+            return "export_brief"
         if "report" in lowered:
             return "draft_report"
         if "message" in lowered or "reply" in lowered:
             return "draft_message"
         if "observation" in lowered or "log this" in lowered:
             return "log_observation"
-        if "export" in lowered:
-            return "export_brief"
         if "case summary" in lowered and "medical" in lowered:
             return "medical_case_summary"
         return None

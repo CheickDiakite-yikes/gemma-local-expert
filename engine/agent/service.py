@@ -636,6 +636,22 @@ class WorkspaceAgentService:
             return "create_checklist"
         if "task" in lowered or "todo" in lowered:
             return "create_task"
+        if (
+            any(
+                phrase in lowered
+                for phrase in {
+                    "export",
+                    "markdown",
+                    "save as markdown",
+                    "save it as markdown",
+                    "save as a document",
+                    "save it as a document",
+                    "export it",
+                }
+            )
+            and "note" not in lowered
+        ):
+            return "export_brief"
         if any(keyword in lowered for keyword in {"brief", "briefing", "note", "report"}) and any(
             verb in lowered for verb in {"prepare", "create", "write", "draft", "make", "build"}
         ):

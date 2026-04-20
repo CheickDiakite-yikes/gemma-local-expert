@@ -289,6 +289,7 @@ function approvalEditableFields(approval) {
       return ["title", "details", "status"];
     case "create_note":
     case "create_checklist":
+    case "export_brief":
     case "log_observation":
       return ["title", "content"];
     default:
@@ -423,6 +424,8 @@ function approvalSurfaceTitle(toolName) {
       return "Save checklist";
     case "create_task":
       return "Save task";
+    case "export_brief":
+      return "Export markdown";
     case "log_observation":
       return "Save observation";
     default:
@@ -438,6 +441,8 @@ function approvalSurfaceNoun(toolName) {
       return "checklist";
     case "create_task":
       return "task";
+    case "export_brief":
+      return "export";
     case "log_observation":
       return "observation";
     default:
@@ -463,6 +468,8 @@ function approvalReasonCopy(approval) {
       return "Review or refine the checklist before it is saved locally.";
     case "create_task":
       return "Review or refine the task before it is saved locally.";
+    case "export_brief":
+      return "Review or refine the markdown export before it is written locally.";
     case "log_observation":
       return "Review or refine the observation before it is saved locally.";
     case "create_note":
@@ -1364,10 +1371,12 @@ function renderApprovalEditor(approval) {
     `;
   }
 
-  if (["create_note", "create_checklist", "log_observation"].includes(approval.tool_name)) {
+  if (["create_note", "create_checklist", "log_observation", "export_brief"].includes(approval.tool_name)) {
     const helperCopy =
       approval.tool_name === "create_checklist"
         ? "Adjust the saved checklist title or items before it is written locally."
+        : approval.tool_name === "export_brief"
+          ? "Adjust the markdown export title or content before it is written locally."
         : "Adjust the saved draft before it is written locally.";
     return `
       <section class="approval-editor approval-editor-simple" data-approval-editor="${approval.id}">
@@ -1387,7 +1396,13 @@ function renderApprovalEditor(approval) {
             <input data-approval-field="title" type="text" value="${escapeHtml(payload.title || "")}" />
           </label>
           <label class="approval-field approval-field-full">
-            <span>${approval.tool_name === "create_checklist" ? "Checklist content" : "Content"}</span>
+            <span>${
+              approval.tool_name === "create_checklist"
+                ? "Checklist content"
+                : approval.tool_name === "export_brief"
+                  ? "Markdown content"
+                  : "Content"
+            }</span>
             <textarea data-approval-field="content" rows="${approval.tool_name === "create_checklist" ? "6" : "5"}">${escapeHtml(payload.content || "")}</textarea>
           </label>
         </div>
@@ -1437,7 +1452,11 @@ function renderApprovalResult(result) {
     return `<pre class="approval-json">${escapeHtml(JSON.stringify(result, null, 2))}</pre>`;
   }
 
-  return `<div class="approval-result">${resultBits.join(" · ")}</div>`;
+  const destination =
+    result.destination_path
+      ? `<div class="approval-result-path">${escapeHtml(result.destination_path)}</div>`
+      : "";
+  return `<div class="approval-result">${resultBits.join(" · ")}</div>${destination}`;
 }
 
 function humanizeRunStatus(status) {
@@ -1462,6 +1481,8 @@ function toolDraftLabel(toolName) {
       return "a checklist draft";
     case "create_task":
       return "a task draft";
+    case "export_brief":
+      return "a markdown export";
     case "log_observation":
       return "an observation draft";
     default:
@@ -1487,6 +1508,7 @@ function sanitizeRunSummary(summary, approval = null) {
     .replace(/`create_note`/g, "a note draft")
     .replace(/`create_checklist`/g, "a checklist draft")
     .replace(/`create_task`/g, "a task draft")
+    .replace(/`export_brief`/g, "a markdown export")
     .replace(/`log_observation`/g, "an observation draft")
     .replace(/\/Users\/[^\s`]+/g, "this workspace")
     .replace(/workspace findings/gi, "local material");

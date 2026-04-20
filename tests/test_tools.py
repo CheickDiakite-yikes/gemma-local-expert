@@ -9,6 +9,22 @@ class _UnusedStore:
     def create_task(self, *args, **kwargs):  # pragma: no cover - not used in this test
         raise NotImplementedError
 
+    def create_export(self, *args, **kwargs):  # pragma: no cover - not used in this test
+        raise NotImplementedError
+
+
+class _ExportStore(_UnusedStore):
+    def create_export(self, request, status="queued"):
+        return type(
+            "_Result",
+            (),
+            {
+                "export_id": "export_test",
+                "destination_path": request.destination_path,
+                "status": status,
+            },
+        )()
+
 
 def test_checklist_planner_prefers_priority_lines_from_specialist_analysis() -> None:
     runtime = ToolRuntime(_UnusedStore())
@@ -142,3 +158,35 @@ def test_note_planner_strips_workspace_review_lede_from_synthesized_note() -> No
     assert not plan.payload["content"].startswith("I reviewed")
     assert plan.payload["content"].startswith("Key points:")
     assert "Files reviewed:" in plan.payload["content"]
+
+
+def test_export_brief_plan_and_execute_writes_markdown(tmp_path) -> None:
+    runtime = ToolRuntime(_ExportStore(), export_storage_dir=str(tmp_path))
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.RESEARCH,
+        text="Export a short workspace briefing as markdown.",
+    )
+
+    plan = runtime.plan(
+        request,
+        "export_brief",
+        [],
+        specialist_analysis_text=(
+            "Key points:\n"
+            "- Working title: Field Assistant\n\n"
+            "Files reviewed:\n"
+            "- offline-field-assistant-v1-product-spec.md"
+        ),
+        context_assets=[],
+    )
+
+    result = runtime.execute("export_brief", plan.payload)
+
+    destination = tmp_path / "export-a-short-workspace-briefing-as-markdown.md"
+    assert destination.exists()
+    assert destination.read_text(encoding="utf-8").startswith(
+        "# Export a short workspace briefing as markdown"
+    )
+    assert result["entity_type"] == "export"
+    assert result["status"] == "completed"

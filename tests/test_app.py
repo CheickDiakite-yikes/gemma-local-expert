@@ -148,6 +148,59 @@ def test_approval_executes_checklist_tool_and_persists_note(tmp_path: Path) -> N
     assert notes[0]["kind"] == "checklist"
 
 
+def test_conversational_image_turn_does_not_force_tool_output(tmp_path: Path) -> None:
+    settings = Settings(
+        database_path=str(tmp_path / "test-image-chat.db"),
+        asset_storage_dir=str(tmp_path / "uploads"),
+        specialist_backend="mock",
+    )
+    app = create_app(settings)
+
+    class FakeVisionRuntime:
+        backend_name = "fake-vision"
+
+        def analyze(self, request):
+            return VisionAnalysisResult(
+                text=(
+                    "Visible text extracted from the image:\n"
+                    "Lantern batteries low\n"
+                    "Translator phone credits low"
+                ),
+                backend="fake-vision",
+                model_name=request.specialist_model_name,
+                model_source="/tmp/fake-paligemma",
+                available=True,
+            )
+
+    app.state.container.orchestrator.vision_runtime = FakeVisionRuntime()
+    client = TestClient(app)
+    image_asset = client.post(
+        "/v1/assets/upload",
+        data={"care_context": "general"},
+        files={"file": ("board.png", _tiny_png_bytes(), "image/png")},
+    ).json()["asset"]
+    conversation = client.post(
+        "/v1/conversations",
+        json={"title": "Image chat", "mode": "general"},
+    ).json()
+
+    response = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "general",
+            "text": "I'm not trying to save anything right now. What do you notice first in this image?",
+            "asset_ids": [image_asset["id"]],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+        },
+    )
+
+    assert response.status_code == 200
+    assert "From the image" in response.text
+    assert '"type":"approval.required"' not in response.text
+
+
 def test_transcript_rehydrates_executed_approval_state(tmp_path: Path) -> None:
     settings = Settings(database_path=str(tmp_path / "test-approval-transcript.db"))
     client = TestClient(create_app(settings))
@@ -743,6 +796,55 @@ def test_workspace_agent_briefing_requires_approval_and_completes_after_decision
     assert notes
     assert notes[0]["title"] == "Edited workspace briefing"
     assert "Confirm the village route before departure" in notes[0]["content"]
+
+
+def test_workspace_agent_can_export_brief_as_markdown(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    (workspace_root / "trip.md").write_text(
+        "Trip prep\nPack oral rehydration salts\nPack translator contact sheets\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings(
+        database_path=str(tmp_path / "test-agent-export.db"),
+        workspace_root=str(workspace_root),
+    )
+    client = TestClient(create_app(settings))
+    conversation = client.post(
+        "/v1/conversations",
+        json={"title": "Workspace Export", "mode": "field"},
+    ).json()
+
+    response = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "field",
+            "text": "Prepare a short workspace briefing from the relevant files and export it as markdown.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+
+    assert response.status_code == 200
+    lines = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+    approval_event = next(line for line in lines if line["type"] == "approval.required")
+    approval_id = approval_event["payload"]["id"]
+    assert approval_event["payload"]["tool_name"] == "export_brief"
+
+    decision_response = client.post(
+        f"/v1/approvals/{approval_id}/decisions",
+        json={"action": "approve", "edited_payload": {}},
+    )
+    assert decision_response.status_code == 200
+    approval = decision_response.json()
+    assert approval["status"] == "executed"
+    assert approval["result"]["entity_type"] == "export"
+    assert approval["result"]["destination_path"].endswith(".md")
+    assert Path(approval["result"]["destination_path"]).exists()
+    assert "Key points:" in Path(approval["result"]["destination_path"]).read_text(encoding="utf-8")
 
 
 def test_multimodal_conversation_handles_topic_pivots_follow_ups_and_workspace_output(

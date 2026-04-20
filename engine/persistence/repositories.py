@@ -144,7 +144,7 @@ class PersistenceStore(Protocol):
 
     def create_medical_session(self, conversation_id: str) -> MedicalSession: ...
 
-    def create_export(self, request: ExportRequest) -> ExportResult: ...
+    def create_export(self, request: ExportRequest, status: str = "queued") -> ExportResult: ...
 
     def create_agent_run(
         self,
@@ -940,11 +940,11 @@ class SQLiteStore:
             self._connection.commit()
         return session
 
-    def create_export(self, request: ExportRequest) -> ExportResult:
+    def create_export(self, request: ExportRequest, status: str = "queued") -> ExportResult:
         export = ExportResult(
             export_id=new_id("export"),
             destination_path=request.destination_path,
-            status="queued",
+            status=status,
         )
         with self._lock:
             self._connection.execute(

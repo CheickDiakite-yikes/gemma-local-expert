@@ -13,6 +13,7 @@ from engine.contracts.api import (
     AssetKind,
     AssetSummary,
     ConversationTurnRequest,
+    ExportRequest,
     SearchResultItem,
     new_id,
 )
@@ -31,10 +32,13 @@ class ToolRuntime:
         store: PersistenceStore,
         *,
         asset_storage_dir: str = "data/uploads",
+        export_storage_dir: str = "data/exports",
     ) -> None:
         self.store = store
         self.asset_storage_dir = Path(asset_storage_dir)
         self.asset_storage_dir.mkdir(parents=True, exist_ok=True)
+        self.export_storage_dir = Path(export_storage_dir)
+        self.export_storage_dir.mkdir(parents=True, exist_ok=True)
 
     def plan(
         self,
@@ -113,6 +117,22 @@ class ToolRuntime:
                 },
             )
 
+        if tool_name == "export_brief":
+            title = self._title_from_request(turn.text, fallback="Field Brief")
+            return ToolPlan(
+                tool_name=tool_name,
+                payload={
+                    "conversation_id": turn.conversation_id,
+                    "title": title,
+                    "content": self._build_note_content(
+                        turn,
+                        specialist_analysis_text=specialist_analysis_text,
+                    ),
+                    "export_type": "markdown",
+                    "destination_path": self._default_export_path(title),
+                },
+            )
+
         return ToolPlan(tool_name=tool_name, payload={"request": turn.text.strip()})
 
     def execute(self, tool_name: str, payload: dict[str, object]) -> dict[str, object]:
@@ -144,6 +164,9 @@ class ToolRuntime:
 
         if tool_name == "generate_heatmap_overlay":
             return self._execute_heatmap_overlay(payload)
+
+        if tool_name == "export_brief":
+            return self._execute_markdown_export(payload)
 
         return {
             "entity_type": "noop",
@@ -185,6 +208,16 @@ class ToolRuntime:
                 merged["status"] = status
             return merged
 
+        if tool_name == "export_brief":
+            title = self._edited_text(edited_payload.get("title"), max_chars=120)
+            content = self._edited_text(edited_payload.get("content"), max_chars=12000)
+            if title is not None:
+                merged["title"] = title
+                merged["destination_path"] = self._default_export_path(title)
+            if content is not None:
+                merged["content"] = content
+            return merged
+
         return merged
 
     def _title_from_request(self, text: str, *, fallback: str) -> str:
@@ -224,6 +257,10 @@ class ToolRuntime:
         if normalized in {"open", "in_progress", "blocked", "done"}:
             return normalized
         return None
+
+    def _default_export_path(self, title: str) -> str:
+        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "field-brief"
+        return str((self.export_storage_dir / f"{slug}.md").resolve())
 
     def _build_checklist_content(
         self,
@@ -319,6 +356,42 @@ class ToolRuntime:
             if lines:
                 return "\n".join(f"- {line}" for line in lines[:8])
         return turn.text.strip()
+
+    def _execute_markdown_export(self, payload: dict[str, object]) -> dict[str, object]:
+        title = str(payload.get("title") or "Field Brief").strip() or "Field Brief"
+        destination_path = Path(
+            str(payload.get("destination_path") or self._default_export_path(title))
+        ).expanduser()
+        if not destination_path.is_absolute():
+            destination_path = (self.export_storage_dir / destination_path).resolve()
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+
+        content = str(payload.get("content") or "").strip()
+        destination_path.write_text(self._markdown_document(title, content), encoding="utf-8")
+
+        export = self.store.create_export(
+            ExportRequest(
+                conversation_id=str(payload.get("conversation_id") or ""),
+                export_type=str(payload.get("export_type") or "markdown"),
+                destination_path=str(destination_path),
+            ),
+            status="completed",
+        )
+        return {
+            "entity_type": "export",
+            "entity_id": export.export_id,
+            "title": title,
+            "status": export.status,
+            "destination_path": str(destination_path),
+            "message": f"Exported markdown to {destination_path}.",
+        }
+
+    def _markdown_document(self, title: str, content: str) -> str:
+        if not content:
+            return f"# {title}\n"
+        if content.lstrip().startswith("# "):
+            return content.rstrip() + "\n"
+        return f"# {title}\n\n{content.rstrip()}\n"
 
     def _build_task_details(
         self,

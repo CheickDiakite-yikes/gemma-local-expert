@@ -189,6 +189,7 @@ class MockAssistantRuntime:
             "create_checklist": "checklist draft",
             "create_task": "task draft",
             "log_observation": "saved observation",
+            "export_brief": "markdown export",
             "generate_heatmap_overlay": "heatmap overlay",
         }
         return mapping.get(tool_name, tool_name.replace("_", " "))

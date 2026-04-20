@@ -89,6 +89,33 @@ def test_image_summary_routes_to_vision_specialist_without_retrieval() -> None:
     assert route.needs_retrieval is False
 
 
+def test_conversational_image_turn_stays_conversational_without_tool_proposal() -> None:
+    router = RouterService(ToolRegistry())
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.GENERAL,
+        text="I'm not trying to save anything right now. What do you notice first in this image?",
+        asset_ids=["asset_1"],
+    )
+
+    route = router.decide(
+        request,
+        assets=[
+            AssetSummary(
+                id="asset_1",
+                display_name="board.png",
+                source_path="board.png",
+                kind=AssetKind.IMAGE,
+                care_context=AssetCareContext.GENERAL,
+            )
+        ],
+    )
+
+    assert route.specialist_model == "paligemma"
+    assert route.proposed_tool is None
+    assert route.interaction_kind == "vision"
+
+
 def test_heatmap_request_routes_to_overlay_tool_with_image_context() -> None:
     router = RouterService(ToolRegistry())
     request = ConversationTurnRequest(
