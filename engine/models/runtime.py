@@ -391,6 +391,8 @@ class MockAssistantRuntime:
     def _tool_label(self, tool_name: str) -> str:
         mapping = {
             "create_note": "note draft",
+            "create_report": "report draft",
+            "create_message_draft": "message draft",
             "create_checklist": "checklist draft",
             "create_task": "task draft",
             "log_observation": "saved observation",

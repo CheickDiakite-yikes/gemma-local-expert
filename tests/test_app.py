@@ -231,6 +231,42 @@ def test_transcript_rehydrates_executed_approval_state(tmp_path: Path) -> None:
     assert approval_response.status_code == 200
     assert approval_response.json()["status"] == "executed"
 
+
+def test_report_turn_requires_approval_and_persists_report_kind(tmp_path: Path) -> None:
+    settings = Settings(database_path=str(tmp_path / "test-report-approval.db"))
+    client = TestClient(create_app(settings))
+    conversation = client.post("/v1/conversations", json={"title": "Report", "mode": "research"}).json()
+
+    response = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Create a report summarizing the current field assistant architecture.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+
+    assert response.status_code == 200
+    lines = [line for line in response.text.splitlines() if line.strip()]
+    approval_event = next(line for line in lines if '"type":"approval.required"' in line)
+    approval_payload = json.loads(approval_event)
+    assert approval_payload["payload"]["tool_name"] == "create_report"
+    approval_id = approval_payload["payload"]["id"]
+
+    decision = client.post(
+        f"/v1/approvals/{approval_id}/decisions",
+        json={"action": "approve", "edited_payload": {}},
+    )
+
+    assert decision.status_code == 200
+    approval = decision.json()
+    assert approval["status"] == "executed"
+    assert approval["result"]["entity_type"] == "note"
+    assert approval["result"]["kind"] == "report"
+
     transcript_response = client.get(f"/v1/conversations/{conversation['id']}/messages")
     assert transcript_response.status_code == 200
     transcript = transcript_response.json()

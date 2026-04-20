@@ -7,14 +7,16 @@ class ToolRegistry:
     def __init__(self) -> None:
         self._tools = {
             "create_note": ToolDescriptor(name="create_note", requires_confirmation=True),
+            "create_report": ToolDescriptor(name="create_report", requires_confirmation=True),
+            "create_message_draft": ToolDescriptor(
+                name="create_message_draft", requires_confirmation=True
+            ),
             "update_note": ToolDescriptor(name="update_note", requires_confirmation=True),
             "create_task": ToolDescriptor(name="create_task", requires_confirmation=True),
             "update_task": ToolDescriptor(name="update_task", requires_confirmation=True),
             "create_checklist": ToolDescriptor(
                 name="create_checklist", requires_confirmation=True
             ),
-            "draft_report": ToolDescriptor(name="draft_report", requires_confirmation=False),
-            "draft_message": ToolDescriptor(name="draft_message", requires_confirmation=False),
             "log_observation": ToolDescriptor(
                 name="log_observation", requires_confirmation=True
             ),
@@ -73,16 +75,25 @@ class ToolRegistry:
             return "create_checklist"
         if "task" in lowered:
             return "create_task"
+        if (
+            "report" in lowered
+            and not any(token in lowered for token in {"export", "markdown", "document"})
+            and any(
+                word in lowered
+                for word in {"save", "create", "write", "make", "build", "draft", "prepare"}
+            )
+        ):
+            return "create_report"
         if "note" in lowered and any(word in lowered for word in {"save", "create", "write"}):
             return "create_note"
+        if any(token in lowered for token in {"message", "reply", "email"}) and any(
+            word in lowered for word in {"save", "create", "write", "make", "build", "draft", "prepare"}
+        ):
+            return "create_message_draft"
         if any(token in lowered for token in {"export", "markdown", "document"}) and any(
             word in lowered for word in {"save", "create", "write", "export", "make"}
         ):
             return "export_brief"
-        if "report" in lowered:
-            return "draft_report"
-        if "message" in lowered or "reply" in lowered:
-            return "draft_message"
         if "observation" in lowered or "log this" in lowered:
             return "log_observation"
         if "case summary" in lowered and "medical" in lowered:

@@ -40,6 +40,32 @@ def test_checklist_turn_proposes_checklist_tool() -> None:
     assert route.proposed_tool == "create_checklist"
 
 
+def test_report_turn_proposes_report_tool() -> None:
+    router = RouterService(ToolRegistry())
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.RESEARCH,
+        text="Create a report summarizing the current field assistant architecture.",
+    )
+
+    route = router.decide(request)
+
+    assert route.proposed_tool == "create_report"
+
+
+def test_message_draft_turn_proposes_message_draft_tool() -> None:
+    router = RouterService(ToolRegistry())
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.GENERAL,
+        text="Draft a reply confirming tomorrow's field visit at 8am.",
+    )
+
+    route = router.decide(request)
+
+    assert route.proposed_tool == "create_message_draft"
+
+
 def test_image_description_routes_to_vision_specialist() -> None:
     router = RouterService(ToolRegistry())
     request = ConversationTurnRequest(

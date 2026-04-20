@@ -13,6 +13,20 @@ class _UnusedStore:
         raise NotImplementedError
 
 
+class _NoteStore(_UnusedStore):
+    def create_note(self, title, content, kind="note"):
+        return type(
+            "_Note",
+            (),
+            {
+                "id": "note_test",
+                "title": title,
+                "content": content,
+                "kind": kind,
+            },
+        )()
+
+
 class _ExportStore(_UnusedStore):
     def create_export(self, request, status="queued"):
         return type(
@@ -221,6 +235,53 @@ def test_export_brief_plan_and_execute_writes_markdown(tmp_path) -> None:
     assert document.startswith("# Field Assistant Architecture Briefing")
     assert result["entity_type"] == "export"
     assert result["status"] == "completed"
+
+
+def test_create_report_plan_and_execute_persists_report_kind() -> None:
+    runtime = ToolRuntime(_NoteStore())
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.RESEARCH,
+        text="Create a report summarizing the field assistant architecture.",
+    )
+
+    plan = runtime.plan(
+        request,
+        "create_report",
+        [],
+        specialist_analysis_text=(
+            "Field Assistant Architecture Overview\n\n"
+            "Key points:\n"
+            "- Local-first assistant built on Gemma.\n"
+            "- Orchestrator owns routing, retrieval, and tools.\n"
+        ),
+        context_assets=[],
+    )
+    result = runtime.execute("create_report", plan.payload)
+
+    assert plan.payload["kind"] == "report"
+    assert str(plan.payload["content"]).startswith("# ")
+    assert result["entity_type"] == "note"
+    assert result["kind"] == "report"
+
+
+def test_create_message_draft_plan_builds_message_shape() -> None:
+    runtime = ToolRuntime(_UnusedStore())
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.GENERAL,
+        text="Draft a reply confirming tomorrow's field visit at 8am and thanking them for the checklist.",
+    )
+
+    plan = runtime.plan(
+        request,
+        "create_message_draft",
+        [],
+        context_assets=[],
+    )
+
+    assert plan.payload["kind"] == "message_draft"
+    assert str(plan.payload["content"]).startswith("Hi,\n\nConfirming tomorrow's field visit at 8am")
 
 
 def test_revise_pending_export_payload_can_tighten_title_and_content() -> None:

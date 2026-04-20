@@ -288,6 +288,8 @@ function approvalEditableFields(approval) {
     case "create_task":
       return ["title", "details", "status"];
     case "create_note":
+    case "create_report":
+    case "create_message_draft":
     case "create_checklist":
     case "export_brief":
     case "log_observation":
@@ -420,6 +422,10 @@ function approvalSurfaceTitle(toolName) {
   switch (toolName) {
     case "create_note":
       return "Save note";
+    case "create_report":
+      return "Save report";
+    case "create_message_draft":
+      return "Save message draft";
     case "create_checklist":
       return "Save checklist";
     case "create_task":
@@ -437,6 +443,10 @@ function approvalSurfaceNoun(toolName) {
   switch (toolName) {
     case "create_note":
       return "note";
+    case "create_report":
+      return "report";
+    case "create_message_draft":
+      return "message draft";
     case "create_checklist":
       return "checklist";
     case "create_task":
@@ -468,6 +478,10 @@ function approvalReasonCopy(approval) {
       return "Review or refine the checklist before it is saved locally.";
     case "create_task":
       return "Review or refine the task before it is saved locally.";
+    case "create_report":
+      return "Review or refine the report before it is saved locally.";
+    case "create_message_draft":
+      return "Review or refine the message draft before it is saved locally.";
     case "export_brief":
       return "Review or refine the markdown export before it is written locally.";
     case "log_observation":
@@ -1379,10 +1393,14 @@ function renderApprovalEditor(approval) {
     `;
   }
 
-  if (["create_note", "create_checklist", "log_observation", "export_brief"].includes(approval.tool_name)) {
+  if (["create_note", "create_report", "create_message_draft", "create_checklist", "log_observation", "export_brief"].includes(approval.tool_name)) {
     const helperCopy =
       approval.tool_name === "create_checklist"
         ? "Adjust the saved checklist title or items before it is written locally."
+        : approval.tool_name === "create_report"
+          ? "Adjust the report title or content before it is written locally."
+          : approval.tool_name === "create_message_draft"
+            ? "Adjust the message draft title or content before it is written locally."
         : approval.tool_name === "export_brief"
           ? "Adjust the markdown export title or content before it is written locally."
         : "Adjust the saved draft before it is written locally.";
@@ -1407,6 +1425,10 @@ function renderApprovalEditor(approval) {
             <span>${
               approval.tool_name === "create_checklist"
                 ? "Checklist content"
+                : approval.tool_name === "create_report"
+                  ? "Report content"
+                  : approval.tool_name === "create_message_draft"
+                    ? "Message draft"
                 : approval.tool_name === "export_brief"
                   ? "Markdown content"
                   : "Content"
@@ -1485,6 +1507,10 @@ function toolDraftLabel(toolName) {
   switch (toolName) {
     case "create_note":
       return "a note draft";
+    case "create_report":
+      return "a report draft";
+    case "create_message_draft":
+      return "a message draft";
     case "create_checklist":
       return "a checklist draft";
     case "create_task":
@@ -1514,6 +1540,8 @@ function sanitizeRunSummary(summary, approval = null) {
 
   const replaced = trimmed
     .replace(/`create_note`/g, "a note draft")
+    .replace(/`create_report`/g, "a report draft")
+    .replace(/`create_message_draft`/g, "a message draft")
     .replace(/`create_checklist`/g, "a checklist draft")
     .replace(/`create_task`/g, "a task draft")
     .replace(/`export_brief`/g, "a markdown export")

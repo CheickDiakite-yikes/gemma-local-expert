@@ -62,6 +62,32 @@ class ToolRuntime:
                 },
             )
 
+        if tool_name == "create_report":
+            return ToolPlan(
+                tool_name=tool_name,
+                payload={
+                    "title": self._report_title(turn.text, fallback="Field Report"),
+                    "content": self._build_report_content(
+                        turn,
+                        specialist_analysis_text=specialist_analysis_text,
+                    ),
+                    "kind": "report",
+                },
+            )
+
+        if tool_name == "create_message_draft":
+            return ToolPlan(
+                tool_name=tool_name,
+                payload={
+                    "title": self._message_draft_title(turn.text, fallback="Message Draft"),
+                    "content": self._build_message_draft_content(
+                        turn,
+                        specialist_analysis_text=specialist_analysis_text,
+                    ),
+                    "kind": "message_draft",
+                },
+            )
+
         if tool_name == "create_task":
             return ToolPlan(
                 tool_name=tool_name,
@@ -137,7 +163,13 @@ class ToolRuntime:
         return ToolPlan(tool_name=tool_name, payload={"request": turn.text.strip()})
 
     def execute(self, tool_name: str, payload: dict[str, object]) -> dict[str, object]:
-        if tool_name in {"create_note", "create_checklist", "log_observation"}:
+        if tool_name in {
+            "create_note",
+            "create_report",
+            "create_message_draft",
+            "create_checklist",
+            "log_observation",
+        }:
             note = self.store.create_note(
                 title=str(payload.get("title", "Untitled Note")),
                 content=str(payload.get("content", "")),
@@ -185,7 +217,13 @@ class ToolRuntime:
         if not edited_payload:
             return merged
 
-        if tool_name in {"create_note", "create_checklist", "log_observation"}:
+        if tool_name in {
+            "create_note",
+            "create_report",
+            "create_message_draft",
+            "create_checklist",
+            "log_observation",
+        }:
             title = self._edited_text(edited_payload.get("title"), max_chars=120)
             content = self._edited_text(edited_payload.get("content"), max_chars=12000)
             kind = self._edited_kind(tool_name, edited_payload.get("kind"))
@@ -240,6 +278,8 @@ class ToolRuntime:
 
         if tool_name in {
             "create_note",
+            "create_report",
+            "create_message_draft",
             "create_checklist",
             "log_observation",
             "export_brief",
@@ -297,6 +337,37 @@ class ToolRuntime:
         cleaned = re.sub(r"\bfrom the relevant files\b", "", cleaned, flags=re.I)
         return self._title_from_request(cleaned, fallback=fallback)
 
+    def _report_title(self, request_text: str, *, fallback: str) -> str:
+        cleaned = re.sub(
+            r"\b(create|make|build|write|prepare|draft)\b",
+            "",
+            request_text,
+            flags=re.I,
+        )
+        cleaned = re.sub(r"\ba\b|\ban\b|\bthe\b", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"\breport\b", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" .-")
+        title = self._title_from_request(cleaned, fallback=fallback)
+        if "report" not in title.lower():
+            title = f"{title} Report"
+        return title
+
+    def _message_draft_title(self, request_text: str, *, fallback: str) -> str:
+        cleaned = re.sub(
+            r"\b(create|make|build|write|prepare|draft)\b",
+            "",
+            request_text,
+            flags=re.I,
+        )
+        cleaned = re.sub(r"\ba\b|\ban\b|\bthe\b", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"\b(reply|response|message|email|text)\b", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"^\s*to\s+", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" .-")
+        title = self._title_from_request(cleaned, fallback=fallback)
+        if "draft" not in title.lower():
+            title = f"{title} Draft"
+        return title
+
     def _title_from_content(self, content: str) -> str | None:
         for raw_line in content.splitlines():
             line = raw_line.strip().lstrip("#").strip()
@@ -310,6 +381,54 @@ class ToolRuntime:
                 continue
             return line
         return None
+
+    def _build_report_content(
+        self,
+        turn: ConversationTurnRequest,
+        *,
+        specialist_analysis_text: str | None = None,
+    ) -> str:
+        content = self._build_note_content(
+            turn,
+            specialist_analysis_text=specialist_analysis_text,
+        ).strip()
+        title = self._report_title(turn.text, fallback="Field Report")
+        if content.startswith("# "):
+            return content
+        if content.lower().startswith(title.lower()):
+            return f"# {title}\n\n{content[len(title):].lstrip()}"
+        return f"# {title}\n\n{content}"
+
+    def _build_message_draft_content(
+        self,
+        turn: ConversationTurnRequest,
+        *,
+        specialist_analysis_text: str | None = None,
+    ) -> str:
+        if specialist_analysis_text and not self._looks_like_workspace_brief_request(turn.text):
+            cleaned = self._clean_specialist_text(specialist_analysis_text).strip()
+            if cleaned and "visible text extracted from the image" not in cleaned.lower():
+                return self._format_message_draft(cleaned)
+
+        request = turn.text.strip().rstrip(".")
+        request = re.sub(
+            r"^(create|make|build|write|prepare|draft)\s+(a|an|the)?\s*(reply|response|message|email|text)\s*(to\s+)?",
+            "",
+            request,
+            flags=re.I,
+        ).strip()
+        if not request:
+            request = "Thanks. Here is the message draft."
+        request = request[:1].upper() + request[1:]
+        return self._format_message_draft(request)
+
+    def _format_message_draft(self, body: str) -> str:
+        compact = body.strip()
+        if not compact:
+            compact = "Thanks. Here is the message draft."
+        if compact.lower().startswith(("hi,", "hello,", "dear ")):
+            return compact
+        return f"Hi,\n\n{compact}\n\nBest,"
 
     def _edited_text(self, value: object, *, max_chars: int) -> str | None:
         if value is None:
@@ -325,6 +444,8 @@ class ToolRuntime:
         normalized = str(value).strip().lower()
         allowed_by_tool = {
             "create_note": {"note", "observation"},
+            "create_report": {"report"},
+            "create_message_draft": {"message_draft"},
             "create_checklist": {"checklist"},
             "log_observation": {"observation"},
         }
@@ -348,7 +469,7 @@ class ToolRuntime:
 
     def _extract_requested_title(self, instruction: str) -> str | None:
         patterns = (
-            r"\b(?:rename|retitle)\s+(?:that|this|the)?\s*(?:draft|note|checklist|task|export|markdown|document)?\s*to\s+[\"“]?(.+?)[\"”]?(?:[.?!]|$)",
+            r"\b(?:rename|retitle)\s+(?:that|this|the)?\s*(?:draft|note|report|message|reply|email|checklist|task|export|markdown|document)?\s*to\s+[\"“]?(.+?)[\"”]?(?:[.?!]|$)",
             r"\bcall\s+(?:it|that|this)\s+[\"“]?(.+?)[\"”]?(?:[.?!]|$)",
             r"\btitle\s+(?:it|that|this)\s+[\"“]?(.+?)[\"”]?(?:[.?!]|$)",
         )

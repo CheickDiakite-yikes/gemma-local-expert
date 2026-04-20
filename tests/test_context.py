@@ -477,3 +477,58 @@ def test_context_service_preserves_earlier_image_across_longer_transcript_with_c
     assert snapshot.selected_context_assets[0].id == "asset_image"
     assert snapshot.selected_context_summary is not None
     assert "lantern batteries" in snapshot.selected_context_summary.lower()
+
+
+def test_context_service_can_select_earlier_report_among_multiple_reports() -> None:
+    service = ConversationContextService()
+    earlier_report = ApprovalState(
+        id="approval_report_1",
+        conversation_id="conv_1",
+        turn_id="turn_report_1",
+        tool_name="create_report",
+        reason="save locally",
+        status="executed",
+        payload={
+            "title": "Architecture status report",
+            "content": "# Architecture status report\n\n- Local-first orchestrator.\n",
+        },
+        result={"title": "Architecture status report"},
+    )
+    latest_report = ApprovalState(
+        id="approval_report_2",
+        conversation_id="conv_1",
+        turn_id="turn_report_2",
+        tool_name="create_report",
+        reason="save locally",
+        status="executed",
+        payload={
+            "title": "Mining review report",
+            "content": "# Mining review report\n\n- Workers near the pit edge.\n",
+        },
+        result={"title": "Mining review report"},
+    )
+
+    snapshot = service.build(
+        turn_text="What was in the earlier architecture report again?",
+        transcript=[
+            TranscriptMessage(
+                id="msg1",
+                role="assistant",
+                content="I saved the architecture report locally.",
+                approval=earlier_report,
+            ),
+            TranscriptMessage(
+                id="msg2",
+                role="assistant",
+                content="I saved the mining review report locally.",
+                approval=latest_report,
+            ),
+        ],
+        attached_assets=[],
+    )
+
+    assert snapshot.selected_referent_kind == "saved_output"
+    assert snapshot.selected_referent_tool == "create_report"
+    assert snapshot.selected_referent_title == "Architecture status report"
+    assert snapshot.selected_referent_excerpt is not None
+    assert "local-first orchestrator" in snapshot.selected_referent_excerpt.lower()

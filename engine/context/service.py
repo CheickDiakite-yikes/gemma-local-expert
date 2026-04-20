@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from engine.contracts.api import AssetKind, AssetSummary, TranscriptMessage
@@ -75,6 +76,18 @@ _WORK_PRODUCT_REFERENCE_PHRASES = {
     "that export",
     "this export",
     "the export",
+    "that report",
+    "this report",
+    "the report",
+    "that message",
+    "this message",
+    "the message",
+    "that reply",
+    "this reply",
+    "the reply",
+    "that email",
+    "this email",
+    "the email",
     "that markdown",
     "this markdown",
     "the markdown",
@@ -104,6 +117,10 @@ _WORK_PRODUCT_NOUNS = {
     "checklist",
     "task",
     "export",
+    "report",
+    "message",
+    "reply",
+    "email",
     "markdown",
     "document",
     "file",
@@ -126,6 +143,21 @@ _WORK_PRODUCT_EDIT_TOKENS = {
     "save",
 }
 
+_EARLIER_REFERENCE_TOKENS = {
+    "earlier",
+    "previous",
+    "prior",
+    "before",
+    "original",
+}
+
+_LATEST_REFERENCE_TOKENS = {
+    "current",
+    "latest",
+    "newest",
+    "recent",
+}
+
 _TOPIC_REFERENCE_PHRASES = {
     "what did you mean by that",
     "what do you mean by that",
@@ -146,6 +178,40 @@ _REFERENT_METADATA_PREFIXES = {
     "working title:",
     "goal:",
     "workspace scope:",
+}
+
+_REFERENT_STOPWORDS = {
+    "the",
+    "a",
+    "an",
+    "that",
+    "this",
+    "again",
+    "what",
+    "was",
+    "is",
+    "in",
+    "called",
+    "title",
+    "draft",
+    "note",
+    "checklist",
+    "task",
+    "export",
+    "report",
+    "message",
+    "reply",
+    "email",
+    "markdown",
+    "document",
+    "save",
+    "before",
+    "earlier",
+    "previous",
+    "prior",
+    "current",
+    "latest",
+    "newest",
 }
 
 
@@ -242,6 +308,17 @@ class ConversationContextSnapshot:
                 lines.append(
                     f"Most recent saved output preview: {self.last_completed_output_excerpt}"
                 )
+        if len(self.recent_outputs) > 1:
+            labels = [
+                self._format_referent(
+                    kind=output.kind,
+                    tool_name=output.tool_name,
+                    title=output.title,
+                )
+                for output in self.recent_outputs[:3]
+            ]
+            if labels:
+                lines.append("Recent local outputs: " + "; ".join(labels))
         return lines
 
     def _format_referent(
@@ -267,6 +344,8 @@ class ConversationContextSnapshot:
     def _tool_label(self, tool_name: str | None) -> str:
         mapping = {
             "create_note": "note",
+            "create_report": "report",
+            "create_message_draft": "message draft",
             "create_checklist": "checklist",
             "create_task": "task",
             "export_brief": "markdown export",
@@ -597,6 +676,7 @@ class ConversationContextService:
                 matched_output = self._match_recent_output(
                     snapshot.recent_outputs,
                     requested_tools=requested_tools,
+                    lowered=lowered,
                 )
                 if matched_output:
                     return (
@@ -656,6 +736,10 @@ class ConversationContextService:
             requested_tools.add("log_observation")
         if "note" in lowered:
             requested_tools.add("create_note")
+        if "report" in lowered:
+            requested_tools.add("create_report")
+        if any(token in lowered for token in {"message", "reply", "email"}):
+            requested_tools.add("create_message_draft")
         if any(token in lowered for token in {"export", "markdown", "document"}):
             requested_tools.add("export_brief")
         return requested_tools
@@ -665,15 +749,64 @@ class ConversationContextService:
         recent_outputs: list[WorkProductReference],
         *,
         requested_tools: set[str],
+        lowered: str,
     ) -> WorkProductReference | None:
-        for output in recent_outputs:
-            if output.tool_name in requested_tools:
-                return output
-        return None
+        filtered = [
+            output
+            for output in recent_outputs
+            if not requested_tools or output.tool_name in requested_tools
+        ]
+        if not filtered:
+            return None
+
+        title_match = self._match_output_by_title_tokens(filtered, lowered)
+        if title_match is not None:
+            return title_match
+
+        if "first" in lowered or "original" in lowered:
+            return filtered[-1]
+
+        if any(token in lowered for token in _EARLIER_REFERENCE_TOKENS):
+            return filtered[1] if len(filtered) > 1 else filtered[0]
+
+        if any(token in lowered for token in _LATEST_REFERENCE_TOKENS):
+            return filtered[0]
+
+        return filtered[0]
+
+    def _match_output_by_title_tokens(
+        self,
+        outputs: list[WorkProductReference],
+        lowered: str,
+    ) -> WorkProductReference | None:
+        query_tokens = self._meaningful_referent_tokens(lowered)
+        if not query_tokens:
+            return None
+
+        best_match: WorkProductReference | None = None
+        best_score = 0
+        for output in outputs:
+            title_tokens = self._meaningful_referent_tokens(output.title or "")
+            if not title_tokens:
+                continue
+            score = len(query_tokens & title_tokens)
+            if score > best_score:
+                best_score = score
+                best_match = output
+        return best_match if best_score > 0 else None
+
+    def _meaningful_referent_tokens(self, text: str) -> set[str]:
+        return {
+            token
+            for token in re.findall(r"[a-z0-9]+", text.lower())
+            if token not in _REFERENT_STOPWORDS and len(token) > 2
+        }
 
     def _tool_label(self, tool_name: str | None) -> str:
         mapping = {
             "create_note": "note",
+            "create_report": "report",
+            "create_message_draft": "message draft",
             "create_checklist": "checklist",
             "create_task": "task",
             "export_brief": "markdown export",
@@ -726,7 +859,10 @@ class ConversationContextService:
             return True
         has_noun = any(token in lowered for token in _WORK_PRODUCT_NOUNS)
         has_edit_intent = any(token in lowered for token in _WORK_PRODUCT_EDIT_TOKENS)
-        return has_noun and has_edit_intent
+        has_recall_intent = lowered.startswith(
+            ("what was in", "what is in", "what's in", "remind me", "show me")
+        )
+        return has_noun and (has_edit_intent or has_recall_intent)
 
     def _looks_like_topic_reference(self, lowered: str) -> bool:
         if any(phrase in lowered for phrase in _TOPIC_REFERENCE_PHRASES):
