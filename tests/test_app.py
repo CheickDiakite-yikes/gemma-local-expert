@@ -460,6 +460,50 @@ def test_report_turn_requires_approval_and_persists_report_kind(tmp_path: Path) 
     transcript = transcript_response.json()
 
 
+def test_pending_report_follow_up_can_update_same_report_before_save(tmp_path: Path) -> None:
+    settings = Settings(database_path=str(tmp_path / "test-pending-report-follow-up.db"))
+    client = TestClient(create_app(settings))
+    conversation = client.post("/v1/conversations", json={"title": "Report follow up", "mode": "research"}).json()
+
+    first = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Create a report summarizing the current field assistant architecture.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+    assert first.status_code == 200
+
+    follow_up = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Keep the same report, but make it shorter before I save it.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+    assert follow_up.status_code == 200
+
+    lines = [json.loads(line) for line in follow_up.text.splitlines() if line.strip()]
+    completed = next(line for line in lines if line["type"] == "assistant.message.completed")
+    approval_event = next(line for line in lines if line["type"] == "approval.required")
+    text = completed["payload"]["text"].lower()
+    payload = approval_event["payload"]["payload"]
+
+    assert 'i updated the report "field assistant architecture report"' in text
+    assert "what are the key sections you want to keep" not in text
+    assert "## Summary" not in str(payload["content"])
+    assert "Key points:" in str(payload["content"])
+    assert "tighten or retitle the draft" not in str(payload["content"]).lower()
+
+
 def test_message_draft_turn_after_image_blocks_when_current_grounding_is_unavailable(
     tmp_path: Path,
 ) -> None:

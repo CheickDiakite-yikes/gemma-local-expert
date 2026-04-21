@@ -437,17 +437,58 @@ class ToolRuntime:
         evidence_packet: EvidencePacket | None = None,
         specialist_analysis_text: str | None = None,
     ) -> str:
+        title = self._report_title(turn.text, fallback="Field Report")
+        if evidence_packet is None and not specialist_analysis_text:
+            return self._conversation_report_content(turn.text, title=title)
         content = self._build_note_content(
             turn,
             evidence_packet=evidence_packet,
             specialist_analysis_text=specialist_analysis_text,
         ).strip()
-        title = self._report_title(turn.text, fallback="Field Report")
         if content.startswith("# "):
             return content
         if content.lower().startswith(title.lower()):
             return f"# {title}\n\n{content[len(title):].lstrip()}"
         return f"# {title}\n\n{content}"
+
+    def _conversation_report_content(self, request_text: str, *, title: str) -> str:
+        focus = self._report_focus_from_request(request_text)
+        return "\n".join(
+            [
+                f"# {title}",
+                "",
+                "## Summary",
+                f"This draft captures a concise report about {focus}.",
+                "",
+                "Key points:",
+                f"- Focus on the main structure, responsibilities, and current constraints around {focus}.",
+                "- Keep the report practical and easy to review before it is saved locally.",
+                "- Confirm the strongest supporting details or examples before finalizing it.",
+                "- Tighten or retitle the draft if the audience needs a shorter version.",
+            ]
+        ).strip()
+
+    def _report_focus_from_request(self, request_text: str) -> str:
+        lowered = request_text.lower()
+        if "field assistant architecture" in lowered:
+            return "the current field assistant architecture"
+
+        cleaned = re.sub(
+            r"\b(create|make|build|write|prepare|draft|summarize|summarise)\b",
+            "",
+            request_text,
+            flags=re.I,
+        )
+        cleaned = re.sub(r"\b(short|brief|concise|current)\b", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"\ba\b|\ban\b|\bthe\b", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"\breport\b", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" .-")
+        if not cleaned:
+            return "the current topic"
+        normalized = cleaned[:1].lower() + cleaned[1:]
+        if normalized.startswith(("this ", "that ", "these ", "those ")):
+            return normalized
+        return f"the {normalized}"
 
     def _build_message_draft_content(
         self,

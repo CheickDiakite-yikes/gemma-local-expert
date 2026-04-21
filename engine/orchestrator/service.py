@@ -783,18 +783,20 @@ class OrchestratorService:
         else:
             deterministic_reply = self._multi_output_recall_reply(
                 turn.text, conversation_context
-            ) or self._missing_output_reply(
-                turn_text=turn.text,
-                conversation_context=conversation_context,
+            ) or (
+                self._grounding_feedback_reply(
+                    tool_feedback=tool_feedback,
+                    evidence_packet=evidence_packet,
+                )
+                if tool_feedback
+                else None
             ) or self._evidence_guardrail_reply(
                 turn_text=turn.text,
                 evidence_packet=evidence_packet,
                 route=route,
-            )
-        if not deterministic_reply and tool_feedback and not planned_tool_name:
-            deterministic_reply = self._grounding_feedback_reply(
-                tool_feedback=tool_feedback,
-                evidence_packet=evidence_packet,
+            ) or self._missing_output_reply(
+                turn_text=turn.text,
+                conversation_context=conversation_context,
             )
         prompt_context = None
         if deterministic_reply:

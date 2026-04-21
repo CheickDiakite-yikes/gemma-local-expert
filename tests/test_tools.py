@@ -320,6 +320,29 @@ def test_create_report_plan_and_execute_persists_report_kind() -> None:
     assert result["kind"] == "report"
 
 
+def test_create_report_plan_without_grounding_builds_useful_scaffold() -> None:
+    runtime = ToolRuntime(_UnusedStore())
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.RESEARCH,
+        text="Create a report summarizing the current field assistant architecture.",
+    )
+
+    plan = runtime.plan(
+        request,
+        "create_report",
+        [],
+        context_assets=[],
+    )
+
+    content = str(plan.payload["content"])
+    assert plan.payload["title"] == "Field Assistant Architecture Report"
+    assert "## Summary" in content
+    assert "Key points:" in content
+    assert "current field assistant architecture" in content.lower()
+    assert "- Focus on the main structure" in content
+
+
 def test_create_message_draft_plan_builds_message_shape() -> None:
     runtime = ToolRuntime(_UnusedStore())
     request = ConversationTurnRequest(

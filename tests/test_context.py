@@ -977,6 +977,48 @@ def test_context_service_can_select_earlier_report_among_multiple_reports() -> N
     assert "local-first orchestrator" in snapshot.selected_referent_excerpt.lower()
 
 
+def test_context_service_treats_same_report_edit_as_pending_output_reference() -> None:
+    service = ConversationContextService()
+    pending_report = ApprovalState(
+        id="approval_report_pending",
+        conversation_id="conv_1",
+        turn_id="turn_report_pending",
+        tool_name="create_report",
+        reason="save locally",
+        status="pending",
+        payload={
+            "title": "Field Assistant Architecture Report",
+            "content": (
+                "# Field Assistant Architecture Report\n\n"
+                "## Summary\n"
+                "This draft captures a concise report about the current field assistant architecture.\n\n"
+                "Key points:\n"
+                "- Focus on the main structure, responsibilities, and current constraints.\n"
+                "- Keep the report practical and easy to review before it is saved locally.\n"
+                "- Confirm the strongest supporting details or examples before finalizing it.\n"
+                "- Tighten or retitle the draft if the audience needs a shorter version.\n"
+            ),
+        },
+    )
+
+    snapshot = service.build(
+        turn_text="Keep the same report, but make it shorter before I save it.",
+        transcript=[
+            TranscriptMessage(
+                id="msg1",
+                role="assistant",
+                content="I drafted a report below.",
+                approval=pending_report,
+            ),
+        ],
+        attached_assets=[],
+    )
+
+    assert snapshot.selected_referent_kind == "pending_output"
+    assert snapshot.selected_referent_tool == "create_report"
+    assert snapshot.selected_referent_title == "Field Assistant Architecture Report"
+
+
 def test_context_service_does_not_force_single_referent_for_multi_output_recall() -> None:
     service = ConversationContextService()
     report = ApprovalState(

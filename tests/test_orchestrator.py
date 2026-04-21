@@ -961,7 +961,7 @@ def test_orchestrator_can_answer_follow_up_about_pending_export_title(
         assert tighten_completed
         assert tighten_approval_events
         tighten_text = tighten_completed[0].payload["text"]
-        assert "i tightened the current markdown export draft" in tighten_text.lower()
+        assert "i updated the markdown export" in tighten_text.lower()
         assert 'field assistant architecture brief' in tighten_text.lower()
         approval_payload = tighten_approval_events[0].payload
         assert approval_payload["id"].startswith("approval_")
