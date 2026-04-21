@@ -54,9 +54,30 @@ def test_mock_runtime_uses_selected_memory_for_topic_recall_follow_up() -> None:
 
     result = runtime.generate(_request())
 
+    assert "earlier we were talking about architecture direction" in result.text.lower()
     assert "architecture direction" in result.text.lower()
     assert "one orchestrator" in result.text.lower()
     assert "grounded specialist routes" in result.text.lower()
+
+
+def test_mock_runtime_humanizes_action_topic_in_memory_recall() -> None:
+    runtime = MockAssistantRuntime()
+
+    result = runtime.generate(
+        _request(
+            user_text="Can we go back to that oral rehydration point again?",
+            selected_memory_topic="prepare oral rehydration solution in the field",
+            selected_memory_summary=(
+                "Here is a practical way to prepare oral rehydration solution in the field: "
+                "start with the core action from [ORS Guidance] Oral rehydration guidance."
+            ),
+            active_topic="Separate tangent about lunch.",
+        )
+    )
+
+    assert "earlier we were talking about how to prepare oral rehydration solution in the field" in result.text.lower()
+    assert "was about prepare oral rehydration" not in result.text.lower()
+    assert "main point was: start with the core action" in result.text.lower()
 
 
 def test_mock_runtime_ranks_matching_memory_above_newer_distractor() -> None:
@@ -92,3 +113,64 @@ def test_mock_runtime_ranks_matching_memory_above_newer_distractor() -> None:
 
     assert ranking is not None
     assert ranking.ordered_ids[0] == "memory_architecture"
+
+
+def test_mock_runtime_can_fallback_to_recent_context_memory_summary() -> None:
+    runtime = MockAssistantRuntime()
+
+    result = runtime.generate(
+        _request(
+            selected_memory_topic=None,
+            selected_memory_summary=None,
+            conversation_context_summary=(
+                "Active topic: What is the export title now?\n"
+                "Recent conversation memories: "
+                "Field Assistant Architecture Briefing: Markdown Export \"Field Assistant Architecture Briefing\" centers on: "
+                "Uses bounded routing and approvals with a local-first assistant built on Gemma. ; "
+                "Teach me how to prepare oral rehydration solution in the field: "
+                "Start with the core action from ORS guidance."
+            ),
+            user_text="Go back to that architecture point again.",
+        )
+    )
+
+    assert "field assistant architecture briefing" in result.text.lower()
+    assert "local-first assistant" in result.text.lower()
+
+
+def test_mock_runtime_saved_output_title_follow_up_avoids_draft_wording() -> None:
+    runtime = MockAssistantRuntime()
+
+    result = runtime.generate(
+        _request(
+            interaction_kind="draft_follow_up",
+            referent_kind="saved_output",
+            referent_tool="create_checklist",
+            referent_title="Departure shortage checklist",
+            user_text="What is that checklist called?",
+        )
+    )
+
+    assert 'Departure shortage checklist' in result.text
+    assert "saved checklist is titled" in result.text.lower()
+    assert "saved checklist draft" not in result.text.lower()
+
+
+def test_mock_runtime_tool_proposal_does_not_prepend_generic_chat_filler() -> None:
+    runtime = MockAssistantRuntime()
+
+    result = runtime.generate(
+        _request(
+            interaction_kind="task",
+            is_follow_up=False,
+            user_text="Create a checklist from those two shortages for tomorrow morning.",
+            proposed_tool="create_checklist",
+            approval_required=True,
+            selected_memory_topic=None,
+            selected_memory_summary=None,
+            active_topic=None,
+        )
+    )
+
+    assert "ready for your approval" in result.text.lower()
+    assert "talk normally" not in result.text.lower()

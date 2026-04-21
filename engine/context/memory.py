@@ -31,6 +31,7 @@ class ConversationMemoryService:
         asset_ids: list[str] | None,
         referent_kind: str | None,
         referent_title: str | None,
+        referent_excerpt: str | None,
         evidence_packet: EvidencePacket | None,
         workspace_summary_text: str | None,
         tool_name: str | None,
@@ -39,6 +40,8 @@ class ConversationMemoryService:
             user_text=user_text,
             assistant_text=assistant_text,
             interaction_kind=interaction_kind,
+            source_domain=source_domain,
+            referent_kind=referent_kind,
             evidence_packet=evidence_packet,
             workspace_summary_text=workspace_summary_text,
             tool_name=tool_name,
@@ -57,6 +60,7 @@ class ConversationMemoryService:
                 asset_ids=list(asset_ids or []),
                 referent_kind=referent_kind,
                 referent_title=referent_title,
+                referent_excerpt=referent_excerpt,
                 evidence_packet=evidence_packet,
                 workspace_summary_text=workspace_summary_text,
                 tool_name=tool_name,
@@ -121,6 +125,8 @@ class ConversationMemoryService:
         user_text: str,
         assistant_text: str,
         interaction_kind: str,
+        source_domain: SourceDomain | None,
+        referent_kind: str | None,
         evidence_packet: EvidencePacket | None,
         workspace_summary_text: str | None,
         tool_name: str | None,
@@ -136,11 +142,55 @@ class ConversationMemoryService:
             "let's continue",
         }:
             return False
+        if referent_kind == "missing_output":
+            return False
+        if interaction_kind == "draft_follow_up" and not tool_name:
+            return False
+        if referent_kind in {"pending_output", "saved_output"} and not tool_name:
+            return False
+        if self._is_low_signal_assistant_text(
+            assistant_text=assistant_text,
+            interaction_kind=interaction_kind,
+            source_domain=source_domain,
+            evidence_packet=evidence_packet,
+            workspace_summary_text=workspace_summary_text,
+            tool_name=tool_name,
+        ):
+            return False
         if len(" ".join(assistant_text.split())) < 48:
             return False
         if evidence_packet or workspace_summary_text or tool_name:
             return True
         return interaction_kind in {"conversation", "teaching", "draft_follow_up"}
+
+    def _is_low_signal_assistant_text(
+        self,
+        *,
+        assistant_text: str,
+        interaction_kind: str,
+        source_domain: SourceDomain | None,
+        evidence_packet: EvidencePacket | None,
+        workspace_summary_text: str | None,
+        tool_name: str | None,
+    ) -> bool:
+        cleaned = " ".join(assistant_text.lower().split())
+        if not cleaned:
+            return True
+        if tool_name or evidence_packet or workspace_summary_text:
+            return False
+        if source_domain in {SourceDomain.IMAGE, SourceDomain.VIDEO, SourceDomain.DOCUMENT}:
+            return False
+        if interaction_kind not in {"conversation", "draft_follow_up"}:
+            return False
+        low_signal_prefixes = (
+            "hi. we can talk normally here",
+            "yes. we can talk normally here",
+            "to build on what we were just discussing",
+            "to build on the last point",
+            "yes. we can stay with what we were just discussing",
+            "yes. we can stay with the earlier thread",
+        )
+        return cleaned.startswith(low_signal_prefixes)
 
     def _memory_kind(
         self,

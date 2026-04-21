@@ -1662,8 +1662,45 @@ class SQLiteStore:
         label_overlap = sum(1 for token in tokens if token in label_text)
         body_overlap = sum(1 for token in tokens if token in body_text)
         exact_label_phrase = 1.0 if label_text and label_text in query_text else 0.0
+        score = float((label_overlap * 2.0) + body_overlap + (exact_label_phrase * 3.0))
 
-        return float((label_overlap * 2.0) + body_overlap + (exact_label_phrase * 3.0))
+        guidance_intent = any(
+            phrase in query_text
+            for phrase in {
+                "teach me",
+                "show me how",
+                "walk me through",
+                "help me understand",
+                "explain how",
+                "how do i",
+                "how to",
+                "prepare",
+            }
+        )
+        if guidance_intent:
+            if "guidance" in label_text:
+                score += 4.0
+            if "guidance" in body_text:
+                score += 1.5
+            if "checklist" in label_text:
+                score -= 2.0
+            if "template" in label_text:
+                score -= 1.5
+
+        checklist_intent = any(
+            phrase in query_text
+            for phrase in {
+                "checklist",
+                "before departure",
+                "for tomorrow",
+                "pack",
+                "departure",
+            }
+        )
+        if checklist_intent and "checklist" in label_text:
+            score += 3.0
+
+        return score
 
     def _cosine_similarity(self, left: list[float], right: list[float]) -> float:
         if len(left) != len(right):

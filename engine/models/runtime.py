@@ -73,6 +73,7 @@ class ConversationMemoryRequest:
     asset_ids: list[str]
     referent_kind: str | None
     referent_title: str | None
+    referent_excerpt: str | None
     evidence_packet: EvidencePacket | None
     workspace_summary_text: str | None
     tool_name: str | None
@@ -131,6 +132,8 @@ class MockAssistantRuntime:
             lines.append(self._specialist_response(request))
         elif request.citations:
             lines.append(self._retrieval_response(request))
+        elif request.proposed_tool or request.tool_result:
+            pass
         else:
             lines.append(self._general_local_response(request))
 
@@ -176,13 +179,13 @@ class MockAssistantRuntime:
 
     def _retrieval_response(self, request: AssistantGenerationRequest) -> str:
         top_labels = ", ".join(citation.label for citation in request.citations[:2])
-        primary = request.citations[0]
         lowered = request.user_text.lower().strip()
+        primary = self._preferred_retrieval_primary(request.citations, lowered)
 
         if request.interaction_kind == "teaching":
             topic = self._topic_from_request(request.user_text)
             return (
-                f"Here is a practical way to approach {topic}: start with the core action from "
+                f"{self._teaching_intro(topic)} start with the core action from "
                 f"[{primary.label}] {primary.excerpt}"
             )
 
@@ -198,6 +201,52 @@ class MockAssistantRuntime:
         return (
             f"I found relevant local material in {top_labels}. "
             f"{self._summary_from_sources(request.citations)}"
+        )
+
+    def _preferred_retrieval_primary(
+        self,
+        citations: list[SearchResultItem],
+        lowered: str,
+    ) -> SearchResultItem:
+        if not citations:
+            raise ValueError("citations must not be empty")
+        if not self._looks_like_guidance_request(lowered):
+            return citations[0]
+
+        best = citations[0]
+        best_score = -10.0
+        for index, citation in enumerate(citations):
+            score = -index
+            label_text = citation.label.lower()
+            excerpt_text = citation.excerpt.lower()
+            if "guidance" in label_text:
+                score += 6
+            if "guidance" in excerpt_text:
+                score += 2
+            if "checklist" in label_text:
+                score -= 3
+            if "template" in label_text:
+                score -= 2
+            if "oral rehydration" in excerpt_text:
+                score += 2
+            if score > best_score:
+                best = citation
+                best_score = score
+        return best
+
+    def _looks_like_guidance_request(self, lowered: str) -> bool:
+        return any(
+            phrase in lowered
+            for phrase in {
+                "teach me",
+                "show me how",
+                "walk me through",
+                "help me understand",
+                "explain how",
+                "how do i",
+                "how to",
+                "prepare",
+            }
         )
 
     def _specialist_response(self, request: AssistantGenerationRequest) -> str:
@@ -338,6 +387,34 @@ class MockAssistantRuntime:
             prior_topic = request.active_topic or self._recent_topic(
                 request.messages, request.user_text
             )
+            if not request.selected_memory_summary and any(
+                phrase in lowered
+                for phrase in {
+                    "what was the main point again",
+                    "what was the point again",
+                    "remind me what we were saying",
+                    "what were we saying",
+                    "bring that up again",
+                    "go back to that",
+                    "come back to that",
+                    "go deeper on that",
+                }
+            ):
+                fallback_memory = self._recent_memory_from_context_summary(
+                    request.conversation_context_summary or "",
+                    request.user_text,
+                )
+                if fallback_memory is not None:
+                    topic, summary = fallback_memory
+                    if topic:
+                        return (
+                            f"Yes. Earlier we were talking about {self._memory_topic_for_recall(topic)}. "
+                            f"The main point was: {self._memory_summary_for_recall(summary)}"
+                        )
+                    return (
+                        f"Yes. The main point there was: "
+                        f"{self._memory_summary_for_recall(summary)}"
+                    )
             if any(
                 phrase in lowered
                 for phrase in {
@@ -353,10 +430,13 @@ class MockAssistantRuntime:
             ) and request.selected_memory_summary:
                 if request.selected_memory_topic:
                     return (
-                        f"Yes. The thread we should pick back up is {request.selected_memory_topic}. "
-                        f"The main point was: {request.selected_memory_summary}"
+                        f"Yes. Earlier we were talking about {self._memory_topic_for_recall(request.selected_memory_topic)}. "
+                        f"The main point was: {self._memory_summary_for_recall(request.selected_memory_summary)}"
                     )
-                return f"Yes. The main point there was: {request.selected_memory_summary}"
+                return (
+                    f"Yes. The main point there was: "
+                    f"{self._memory_summary_for_recall(request.selected_memory_summary)}"
+                )
             if "what do you mean by that" in lowered:
                 return (
                     "I mean we can keep the conversation natural, and only switch into local retrieval, analysis, or saved actions when that actually helps."
@@ -375,7 +455,7 @@ class MockAssistantRuntime:
         if request.interaction_kind == "teaching":
             topic = self._topic_from_request(request.user_text)
             return (
-                f"Here is a practical way to approach {topic}: start with the immediate goal, "
+                f"{self._teaching_intro(topic)} start with the immediate goal, "
                 "break it into a few simple steps, explain the first step plainly, and check understanding before adding detail."
             )
         return (
@@ -392,31 +472,23 @@ class MockAssistantRuntime:
         if request.referent_kind not in {"pending_output", "saved_output"}:
             return None
 
-        title = request.referent_title or "Untitled draft"
-        label = self._tool_label(request.referent_tool or "")
+        draft_label = self._tool_label(request.referent_tool or "")
+        saved_label = self._saved_output_label(request.referent_tool or "")
+        title = request.referent_title or (
+            "Untitled draft" if request.referent_kind == "pending_output" else "Untitled output"
+        )
         recall_intent = lowered.startswith(
             ("what was in", "what is in", "what's in", "remind me", "show me")
         )
+        title_intent = self._is_work_product_title_query(lowered)
 
-        if any(
-            phrase in lowered
-            for phrase in {
-                "what title are you using",
-                "what title is that",
-                "what is the draft called",
-                "what is that draft called",
-                "what is the title now",
-                "what is the draft title",
-                "what did you call that",
-                "what are you calling that",
-            }
-        ):
+        if title_intent:
             if request.referent_kind == "pending_output":
                 return (
-                    f'The current {label} draft is titled "{title}". '
+                    f'The current {draft_label} is titled "{title}". '
                     "If you want, I can help tighten the title or the body before you save it."
                 )
-            return f'The most recent saved {label} is titled "{title}".'
+            return f'The most recent saved {saved_label} is titled "{title}".'
 
         if any(
             phrase in lowered
@@ -432,7 +504,7 @@ class MockAssistantRuntime:
             }
         ):
             if request.referent_kind == "pending_output":
-                revised_bits = [f'I tightened the current {label} draft.']
+                revised_bits = [f'I tightened the current {draft_label}.']
                 if title:
                     revised_bits.append(f'It is now titled "{title}".')
                 if request.referent_excerpt:
@@ -442,7 +514,7 @@ class MockAssistantRuntime:
                 revised_bits.append("It is still waiting for your approval.")
                 return " ".join(revised_bits)
             return (
-                f'The most recent saved {label} is "{title}". '
+                f'The most recent saved {saved_label} is "{title}". '
                 "If you want a revised version, I can prepare an updated draft."
             )
 
@@ -474,12 +546,17 @@ class MockAssistantRuntime:
             }
         ) or recall_intent:
             if request.referent_excerpt:
+                if request.referent_kind == "pending_output":
+                    return (
+                        f'The {draft_label} is "{title}". '
+                        f"It currently centers on: {request.referent_excerpt}"
+                    )
                 return (
-                    f'The {label} is "{title}". '
+                    f'The {saved_label} is "{title}". '
                     f"It currently centers on: {request.referent_excerpt}"
                 )
             return (
-                f'The {label} is "{title}". '
+                f'The {(draft_label if request.referent_kind == "pending_output" else saved_label)} is "{title}". '
                 "I can also summarize it more tightly or prepare a revised version if you want."
             )
 
@@ -509,8 +586,11 @@ class MockAssistantRuntime:
 
         by_label = {label: title for label, title in outputs}
         parts: list[str] = []
-        if "report" in mentioned_labels and by_label.get("report"):
-            parts.append(f'The earlier report was "{by_label["report"]}".')
+        if "report" in mentioned_labels:
+            if by_label.get("report"):
+                parts.append(f'The earlier report was "{by_label["report"]}".')
+            else:
+                parts.append("There is no current report yet.")
         if "checklist" in mentioned_labels and by_label.get("checklist"):
             parts.append(f'The checklist was "{by_label["checklist"]}".')
         if "markdown export" in mentioned_labels and by_label.get("markdown export"):
@@ -518,6 +598,41 @@ class MockAssistantRuntime:
         if not parts:
             return None
         return " ".join(parts)
+
+    def _is_work_product_title_query(self, lowered: str) -> bool:
+        explicit_phrases = {
+            "what title are you using",
+            "what title is that",
+            "what is the draft called",
+            "what is that draft called",
+            "what is the title now",
+            "what is the draft title",
+            "what did you call that",
+            "what are you calling that",
+            "what is that checklist called",
+            "what is this checklist called",
+            "what is the checklist called",
+            "what is that report called",
+            "what is this report called",
+            "what is the report called",
+            "what is that export called",
+            "what is this export called",
+            "what is the export called",
+            "what's the export title now",
+            "what is the export title now",
+            "what's the checklist title now",
+            "what is the checklist title now",
+        }
+        if any(phrase in lowered for phrase in explicit_phrases):
+            return True
+
+        has_reference = any(token in lowered for token in {"that", "this", "the", "current", "latest", "newer"})
+        has_output = any(
+            token in lowered
+            for token in {"draft", "checklist", "report", "export", "note", "task", "message", "email", "document"}
+        )
+        has_title_word = any(token in lowered for token in {"title", "called", "name", "named"})
+        return has_reference and has_output and has_title_word
 
     def _recent_outputs_from_summary(self, summary: str) -> list[tuple[str, str]]:
         if not summary:
@@ -527,6 +642,53 @@ class MockAssistantRuntime:
             summary,
             flags=re.IGNORECASE,
         )
+
+    def _recent_memory_from_context_summary(
+        self,
+        summary: str,
+        user_text: str,
+    ) -> tuple[str | None, str] | None:
+        if not summary:
+            return None
+        selected_match = re.search(r"Selected conversation memory:\s*(.+)", summary)
+        candidates: list[tuple[str | None, str]] = []
+        if selected_match:
+            parsed = self._parse_memory_label(selected_match.group(1).strip())
+            if parsed is not None:
+                candidates.append(parsed)
+        recent_match = re.search(r"Recent conversation memories:\s*(.+)", summary)
+        if recent_match:
+            for chunk in recent_match.group(1).split(" ; "):
+                parsed = self._parse_memory_label(chunk.strip())
+                if parsed is not None:
+                    candidates.append(parsed)
+        if not candidates:
+            return None
+
+        query_tokens = _ranking_tokens(user_text)
+        best_candidate: tuple[str | None, str] | None = None
+        best_score = 0
+        for index, candidate in enumerate(candidates):
+            topic, memory_summary = candidate
+            searchable = " ".join(part for part in [topic or "", memory_summary] if part)
+            score = len(query_tokens & _ranking_tokens(searchable)) * 8
+            score += max(0, 4 - index)
+            if score > best_score:
+                best_score = score
+                best_candidate = candidate
+        return best_candidate if best_score > 0 else candidates[0]
+
+    def _parse_memory_label(self, text: str) -> tuple[str | None, str] | None:
+        if not text:
+            return None
+        if ":" not in text:
+            return None
+        topic, summary = text.split(":", 1)
+        cleaned_topic = topic.strip() or None
+        cleaned_summary = summary.strip()
+        if not cleaned_summary:
+            return None
+        return cleaned_topic, cleaned_summary
 
     def _workspace_response(self, text: str) -> str:
         cleaned = text.strip()
@@ -546,6 +708,64 @@ class MockAssistantRuntime:
             return "Here is a concise briefing:\n\n" + "\n\n".join(remaining)
 
         return "\n\n".join(remaining)
+
+    def _memory_summary_for_recall(self, summary: str) -> str:
+        cleaned = " ".join(summary.split())
+        cleaned = re.sub(
+            r"^Here is a practical way to (?:approach )?[^:]+:\s*",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        return cleaned
+
+    def _memory_topic_for_recall(self, topic: str) -> str:
+        cleaned = topic.strip().rstrip(".")
+        lowered = cleaned.lower()
+        if lowered.startswith("how to "):
+            return cleaned
+        if lowered.startswith(
+            (
+                "prepare ",
+                "build ",
+                "create ",
+                "write ",
+                "review ",
+                "compare ",
+                "pack ",
+                "run ",
+                "manage ",
+                "set ",
+                "organize ",
+                "organise ",
+                "draft ",
+                "explain ",
+                "analyze ",
+                "analyse ",
+            )
+        ):
+            return f"how to {cleaned}"
+        return cleaned
+
+    def _teaching_intro(self, topic: str) -> str:
+        first = topic.strip().split(" ", 1)[0].lower() if topic.strip() else ""
+        if first in {
+            "prepare",
+            "build",
+            "create",
+            "write",
+            "review",
+            "compare",
+            "explain",
+            "pack",
+            "run",
+            "manage",
+            "set",
+            "organize",
+            "draft",
+        }:
+            return f"Here is a practical way to {topic}:"
+        return f"Here is a practical way to approach {topic}:"
 
     def _join_sections(self, sections: list[str]) -> str:
         cleaned = [section.strip() for section in sections if section and section.strip()]
@@ -571,6 +791,19 @@ class MockAssistantRuntime:
             "create_message_draft": "message draft",
             "create_checklist": "checklist draft",
             "create_task": "task draft",
+            "log_observation": "saved observation",
+            "export_brief": "markdown export draft",
+            "generate_heatmap_overlay": "heatmap overlay",
+        }
+        return mapping.get(tool_name, tool_name.replace("_", " "))
+
+    def _saved_output_label(self, tool_name: str) -> str:
+        mapping = {
+            "create_note": "note",
+            "create_report": "report",
+            "create_message_draft": "message draft",
+            "create_checklist": "checklist",
+            "create_task": "task",
             "log_observation": "saved observation",
             "export_brief": "markdown export",
             "generate_heatmap_overlay": "heatmap overlay",
@@ -655,12 +888,7 @@ class MockAssistantRuntime:
         return None
 
     def _topic_from_request(self, text: str) -> str:
-        cleaned = text.strip().rstrip("?.! ")
-        lowered = cleaned.lower()
-        for prefix in ("teach me", "walk me through", "show me how", "how do i", "how to", "help me understand"):
-            if lowered.startswith(prefix):
-                cleaned = cleaned[len(prefix):].strip(" :,-")
-                break
+        cleaned = _normalized_memory_topic_text(text)
         return cleaned or "this"
 
     def _is_supportive_request(self, lowered: str) -> bool:
@@ -942,18 +1170,44 @@ def _heuristic_memory_ranking(
 def _memory_topic(request: ConversationMemoryRequest) -> str | None:
     if request.referent_title:
         return _trim_memory_text(request.referent_title, 96)
-    cleaned = request.user_text.strip().splitlines()[0].rstrip("?.! ")
+    cleaned = _normalized_memory_topic_text(request.user_text)
     lowered = cleaned.lower()
     if cleaned and not _is_generic_memory_follow_up(lowered):
         return _trim_memory_text(cleaned, 96)
     if request.active_topic:
-        return _trim_memory_text(request.active_topic, 96)
+        return _trim_memory_text(_normalized_memory_topic_text(request.active_topic), 96)
     return _trim_memory_text(cleaned, 96) if cleaned else None
 
 
 def _memory_summary(request: ConversationMemoryRequest) -> str | None:
     if request.tool_name and request.referent_title:
         label = _tool_memory_label(request.tool_name)
+        if request.referent_excerpt:
+            grounded = _trim_memory_text(request.referent_excerpt.strip(), 140)
+            return _trim_memory_text(
+                f'{label.title()} "{request.referent_title}" centers on: {grounded}',
+                180,
+            )
+        if request.evidence_packet and request.evidence_packet.summary.strip():
+            grounded = _trim_memory_text(request.evidence_packet.summary.strip(), 140)
+            return _trim_memory_text(
+                f'{label.title()} "{request.referent_title}" centers on: {grounded}',
+                180,
+            )
+        if request.workspace_summary_text:
+            cleaned_workspace = _workspace_memory_summary(request.workspace_summary_text)
+            grounded = _trim_memory_text(cleaned_workspace, 140)
+            return _trim_memory_text(
+                f'{label.title()} "{request.referent_title}" centers on: {grounded}',
+                180,
+            )
+        assistant_excerpt = _assistant_output_memory_excerpt(request.assistant_text)
+        if assistant_excerpt:
+            grounded = _trim_memory_text(assistant_excerpt, 140)
+            return _trim_memory_text(
+                f'{label.title()} "{request.referent_title}" centers on: {grounded}',
+                180,
+            )
         return _trim_memory_text(
             f'{label.title()} "{request.referent_title}" is the current work product for this thread.',
             180,
@@ -1043,6 +1297,66 @@ def _tool_memory_label(tool_name: str) -> str:
         "log_observation": "observation",
     }
     return mapping.get(tool_name, tool_name.replace("_", " "))
+
+
+def _normalized_memory_topic_text(text: str) -> str:
+    cleaned = text.strip().splitlines()[0].rstrip("?.! ")
+    prefixes = (
+        "teach me",
+        "walk me through",
+        "show me how",
+        "how do i",
+        "how to",
+        "help me understand",
+        "explain how",
+    )
+    changed = True
+    while changed and cleaned:
+        changed = False
+        lowered = cleaned.lower()
+        for prefix in prefixes:
+            if lowered.startswith(prefix):
+                cleaned = cleaned[len(prefix) :].strip(" :,-")
+                changed = True
+                break
+    return cleaned
+
+
+def _workspace_memory_summary(text: str) -> str:
+    paragraphs = [
+        paragraph.strip()
+        for paragraph in re.split(r"\n\s*\n", text.strip())
+        if paragraph.strip()
+    ]
+    if not paragraphs:
+        return text.strip()
+
+    kept: list[str] = []
+    for paragraph in paragraphs:
+        lowered = paragraph.lower()
+        if lowered.startswith("i reviewed "):
+            continue
+        if lowered.startswith("here is a concise briefing:"):
+            continue
+        if lowered.startswith("files reviewed:"):
+            continue
+        kept.append(paragraph)
+    if not kept:
+        kept = paragraphs
+    return " ".join(kept)
+
+
+def _assistant_output_memory_excerpt(text: str) -> str | None:
+    compact = " ".join(text.split())
+    patterns = (
+        r"(?:it now centers on:|it currently centers on:)\s*(.+?)(?:\s+it is still waiting for your approval\.?|$)",
+        r"(?:the markdown export draft is|the report draft is|the checklist draft is|the note draft is)\s*\"[^\"]+\"\.\s*it currently centers on:\s*(.+?)(?:$)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, compact, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return None
 
 
 def _trim_memory_text(text: str, limit: int) -> str:

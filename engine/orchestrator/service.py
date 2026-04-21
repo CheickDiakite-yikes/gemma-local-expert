@@ -156,6 +156,7 @@ class OrchestratorService:
         prepared_tool_name: str | None = None
         prepared_tool_plan = None
         memory_referent_title: str | None = None
+        memory_referent_excerpt: str | None = None
         active_pending_approval = self._pending_approval_for_context(conversation_context)
         approval_required = policy.approval_required or bool(
             active_pending_approval and active_pending_approval.status == "pending"
@@ -197,6 +198,9 @@ class OrchestratorService:
             )
             if revised_approval:
                 active_pending_approval = revised_approval
+                memory_referent_excerpt = getattr(
+                    conversation_context, "selected_referent_excerpt", None
+                )
                 approval_required = True
                 agent_run = (
                     self.store.get_agent_run(revised_approval.run_id)
@@ -257,6 +261,7 @@ class OrchestratorService:
                 workspace_summary=None,
                 tool_name=None,
                 referent_title=None,
+                referent_excerpt=None,
             )
             return
 
@@ -609,6 +614,7 @@ class OrchestratorService:
                 context_summary=conversation_context.selected_context_summary,
             )
             memory_referent_title = self._tool_plan_title(tool_plan.payload)
+            memory_referent_excerpt = self._tool_plan_excerpt(tool_plan.payload)
             yield ConversationStreamEvent(
                 type=StreamEventType.TOOL_PROPOSED,
                 conversation_id=turn.conversation_id,
@@ -866,8 +872,9 @@ class OrchestratorService:
             conversation_context=conversation_context,
             evidence_packet=evidence_packet,
             workspace_summary=workspace_summary,
-            tool_name=planned_tool_name or conversation_context.selected_referent_tool,
+            tool_name=planned_tool_name,
             referent_title=memory_referent_title,
+            referent_excerpt=memory_referent_excerpt,
         )
 
     def _multi_output_recall_reply(
@@ -901,8 +908,11 @@ class OrchestratorService:
                 typed_outputs[label] = output.title
 
         parts: list[str] = []
-        if "report" in requested_labels and typed_outputs.get("report"):
-            parts.append(f'The earlier report is titled "{typed_outputs["report"]}".')
+        if "report" in requested_labels:
+            if typed_outputs.get("report"):
+                parts.append(f'The earlier report is titled "{typed_outputs["report"]}".')
+            else:
+                parts.append("There is no current report yet.")
         if "checklist" in requested_labels and typed_outputs.get("checklist"):
             parts.append(f'The checklist is titled "{typed_outputs["checklist"]}".')
         if "markdown export" in requested_labels and typed_outputs.get("markdown export"):
@@ -1420,6 +1430,7 @@ class OrchestratorService:
         workspace_summary: str | None,
         tool_name: str | None,
         referent_title: str | None,
+        referent_excerpt: str | None,
     ) -> None:
         source_domain = self._memory_source_domain(
             evidence_packet=evidence_packet,
@@ -1446,6 +1457,10 @@ class OrchestratorService:
                     referent_title
                     or getattr(conversation_context, "selected_referent_title", None)
                 ),
+                referent_excerpt=(
+                    referent_excerpt
+                    or getattr(conversation_context, "selected_referent_excerpt", None)
+                ),
                 evidence_packet=evidence_packet,
                 workspace_summary_text=workspace_summary,
                 tool_name=tool_name,
@@ -1470,7 +1485,6 @@ class OrchestratorService:
         for candidate in (
             getattr(conversation_context, "selected_referent_kind", None),
             getattr(conversation_context, "selected_context_kind", None),
-            getattr(conversation_context, "active_domain", None),
         ):
             mapped = self._source_domain_from_label(candidate)
             if mapped is not None:
@@ -1499,6 +1513,10 @@ class OrchestratorService:
         if isinstance(title, str) and title.strip():
             return title.strip()
         return None
+
+    def _tool_plan_excerpt(self, payload: dict[str, object] | None) -> str | None:
+        _, excerpt = self.context_service.describe_payload(payload)
+        return excerpt
 
     def _workspace_evidence_packet(
         self,

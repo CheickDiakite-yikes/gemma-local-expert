@@ -92,6 +92,7 @@ def main() -> None:
         pending_approvals: list[dict[str, object]] = []
         turn_texts: list[str] = []
         turn_outputs: list[str] = []
+        completed_texts: list[str] = []
 
         for index, (text, asset_ids) in enumerate(turns, start=1):
             response = client.post(
@@ -110,6 +111,19 @@ def main() -> None:
             print(f"\nTURN {index}: {text}")
             print(response.text)
 
+            completed_line = next(
+                (
+                    json.loads(line)
+                    for line in response.text.splitlines()
+                    if '"type":"assistant.message.completed"' in line
+                ),
+                None,
+            )
+            if completed_line:
+                completed_texts.append(completed_line["payload"]["text"])
+            else:
+                completed_texts.append("")
+
             approval_line = next(
                 (
                     json.loads(line)
@@ -125,6 +139,24 @@ def main() -> None:
         transcript = client.get(f"/v1/conversations/{conversation['id']}/messages").json()
         runs = client.get(f"/v1/conversations/{conversation['id']}/runs").json()
         memories = app.state.container.store.list_conversation_memories(conversation["id"])
+
+        assert "[ORS Guidance]" in completed_texts[1]
+        assert "approach how to" not in completed_texts[1].lower()
+        assert "teach me how" not in completed_texts[4].lower()
+        assert "earlier we were talking about how to prepare oral rehydration solution in the field" in completed_texts[4].lower()
+        assert "oral rehydration solution in the field" in completed_texts[4].lower()
+
+        memory_summaries = [memory.summary.lower() for memory in memories]
+        assert any(
+            "lantern batteries" in summary and "current work product" not in summary
+            for summary in memory_summaries
+        )
+        assert any(
+            "markdown export" in summary
+            and "i reviewed" not in summary
+            and "files reviewed" not in summary
+            for summary in memory_summaries
+        )
 
         print("\nMEMORIES")
         print(
