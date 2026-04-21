@@ -1564,11 +1564,21 @@ Recommended for:
 Use this when you have the local model assets and want the richer path:
 
 ```bash
-FIELD_ASSISTANT_ASSISTANT_BACKEND=mlx \
-FIELD_ASSISTANT_EMBEDDING_BACKEND=mlx \
-FIELD_ASSISTANT_SPECIALIST_BACKEND=auto \
-uv run uvicorn engine.api.app:create_app --factory --reload
+uv run python scripts/check_full_local_tracking.py
+bash scripts/run_full_local_server.sh
 ```
+
+`check_full_local_tracking.py` tells you whether the current environment can actually run
+local SAM tracking/isolation or whether the server will still fall back to sampled-frame
+review. It checks:
+
+- whether `ffmpeg`/`ffprobe` are available for fallback review
+- whether the `mlx_vlm` SAM runtime is importable
+- whether a local `sam3.1` snapshot is actually cached or pointed to by
+  `FIELD_ASSISTANT_TRACKING_MODEL_SOURCE`
+
+If the checker says the stack is not ready, the app should be treated as fallback-only for
+video work even if the tracking backend is set to `auto` or `mlx`.
 
 ### Vision-focused live profile
 

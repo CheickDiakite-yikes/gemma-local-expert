@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
+import re
 
 from engine.agent.service import WorkspaceAgentError, WorkspaceAgentService
 from engine.audit.service import AuditService
@@ -902,12 +903,33 @@ class OrchestratorService:
         if (
             evidence_packet.source_domain == SourceDomain.VIDEO
             and any(
-                token in lowered
+                self._contains_grounding_term(lowered, token)
                 for token in {"sam", "track", "tracking", "isolation", "isolate", "segment"}
             )
             and evidence_packet.execution_mode != ExecutionMode.FULL
         ):
             return self._tracking_unavailable_reply(evidence_packet)
+
+        if (
+            evidence_packet.source_domain == SourceDomain.VIDEO
+            and len(evidence_packet.asset_ids) > 1
+            and any(
+                token in lowered
+                for token in {
+                    "both videos",
+                    "compare both",
+                    "compare the videos",
+                    "different from the first",
+                    "same tools",
+                    "same process",
+                    "same processes",
+                    "same weapon",
+                    "weapon-like",
+                    "in both",
+                }
+            )
+        ):
+            return self._video_comparison_reply(turn_text, evidence_packet)
 
         if evidence_packet.source_domain == SourceDomain.DOCUMENT and any(
             token in lowered
@@ -952,6 +974,47 @@ class OrchestratorService:
             "If you want, I can inspect one sampled timestamp more closely or keep comparing the videos conservatively from the fallback evidence."
         )
         return "\n".join(lines)
+
+    def _video_comparison_reply(
+        self,
+        turn_text: str,
+        evidence_packet: EvidencePacket,
+    ) -> str:
+        lowered = turn_text.lower()
+        fact_lines: list[str] = []
+        for fact in evidence_packet.facts:
+            summary = fact.summary.strip()
+            if not summary:
+                continue
+            refs = ", ".join(ref.ref for ref in fact.refs[:2] if ref.ref)
+            if refs:
+                summary = f"{summary} ({refs})"
+            fact_lines.append(summary)
+
+        lines = ["I compared both videos conservatively from separate local evidence packets."]
+        if any(
+            token in lowered
+            for token in {"weapon", "weapon-like", "tools", "tool", "process", "processes"}
+        ):
+            lines.append(
+                "I cannot confirm the same specific tools, weapon-like items, or repeated processes in both videos from this fallback evidence alone."
+            )
+        if "different" in lowered or "difference" in lowered:
+            lines.append(
+                "The strongest grounded difference right now is in the sampled visual/text evidence from each clip, not in any confirmed shared object label."
+            )
+        if fact_lines:
+            lines.append("Grounded comparison points:")
+            lines.extend(f"- {line}" for line in fact_lines[:4])
+        if evidence_packet.uncertainties:
+            lines.append("Limits:")
+            lines.extend(f"- {item}" for item in evidence_packet.uncertainties[:2])
+        return "\n".join(lines)
+
+    def _contains_grounding_term(self, lowered: str, term: str) -> bool:
+        if " " in term:
+            return term in lowered
+        return re.search(rf"\b{re.escape(term)}\b", lowered) is not None
 
     def _document_grounded_reply(
         self,

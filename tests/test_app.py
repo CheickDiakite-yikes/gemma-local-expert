@@ -649,6 +649,24 @@ def test_capabilities_endpoint_reports_runtime_truth(tmp_path: Path) -> None:
     assert "ffmpeg_available" in payload
 
 
+def test_capabilities_endpoint_marks_ffmpeg_profile_as_fallback_only(tmp_path: Path) -> None:
+    settings = Settings(
+        database_path=str(tmp_path / "test-capabilities-ffmpeg.db"),
+        workspace_root=str(tmp_path),
+        tracking_backend="ffmpeg",
+    )
+    client = TestClient(create_app(settings))
+
+    response = client.get("/v1/system/capabilities")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["tracking_backend"] == "ffmpeg"
+    assert payload["tracking_execution_available"] is False
+    assert payload["isolation_execution_available"] is False
+    assert payload["video_analysis_fallback_only"] is True
+
+
 def test_general_conversation_turn_reads_naturally_without_retrieval_disclaimer(
     tmp_path: Path,
 ) -> None:

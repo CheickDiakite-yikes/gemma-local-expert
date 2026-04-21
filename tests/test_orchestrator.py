@@ -345,6 +345,89 @@ def test_orchestrator_tracking_request_uses_truthful_unavailable_reply(
         container.store.close()
 
 
+def test_orchestrator_video_comparison_reply_stays_grounded_to_both_packets(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(database_path=str(tmp_path / "orchestrator-video-compare.db"))
+    container = build_container(settings)
+    try:
+        class FakeVideoRuntime:
+            backend_name = "fake-video"
+
+            def analyze(self, request):
+                return VideoAnalysisResult(
+                    text="Fallback video comparison only.",
+                    backend="fake-video",
+                    model_name=request.tracking_model_name,
+                    model_source="/tmp/fake-sam",
+                    available=True,
+                    evidence_packet=EvidencePacket(
+                        source_domain=SourceDomain.VIDEO,
+                        asset_ids=[asset.asset_id for asset in request.assets],
+                        profile=RuntimeProfile.LOW_MEMORY,
+                        execution_mode=ExecutionMode.FALLBACK,
+                        grounding_status=GroundingStatus.PARTIAL,
+                        summary="Prepared separate local evidence for both videos.",
+                        facts=[
+                            EvidenceFact(
+                                summary=(
+                                    "Prepared separate local evidence for first.mov, second.mov so they can be contrasted conservatively without claiming synchronized tracking."
+                                ),
+                                refs=[
+                                    EvidenceRef(label="first.mov", ref="00:16"),
+                                    EvidenceRef(label="second.mov", ref="00:11"),
+                                ],
+                            ),
+                            EvidenceFact(
+                                summary="first.mov: Visible on-screen text from sampled frames includes \"Vous définissez vous-même\".",
+                                refs=[EvidenceRef(label="first.mov sample", ref="01:05")],
+                            ),
+                            EvidenceFact(
+                                summary="second.mov: Visible on-screen text from sampled frames includes \": TIMES ARCHIVES\".",
+                                refs=[EvidenceRef(label="second.mov sample", ref="00:44")],
+                            ),
+                        ],
+                        uncertainties=[
+                            "Cross-video comparison is limited to per-video sampled evidence and derived artifacts; no synchronized tracking or isolation ran across the pair.",
+                            "No local pixel-level object or action recognizer ran on the sampled frames in this profile.",
+                        ],
+                    ),
+                )
+
+        container.orchestrator.video_runtime = FakeVideoRuntime()
+        conversation = container.store.create_conversation(
+            ConversationCreateRequest(title="Video Compare", mode=AssistantMode.GENERAL)
+        )
+        first_video = tmp_path / "first.mov"
+        second_video = tmp_path / "second.mov"
+        first_video.write_bytes(b"first-video")
+        second_video.write_bytes(b"second-video")
+        ingest_result = container.store.ingest_assets(
+            AssetIngestRequest(source_paths=[str(first_video), str(second_video)])
+        )
+
+        request = ConversationTurnRequest(
+            conversation_id=conversation.id,
+            mode=AssistantMode.GENERAL,
+            text="Compare both videos. Are the same tools, processes, or possible weapon-like items present in both?",
+            asset_ids=ingest_result.asset_ids,
+        )
+
+        events = asyncio.run(_collect_events(container, request))
+        completed = [
+            event for event in events if event.type == StreamEventType.ASSISTANT_MESSAGE_COMPLETED
+        ]
+        assert completed
+        text = completed[0].payload["text"].lower()
+        assert "compared both videos conservatively" in text
+        assert "cannot confirm the same specific tools" in text
+        assert "first.mov" in text
+        assert "second.mov" in text
+        assert "synchronized tracking" in text
+    finally:
+        container.store.close()
+
+
 def test_orchestrator_document_turn_stays_grounded_when_extraction_is_partial(
     tmp_path: Path,
 ) -> None:

@@ -8,6 +8,7 @@ from engine.api.dependencies import ServiceContainer, get_container
 from engine.contracts.api import SystemCapabilities, ToolDescriptor
 from engine.models.document import document_extraction_available
 from engine.models.sources import resolve_local_model_source
+from engine.models.video import detect_tracking_runtime_status
 
 router = APIRouter(tags=["system"])
 
@@ -44,11 +45,10 @@ async def capabilities(
         and settings.specialist_backend == "ocr"
         and settings.embedding_backend == "hash"
     )
-    tracking_model_available = (
-        resolve_local_model_source(
-            settings.tracking_model_source, settings.default_tracking_model
-        )
-        is not None
+    tracking_status = detect_tracking_runtime_status(
+        tracking_backend=settings.tracking_backend,
+        tracking_model_source=settings.tracking_model_source,
+        tracking_model_name=settings.default_tracking_model,
     )
     return SystemCapabilities(
         assistant_backend=settings.assistant_backend,
@@ -81,7 +81,7 @@ async def capabilities(
             )
             is not None
         ),
-        tracking_model_available=tracking_model_available,
+        tracking_model_available=tracking_status.tracking_model_available,
         medical_model_available=(
             resolve_local_model_source(
                 settings.medical_model_source, settings.default_medical_model
@@ -91,9 +91,9 @@ async def capabilities(
         low_memory_profile=low_memory_profile,
         active_profile="low_memory" if low_memory_profile else "full_local",
         document_extraction_available=document_extraction_available(),
-        video_analysis_fallback_only=not tracking_model_available,
-        tracking_execution_available=tracking_model_available,
-        isolation_execution_available=tracking_model_available,
+        video_analysis_fallback_only=tracking_status.video_analysis_fallback_only,
+        tracking_execution_available=tracking_status.tracking_execution_available,
+        isolation_execution_available=tracking_status.isolation_execution_available,
     )
 
 

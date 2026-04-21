@@ -479,6 +479,95 @@ def test_context_service_preserves_earlier_image_across_longer_transcript_with_c
     assert "lantern batteries" in snapshot.selected_context_summary.lower()
 
 
+def test_context_service_combines_both_video_summaries_for_comparison_follow_up() -> None:
+    service = ConversationContextService()
+    first_video = AssetSummary(
+        id="asset_video_first",
+        display_name="north-gate.mov",
+        source_path="north-gate.mov",
+        kind=AssetKind.VIDEO,
+    )
+    second_video = AssetSummary(
+        id="asset_video_second",
+        display_name="south-gate.mov",
+        source_path="south-gate.mov",
+        kind=AssetKind.VIDEO,
+    )
+
+    snapshot = service.build(
+        turn_text="Compare both videos conservatively. What is most different?",
+        transcript=[
+            TranscriptMessage(
+                id="msg1",
+                role="user",
+                content="Review the first attached gate video conservatively.",
+                assets=[first_video],
+            ),
+            TranscriptMessage(
+                id="msg2",
+                role="assistant",
+                content="From the video, the north gate clip shows workers moving around a staging table.",
+            ),
+            TranscriptMessage(
+                id="msg3",
+                role="user",
+                content="Now review this second gate video conservatively.",
+                assets=[second_video],
+            ),
+            TranscriptMessage(
+                id="msg4",
+                role="assistant",
+                content="From the video, the south gate clip shows a quieter checkpoint with less visible movement.",
+            ),
+        ],
+        attached_assets=[],
+    )
+
+    assert snapshot.selected_context_kind == "video"
+    assert len(snapshot.selected_context_assets) == 2
+    assert snapshot.selected_context_summary is not None
+    assert "north-gate.mov" in snapshot.selected_context_summary
+    assert "south-gate.mov" in snapshot.selected_context_summary
+
+
+def test_context_service_keeps_earlier_video_when_new_video_is_attached_for_comparison() -> None:
+    service = ConversationContextService()
+    first_video = AssetSummary(
+        id="asset_video_first",
+        display_name="first.mov",
+        source_path="first.mov",
+        kind=AssetKind.VIDEO,
+    )
+    second_video = AssetSummary(
+        id="asset_video_second",
+        display_name="second.mov",
+        source_path="second.mov",
+        kind=AssetKind.VIDEO,
+    )
+
+    snapshot = service.build(
+        turn_text="Now review this second attached video conservatively and tell me what looks meaningfully different from the first one.",
+        transcript=[
+            TranscriptMessage(
+                id="msg1",
+                role="user",
+                content="Review the first attached video conservatively.",
+                assets=[first_video],
+            ),
+            TranscriptMessage(
+                id="msg2",
+                role="assistant",
+                content="From the video, the first clip shows workers moving around a staging table.",
+            ),
+        ],
+        attached_assets=[second_video],
+    )
+
+    assert snapshot.selected_context_kind == "video"
+    assert snapshot.selected_context_assets
+    assert snapshot.selected_context_assets[0].id == "asset_video_first"
+
+
 def test_context_service_prefers_later_image_follow_up_when_it_matches_current_need() -> None:
     service = ConversationContextService()
     image_asset = AssetSummary(

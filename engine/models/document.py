@@ -5,6 +5,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
+import re
 
 from engine.contracts.api import (
     EvidenceFact,
@@ -124,6 +125,27 @@ class LocalDocumentRuntime:
                 execution_mode=ExecutionMode.FALLBACK,
                 grounding_status=GroundingStatus.PARTIAL,
             )
+            if len(packet.facts) < 2:
+                packet = self._unavailable_packet(
+                    asset_ids=[asset.asset_id],
+                    summary=(
+                        f"I could not extract enough clean grounded text from {asset.display_name} "
+                        "with the local OCR fallback to summarize or draft from it safely yet."
+                    ),
+                    uncertainties=[
+                        "Embedded text extraction failed.",
+                        "OCR fallback did not yield enough clean page text to ground a safe summary.",
+                    ],
+                )
+                return DocumentAnalysisResult(
+                    text=packet.summary,
+                    backend=self.backend_name,
+                    model_name="pdftoppm+tesseract",
+                    model_source=None,
+                    available=False,
+                    evidence_packet=packet,
+                    unavailable_reason="OCR fallback did not yield enough clean grounded text.",
+                )
             return DocumentAnalysisResult(
                 text=_document_summary(packet, asset.display_name),
                 backend=self.backend_name,
@@ -290,6 +312,8 @@ def _ocr_pdf(pdf_path: Path, *, output_dir: Path, max_pages: int) -> list[_PageT
             [
                 "pdftoppm",
                 "-png",
+                "-r",
+                "220",
                 "-f",
                 "1",
                 "-l",
@@ -310,7 +334,7 @@ def _ocr_pdf(pdf_path: Path, *, output_dir: Path, max_pages: int) -> list[_PageT
         page_number = _page_number_from_name(image_path.name)
         try:
             completed = subprocess.run(
-                ["tesseract", str(image_path), "stdout", "--psm", "6"],
+                ["tesseract", str(image_path), "stdout", "--psm", "3"],
                 check=False,
                 capture_output=True,
                 text=True,
@@ -318,7 +342,7 @@ def _ocr_pdf(pdf_path: Path, *, output_dir: Path, max_pages: int) -> list[_PageT
             )
         except subprocess.TimeoutExpired:
             continue
-        text = completed.stdout.strip()
+        text = _normalize_ocr_text(completed.stdout)
         if len("".join(text.split())) < 30:
             continue
         page_texts.append(_PageText(page_number=page_number, text=text))
@@ -335,28 +359,104 @@ def _page_number_from_name(name: str) -> int:
 
 def _meaningful_lines(text: str) -> list[str]:
     lines: list[str] = []
-    for raw_line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        cleaned = " ".join(raw_line.split()).strip()
-        if len(cleaned) < 24:
+    seen: set[str] = set()
+    cleaned_lines = [
+        " ".join(raw_line.split()).strip()
+        for raw_line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        if " ".join(raw_line.split()).strip()
+    ]
+    candidates: list[str] = []
+    for index, cleaned in enumerate(cleaned_lines):
+        candidates.append(cleaned)
+        if len(cleaned) < 72 and index + 1 < len(cleaned_lines):
+            pair = f"{cleaned} {cleaned_lines[index + 1]}".strip()
+            if len(pair) <= 140:
+                candidates.append(pair)
+            if (
+                len(cleaned_lines[index + 1]) < 72
+                and index + 2 < len(cleaned_lines)
+            ):
+                triple = f"{pair} {cleaned_lines[index + 2]}".strip()
+                if len(triple) <= 160:
+                    candidates.append(triple)
+
+    for cleaned in candidates:
+        tokens_simple = cleaned.split()
+        if len(tokens_simple) >= 4:
+            last_token = tokens_simple[-1]
+            if (
+                len(last_token) <= 2
+                and any(char.islower() for char in last_token)
+                and any(char.isupper() for char in last_token)
+            ):
+                cleaned = " ".join(tokens_simple[:-1]).strip()
+                tokens_simple = cleaned.split()
+        if len(tokens_simple) >= 5:
+            last_token = tokens_simple[-1]
+            previous_token = tokens_simple[-2]
+            if (
+                len(last_token) <= 2
+                and last_token.isdigit()
+                and len(previous_token) <= 3
+                and any(char.islower() for char in previous_token)
+                and any(char.isupper() for char in previous_token)
+            ):
+                cleaned = " ".join(tokens_simple[:-2]).strip()
+        if len(cleaned) < 20:
             continue
         if cleaned.isupper() and len(cleaned.split()) <= 2:
             continue
         letters = sum(char.isalpha() for char in cleaned)
+        digits = sum(char.isdigit() for char in cleaned)
         weird = sum(
             1
             for char in cleaned
             if not (char.isalnum() or char.isspace() or char in ".,:;!?'-/()%&")
         )
-        if letters < 16:
+        if letters < 14:
             continue
         if letters / max(1, len(cleaned)) < 0.55:
             continue
-        if weird > max(2, len(cleaned) // 12):
+        if weird > max(1, len(cleaned) // 18):
             continue
+        tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9'/-]*", cleaned)
+        alpha_tokens = [token for token in tokens if any(char.isalpha() for char in token)]
+        long_alpha_tokens = [token for token in alpha_tokens if sum(char.isalpha() for char in token) >= 3]
+        short_alpha_tokens = [token for token in alpha_tokens if sum(char.isalpha() for char in token) <= 2]
+        if len(long_alpha_tokens) < 3:
+            continue
+        if short_alpha_tokens and len(short_alpha_tokens) / max(1, len(alpha_tokens)) > 0.35:
+            continue
+        if any(marker in cleaned for marker in {"|", "__", "— —", "==", "~~", "),", "(,", "[,", "] ,"}):
+            continue
+        if digits and digits > letters:
+            continue
+        normalized = cleaned.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
         lines.append(cleaned)
         if len(lines) == 8:
             break
-    return lines
+    filtered: list[str] = []
+    lowered_lines = [line.lower() for line in lines]
+    for index, line in enumerate(lines):
+        lowered = lowered_lines[index]
+        if any(
+            lowered != other and lowered in other and len(line.split()) <= 6
+            for other in lowered_lines
+        ):
+            continue
+        filtered.append(line)
+    return filtered
+
+
+def _normalize_ocr_text(text: str) -> str:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = normalized.replace("—", "-").replace("–", "-").replace("’", "'").replace("“", '"').replace("”", '"')
+    normalized = re.sub(r"[ \t]+", " ", normalized)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    return normalized.strip()
 
 
 def _document_summary(packet: EvidencePacket, display_name: str) -> str:

@@ -454,7 +454,7 @@ class ConversationContextService:
         snapshot.last_image_assets = image_reference_groups[0] if image_reference_groups else []
         snapshot.last_video_assets = video_reference_groups[0] if video_reference_groups else []
 
-        if not attached_assets:
+        if not attached_assets or self._should_mix_attached_assets_with_prior_context(turn_text):
             (
                 snapshot.selected_context_assets,
                 snapshot.selected_context_kind,
@@ -496,6 +496,36 @@ class ConversationContextService:
         ]
         snapshot.active_draft_lineage = snapshot.pending_approval_id
         return snapshot
+
+    def _should_mix_attached_assets_with_prior_context(self, turn_text: str) -> bool:
+        lowered = turn_text.lower().strip()
+        if not lowered:
+            return False
+        if any(
+            phrase in lowered
+            for phrase in {
+                "compare both",
+                "both videos",
+                "both images",
+                "both documents",
+                "different from the first",
+                "go back to the first",
+                "go back to the earlier",
+            }
+        ):
+            return True
+        return any(
+            token in lowered
+            for token in {
+                "first one",
+                "second one",
+                "earlier one",
+                "previous one",
+                "both",
+                "compare",
+                "different from",
+            }
+        )
 
     def _recent_topics(self, transcript: list[TranscriptMessage]) -> list[str]:
         topics: list[str] = []
@@ -1014,6 +1044,19 @@ class ConversationContextService:
         assets: list[AssetSummary],
         kind: str,
     ) -> str | None:
+        if len(assets) > 1:
+            combined_summaries: list[str] = []
+            for asset in assets[:2]:
+                excerpt = self._assistant_summary_for_single_asset_context(
+                    turn_text=turn_text,
+                    transcript=transcript,
+                    asset=asset,
+                )
+                if excerpt:
+                    combined_summaries.append(f"{asset.display_name}: {excerpt}")
+            if combined_summaries:
+                return " | ".join(combined_summaries)
+
         assistant_summary = self._assistant_summary_for_asset_context(
             turn_text=turn_text,
             transcript=transcript,
@@ -1036,6 +1079,12 @@ class ConversationContextService:
         transcript: list[TranscriptMessage],
         assets: list[AssetSummary],
     ) -> str | None:
+        if len(assets) == 1:
+            return self._assistant_summary_for_single_asset_context(
+                turn_text=turn_text,
+                transcript=transcript,
+                asset=assets[0],
+            )
         target_ids = {asset.id for asset in assets}
         anchor_index: int | None = None
         for index, message in enumerate(transcript):
@@ -1049,6 +1098,43 @@ class ConversationContextService:
             follow_up = transcript[index]
             if follow_up.role == "user" and follow_up.assets:
                 if not any(asset.id in target_ids for asset in follow_up.assets):
+                    break
+            if follow_up.role != "assistant":
+                continue
+            excerpt = self._best_media_context_excerpt(follow_up.content)
+            if not excerpt:
+                continue
+            score = self._asset_context_excerpt_score(excerpt, turn_text=turn_text)
+            candidates.append((score, index, excerpt))
+
+        if not candidates:
+            return None
+
+        best_score, _, best_excerpt = max(candidates, key=lambda item: (item[0], item[1]))
+        if best_score > 0:
+            return best_excerpt
+        return candidates[0][2]
+
+    def _assistant_summary_for_single_asset_context(
+        self,
+        *,
+        turn_text: str,
+        transcript: list[TranscriptMessage],
+        asset: AssetSummary,
+    ) -> str | None:
+        target_ids = {asset.id}
+        anchor_index: int | None = None
+        for index, message in enumerate(transcript):
+            if any(item.id in target_ids for item in message.assets):
+                anchor_index = index
+        if anchor_index is None:
+            return None
+
+        candidates: list[tuple[int, int, str]] = []
+        for index in range(anchor_index + 1, len(transcript)):
+            follow_up = transcript[index]
+            if follow_up.role == "user" and follow_up.assets:
+                if not any(item.id in target_ids for item in follow_up.assets):
                     break
             if follow_up.role != "assistant":
                 continue
