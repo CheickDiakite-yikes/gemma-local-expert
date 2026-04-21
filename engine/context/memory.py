@@ -8,6 +8,7 @@ from engine.contracts.api import (
     new_id,
 )
 from engine.models.runtime import (
+    ConversationMemoryRankingRequest,
     AssistantRuntime,
     ConversationMemoryRequest,
 )
@@ -87,6 +88,32 @@ class ConversationMemoryService:
             tool_name=tool_name,
             referent_title=referent_title,
         )
+
+    def rerank_entries(
+        self,
+        *,
+        user_text: str,
+        active_topic: str | None,
+        entries: list[ConversationMemoryEntry],
+        limit: int,
+    ) -> list[ConversationMemoryEntry]:
+        if len(entries) <= 1:
+            return entries
+        bounded = list(entries[:limit])
+        ranking = self.runtime.rank_memories(
+            ConversationMemoryRankingRequest(
+                user_text=user_text,
+                active_topic=active_topic,
+                memories=bounded,
+            )
+        )
+        if ranking is None or not ranking.ordered_ids:
+            return entries
+        by_id = {entry.id: entry for entry in bounded}
+        ranked = [by_id[memory_id] for memory_id in ranking.ordered_ids if memory_id in by_id]
+        seen = {entry.id for entry in ranked}
+        remaining = [entry for entry in bounded if entry.id not in seen]
+        return ranked + remaining + list(entries[limit:])
 
     def _should_store(
         self,

@@ -10,6 +10,7 @@ from mlx_lm.sample_utils import make_sampler
 
 from engine.contracts.api import (
     AssistantMode,
+    ConversationMemoryEntry,
     EvidencePacket,
     ExecutionMode,
     GroundingStatus,
@@ -85,6 +86,19 @@ class ConversationMemoryResult:
     backend: str
 
 
+@dataclass(slots=True)
+class ConversationMemoryRankingRequest:
+    user_text: str
+    active_topic: str | None
+    memories: list[ConversationMemoryEntry]
+
+
+@dataclass(slots=True)
+class ConversationMemoryRankingResult:
+    ordered_ids: list[str]
+    backend: str
+
+
 class AssistantRuntime(Protocol):
     backend_name: str
 
@@ -93,6 +107,10 @@ class AssistantRuntime(Protocol):
     def synthesize_memory(
         self, request: ConversationMemoryRequest
     ) -> ConversationMemoryResult | None: ...
+
+    def rank_memories(
+        self, request: ConversationMemoryRankingRequest
+    ) -> ConversationMemoryRankingResult | None: ...
 
 
 class MockAssistantRuntime:
@@ -146,6 +164,11 @@ class MockAssistantRuntime:
         self, request: ConversationMemoryRequest
     ) -> ConversationMemoryResult | None:
         return _heuristic_memory_result(request, backend=self.backend_name)
+
+    def rank_memories(
+        self, request: ConversationMemoryRankingRequest
+    ) -> ConversationMemoryRankingResult | None:
+        return _heuristic_memory_ranking(request, backend=self.backend_name)
 
     def _summary_from_sources(self, citations: list[SearchResultItem]) -> str:
         primary = citations[0]
@@ -763,6 +786,76 @@ class MLXAssistantRuntime:
         except Exception:
             return heuristic
 
+    def rank_memories(
+        self, request: ConversationMemoryRankingRequest
+    ) -> ConversationMemoryRankingResult | None:
+        heuristic = _heuristic_memory_ranking(request, backend=self.backend_name)
+        if heuristic is None or not heuristic.ordered_ids:
+            return heuristic
+
+        memory_lines = []
+        for memory in request.memories[:6]:
+            memory_lines.append(
+                "\n".join(
+                    [
+                        f"id={memory.id}",
+                        f"topic={memory.topic}",
+                        f"summary={memory.summary}",
+                        f"keywords={','.join(memory.keywords[:8])}",
+                        f"source_domain={memory.source_domain.value if memory.source_domain else ''}",
+                        f"referent_title={memory.referent_title or ''}",
+                    ]
+                )
+            )
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You rerank a bounded set of conversation memories for one new user turn. "
+                    "Return strict JSON with key ordered_ids containing memory ids in best-first order. "
+                    "Prefer memories whose topic or summary best match the current request. "
+                    "Do not invent ids. Keep stronger explicit referents and grounded evidence out of scope; this ranking is only for topic-level continuity."
+                ),
+            },
+            {
+                "role": "user",
+                "content": "\n\n".join(
+                    [
+                        f"user_text={request.user_text}",
+                        f"active_topic={request.active_topic or ''}",
+                        "candidate_memories:",
+                        *memory_lines,
+                        f"heuristic_order={','.join(heuristic.ordered_ids)}",
+                        "Return JSON only.",
+                    ]
+                ),
+            },
+        ]
+        try:
+            model_source = next(iter(self._cache), None)
+            if model_source is None:
+                return heuristic
+            model, tokenizer = self._load_model(model_source)
+            prompt = self._build_prompt(tokenizer, messages)
+            sampler = make_sampler(temp=0.1, top_p=0.9)
+            text = generate(
+                model,
+                tokenizer,
+                prompt,
+                verbose=False,
+                max_tokens=120,
+                sampler=sampler,
+            ).strip()
+            parsed = _parse_memory_ranking_json(text, request.memories)
+            if parsed is None or not parsed.ordered_ids:
+                return heuristic
+            return ConversationMemoryRankingResult(
+                ordered_ids=parsed.ordered_ids,
+                backend=self.backend_name,
+            )
+        except Exception:
+            return heuristic
+
     def _load_model(self, source: str) -> tuple[object, object]:
         with self._lock:
             cached = self._cache.get(source)
@@ -805,12 +898,56 @@ def _heuristic_memory_result(
     )
 
 
+def _heuristic_memory_ranking(
+    request: ConversationMemoryRankingRequest,
+    *,
+    backend: str,
+) -> ConversationMemoryRankingResult | None:
+    if not request.memories:
+        return None
+    query_tokens = _ranking_tokens(request.user_text)
+    if not query_tokens and request.active_topic:
+        query_tokens = _ranking_tokens(request.active_topic)
+    scored: list[tuple[int, int, str]] = []
+    for index, memory in enumerate(request.memories):
+        searchable = " ".join(
+            [
+                memory.topic,
+                memory.summary,
+                " ".join(memory.keywords),
+                memory.referent_title or "",
+            ]
+        )
+        memory_tokens = _ranking_tokens(searchable)
+        score = max(0, 24 - index * 2)
+        score += len(query_tokens & memory_tokens) * 8
+        if memory.referent_title and memory.referent_title.lower() in request.user_text.lower():
+            score += 12
+        if memory.topic and memory.topic.lower() in request.user_text.lower():
+            score += 16
+        if (
+            request.active_topic
+            and memory.topic.lower() == request.active_topic.lower()
+            and len(query_tokens) <= 1
+        ):
+            score += 10
+        scored.append((score, index, memory.id))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return ConversationMemoryRankingResult(
+        ordered_ids=[memory_id for _, _, memory_id in scored],
+        backend=backend,
+    )
+
+
 def _memory_topic(request: ConversationMemoryRequest) -> str | None:
     if request.referent_title:
         return _trim_memory_text(request.referent_title, 96)
+    cleaned = request.user_text.strip().splitlines()[0].rstrip("?.! ")
+    lowered = cleaned.lower()
+    if cleaned and not _is_generic_memory_follow_up(lowered):
+        return _trim_memory_text(cleaned, 96)
     if request.active_topic:
         return _trim_memory_text(request.active_topic, 96)
-    cleaned = request.user_text.strip().splitlines()[0].rstrip("?.! ")
     return _trim_memory_text(cleaned, 96) if cleaned else None
 
 
@@ -864,6 +1001,37 @@ def _memory_keywords(
     return keywords
 
 
+def _ranking_tokens(text: str) -> set[str]:
+    stop_words = {
+        "the",
+        "and",
+        "that",
+        "this",
+        "with",
+        "from",
+        "what",
+        "when",
+        "where",
+        "which",
+        "have",
+        "your",
+        "about",
+        "into",
+        "just",
+        "again",
+        "back",
+        "point",
+        "topic",
+        "please",
+        "really",
+    }
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", text.lower())
+        if len(token) > 2 and token not in stop_words
+    }
+
+
 def _tool_memory_label(tool_name: str) -> str:
     mapping = {
         "create_note": "note",
@@ -882,6 +1050,27 @@ def _trim_memory_text(text: str, limit: int) -> str:
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[: limit - 1].rstrip() + "…"
+
+
+def _is_generic_memory_follow_up(lowered: str) -> bool:
+    return any(
+        phrase in lowered
+        for phrase in {
+            "what did you mean by that",
+            "what do you mean by that",
+            "can you explain that",
+            "tell me more about that",
+            "go back to that",
+            "bring that up again",
+            "come back to that",
+            "go deeper on that",
+            "what was the point again",
+            "what was the main point again",
+            "remind me what we were saying",
+            "actually just talk normally",
+            "talk normally again",
+        }
+    )
 
 
 def _parse_memory_json(text: str) -> ConversationMemoryResult | None:
@@ -906,5 +1095,32 @@ def _parse_memory_json(text: str) -> ConversationMemoryResult | None:
         topic=topic,
         summary=summary,
         keywords=keywords,
+        backend="mlx",
+    )
+
+
+def _parse_memory_ranking_json(
+    text: str,
+    memories: list[ConversationMemoryEntry],
+) -> ConversationMemoryRankingResult | None:
+    match = re.search(r"\{.*\}", text, flags=re.S)
+    if not match:
+        return None
+    try:
+        import json
+
+        payload = json.loads(match.group(0))
+    except Exception:
+        return None
+    raw_ids = payload.get("ordered_ids") if isinstance(payload, dict) else None
+    if not isinstance(raw_ids, list):
+        return None
+    valid_ids = {memory.id for memory in memories}
+    ordered_ids = [str(item) for item in raw_ids if str(item) in valid_ids]
+    if not ordered_ids:
+        return None
+    remaining = [memory.id for memory in memories if memory.id not in ordered_ids]
+    return ConversationMemoryRankingResult(
+        ordered_ids=ordered_ids + remaining,
         backend="mlx",
     )

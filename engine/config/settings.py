@@ -41,6 +41,7 @@ class Settings(BaseModel):
     conversation_history_limit: int = 8
     continuity_history_limit: int = 32
     conversation_memory_limit: int = 12
+    conversation_memory_ranking_limit: int = 6
     enable_function_gemma: bool = False
     enable_medical_mode: bool = True
     max_stream_chunk_chars: int = 180
@@ -113,6 +114,9 @@ def load_settings() -> Settings:
         ),
         conversation_memory_limit=int(
             os.getenv("FIELD_ASSISTANT_CONVERSATION_MEMORY_LIMIT", "12")
+        ),
+        conversation_memory_ranking_limit=int(
+            os.getenv("FIELD_ASSISTANT_CONVERSATION_MEMORY_RANKING_LIMIT", "6")
         ),
         ingestion_chunk_max_chars=int(
             os.getenv("FIELD_ASSISTANT_INGESTION_CHUNK_MAX_CHARS", "420")

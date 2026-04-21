@@ -101,11 +101,32 @@ class OrchestratorService:
             limit=self.settings.conversation_memory_limit,
         )
         attached_assets = self.store.list_assets(turn.asset_ids)
-        conversation_context = self.context_service.build(
+        provisional_context = self.context_service.build(
             turn_text=turn.text,
             transcript=prior_transcript,
             attached_assets=attached_assets,
             recent_memories=recent_memories,
+        )
+        ranked_memories = recent_memories
+        if not self._should_defer_memory_ranking(
+            attached_assets=attached_assets,
+            conversation_context=provisional_context,
+        ):
+            ranked_memories = self.memory_service.rerank_entries(
+                user_text=turn.text,
+                active_topic=provisional_context.active_topic,
+                entries=recent_memories,
+                limit=self.settings.conversation_memory_ranking_limit,
+            )
+        conversation_context = (
+            provisional_context
+            if ranked_memories == recent_memories
+            else self.context_service.build(
+                turn_text=turn.text,
+                transcript=prior_transcript,
+                attached_assets=attached_assets,
+                recent_memories=ranked_memories,
+            )
         )
         contextual_assets = conversation_context.selected_context_assets
         routed_assets = self._merge_assets(attached_assets, contextual_assets)
@@ -134,6 +155,7 @@ class OrchestratorService:
         workspace_summary: str | None = None
         prepared_tool_name: str | None = None
         prepared_tool_plan = None
+        memory_referent_title: str | None = None
         active_pending_approval = self._pending_approval_for_context(conversation_context)
         approval_required = policy.approval_required or bool(
             active_pending_approval and active_pending_approval.status == "pending"
@@ -234,6 +256,7 @@ class OrchestratorService:
                 evidence_packet=None,
                 workspace_summary=None,
                 tool_name=None,
+                referent_title=None,
             )
             return
 
@@ -585,6 +608,7 @@ class OrchestratorService:
                 context_assets=routed_assets,
                 context_summary=conversation_context.selected_context_summary,
             )
+            memory_referent_title = self._tool_plan_title(tool_plan.payload)
             yield ConversationStreamEvent(
                 type=StreamEventType.TOOL_PROPOSED,
                 conversation_id=turn.conversation_id,
@@ -668,6 +692,9 @@ class OrchestratorService:
                     },
                 )
                 tool_result = self.tool_runtime.execute(planned_tool_name, tool_plan.payload)
+                result_title = tool_result.get("title")
+                if isinstance(result_title, str) and result_title.strip():
+                    memory_referent_title = result_title.strip()
                 assistant_asset_ids = [
                     asset_id
                     for asset_id in tool_result.get("asset_ids", [])
@@ -840,6 +867,7 @@ class OrchestratorService:
             evidence_packet=evidence_packet,
             workspace_summary=workspace_summary,
             tool_name=planned_tool_name or conversation_context.selected_referent_tool,
+            referent_title=memory_referent_title,
         )
 
     def _multi_output_recall_reply(
@@ -1359,6 +1387,26 @@ class OrchestratorService:
             return f"Tool finished with status {result['status']}."
         return "The local tool completed successfully."
 
+    def _should_defer_memory_ranking(
+        self,
+        *,
+        attached_assets: list[AssetSummary],
+        conversation_context,
+    ) -> bool:
+        if attached_assets:
+            return True
+        if getattr(conversation_context, "selected_context_assets", None):
+            return True
+        if getattr(conversation_context, "selected_evidence_summary", None):
+            return True
+        return getattr(conversation_context, "selected_referent_kind", None) in {
+            "pending_output",
+            "saved_output",
+            "image",
+            "video",
+            "document",
+        }
+
     def _persist_conversation_memory(
         self,
         *,
@@ -1371,6 +1419,7 @@ class OrchestratorService:
         evidence_packet: EvidencePacket | None,
         workspace_summary: str | None,
         tool_name: str | None,
+        referent_title: str | None,
     ) -> None:
         source_domain = self._memory_source_domain(
             evidence_packet=evidence_packet,
@@ -1394,8 +1443,8 @@ class OrchestratorService:
                 asset_ids=asset_ids,
                 referent_kind=getattr(conversation_context, "selected_referent_kind", None),
                 referent_title=(
-                    getattr(conversation_context, "selected_referent_title", None)
-                    or getattr(conversation_context, "selected_memory_topic", None)
+                    referent_title
+                    or getattr(conversation_context, "selected_referent_title", None)
                 ),
                 evidence_packet=evidence_packet,
                 workspace_summary_text=workspace_summary,
@@ -1442,6 +1491,14 @@ class OrchestratorService:
         if not label:
             return None
         return mapping.get(label)
+
+    def _tool_plan_title(self, payload: dict[str, object] | None) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+        title = payload.get("title")
+        if isinstance(title, str) and title.strip():
+            return title.strip()
+        return None
 
     def _workspace_evidence_packet(
         self,

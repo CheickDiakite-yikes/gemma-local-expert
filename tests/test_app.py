@@ -211,6 +211,18 @@ def test_follow_up_can_use_selected_conversation_memory_after_topic_pivot(
             source_domain=SourceDomain.CONVERSATION,
         )
     )
+    store.create_conversation_memory(
+        ConversationMemoryEntry(
+            id=new_id("memory"),
+            conversation_id=conversation["id"],
+            turn_id="turn_pivot_assistant",
+            kind=ConversationMemoryKind.GENERAL,
+            topic="Lunch tangent",
+            summary="We switched to a short aside about lunch and coffee.",
+            keywords=["lunch", "coffee"],
+            source_domain=SourceDomain.CONVERSATION,
+        )
+    )
 
     response = client.post(
         f"/v1/conversations/{conversation['id']}/turns",
