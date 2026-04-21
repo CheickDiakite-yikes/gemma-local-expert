@@ -149,7 +149,7 @@ def test_mock_runtime_uses_saved_output_referent_for_topic_reentry() -> None:
         )
     )
 
-    assert 'saved markdown export "Field Assistant Architecture Brief"' in result.text
+    assert 'export "Field Assistant Architecture Brief"' in result.text
     assert "local-first assistant built on gemma" in result.text.lower()
     assert "bounded routing" in result.text.lower()
     assert "we can stay with what we were just discussing" not in result.text.lower()
@@ -323,7 +323,7 @@ def test_mock_runtime_saved_output_title_follow_up_avoids_draft_wording() -> Non
     )
 
     assert 'Departure shortage checklist' in result.text
-    assert "saved checklist is titled" in result.text.lower()
+    assert "latest checklist is titled" in result.text.lower()
     assert "saved checklist draft" not in result.text.lower()
 
 
@@ -343,5 +343,6 @@ def test_mock_runtime_tool_proposal_does_not_prepend_generic_chat_filler() -> No
         )
     )
 
-    assert "ready for your approval" in result.text.lower()
+    assert "i drafted a checklist below." in result.text.lower()
+    assert "ready for your approval" not in result.text.lower()
     assert "talk normally" not in result.text.lower()

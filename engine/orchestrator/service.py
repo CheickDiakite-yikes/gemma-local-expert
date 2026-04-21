@@ -170,6 +170,7 @@ class OrchestratorService:
         prepared_tool_plan = None
         memory_referent_title: str | None = None
         memory_referent_excerpt: str | None = None
+        draft_updated = False
         active_pending_approval = self._pending_approval_for_context(conversation_context)
         approval_required = policy.approval_required or bool(
             active_pending_approval and active_pending_approval.status == "pending"
@@ -210,6 +211,7 @@ class OrchestratorService:
                 conversation_context=conversation_context,
             )
             if revised_approval:
+                draft_updated = True
                 active_pending_approval = revised_approval
                 memory_referent_excerpt = getattr(
                     conversation_context, "selected_referent_excerpt", None
@@ -758,23 +760,44 @@ class OrchestratorService:
             label="Drafting the answer",
             detail="Turning grounded context into the final response.",
         )
-        deterministic_reply = self._multi_output_recall_reply(
-            turn.text, conversation_context
-        ) or self._missing_output_reply(
-            turn_text=turn.text,
-            conversation_context=conversation_context,
-        ) or self._evidence_guardrail_reply(
-            turn_text=turn.text,
-            evidence_packet=evidence_packet,
-            route=route,
-        )
+        deterministic_reply = None
+        if approval_required and planned_tool_name:
+            deterministic_reply = self._pending_draft_reply(
+                planned_tool_name,
+                source_domain=route.source_domain,
+                evidence_packet=evidence_packet,
+            )
+        elif draft_updated and active_pending_approval:
+            deterministic_reply = self._updated_draft_reply(
+                active_pending_approval.tool_name,
+                source_domain=self._approval_metadata_value(
+                    active_pending_approval,
+                    "source_domain",
+                ),
+                grounding_status=self._approval_metadata_value(
+                    active_pending_approval,
+                    "grounding_status",
+                ),
+                title=self._tool_plan_title(active_pending_approval.payload),
+            )
+        else:
+            deterministic_reply = self._multi_output_recall_reply(
+                turn.text, conversation_context
+            ) or self._missing_output_reply(
+                turn_text=turn.text,
+                conversation_context=conversation_context,
+            ) or self._evidence_guardrail_reply(
+                turn_text=turn.text,
+                evidence_packet=evidence_packet,
+                route=route,
+            )
         if not deterministic_reply and tool_feedback and not planned_tool_name:
             deterministic_reply = self._grounding_feedback_reply(
                 tool_feedback=tool_feedback,
                 evidence_packet=evidence_packet,
             )
         prompt_context = None
-        if deterministic_reply and not planned_tool_name:
+        if deterministic_reply:
             generation = AssistantGenerationResult(
                 text=deterministic_reply,
                 backend="deterministic",
@@ -1194,6 +1217,68 @@ class OrchestratorService:
         if not tool_name:
             return "output"
         return tool_name.replace("_", " ")
+
+    def _pending_draft_reply(
+        self,
+        tool_name: str,
+        *,
+        source_domain: SourceDomain | None,
+        evidence_packet: EvidencePacket | None,
+    ) -> str:
+        tool_label = self._tool_label(tool_name)
+        domain_phrase = self._draft_source_phrase(source_domain)
+        base = f"I drafted a {tool_label}{domain_phrase} below."
+        if not evidence_packet:
+            return base
+        if evidence_packet.grounding_status == GroundingStatus.PARTIAL:
+            return f"{base} It is based on partial local evidence, so review it closely."
+        if evidence_packet.grounding_status == GroundingStatus.UNAVAILABLE:
+            return f"{base} The local evidence was incomplete, so treat it as a cautious starting point."
+        return base
+
+    def _updated_draft_reply(
+        self,
+        tool_name: str,
+        *,
+        source_domain: SourceDomain | None,
+        grounding_status: str | None,
+        title: str | None = None,
+    ) -> str:
+        tool_label = self._tool_label(tool_name)
+        normalized_source_domain = None
+        if source_domain:
+            try:
+                normalized_source_domain = SourceDomain(source_domain)
+            except ValueError:
+                normalized_source_domain = None
+        domain_phrase = self._draft_source_phrase(normalized_source_domain)
+        title_phrase = f' "{title}"' if title else ""
+        base = f"I updated the {tool_label}{title_phrase}{domain_phrase} below."
+        if grounding_status == GroundingStatus.PARTIAL.value:
+            return f"{base} It still reflects partial local evidence."
+        if grounding_status == GroundingStatus.UNAVAILABLE.value:
+            return f"{base} The local evidence is still incomplete, so review it carefully."
+        return base
+
+    def _draft_source_phrase(self, source_domain: SourceDomain | None) -> str:
+        mapping = {
+            SourceDomain.IMAGE: " from the attached image",
+            SourceDomain.VIDEO: " from the attached video",
+            SourceDomain.DOCUMENT: " from the attached document",
+            SourceDomain.WORKSPACE: " from the workspace findings",
+            SourceDomain.CONVERSATION: "",
+        }
+        return mapping.get(source_domain, "")
+
+    def _approval_metadata_value(
+        self,
+        approval,
+        key: str,
+    ) -> str | None:
+        if not approval or not isinstance(getattr(approval, "payload", None), dict):
+            return None
+        value = approval.payload.get(key)
+        return value if isinstance(value, str) and value.strip() else None
 
     def _merge_assets(
         self,

@@ -411,6 +411,9 @@ function isApprovalSectionExpanded(approval, section) {
   if (typeof saved === "boolean") {
     return saved;
   }
+  if (section === "preview") {
+    return true;
+  }
   return false;
 }
 
@@ -422,7 +425,7 @@ function setApprovalSectionExpanded(approvalId, section, expanded) {
 function approvalStatusLabel(status) {
   switch (status) {
     case "pending":
-      return "Ready to save";
+      return "Unsaved";
     case "executed":
       return "Saved locally";
     case "rejected":
@@ -437,7 +440,7 @@ function approvalStatusLabel(status) {
 function approvalStatusKicker(status) {
   switch (status) {
     case "pending":
-      return "Draft ready";
+      return "Draft";
     case "executed":
       return "Saved";
     case "rejected":
@@ -504,23 +507,78 @@ function approvalReasonCopy(approval) {
   if (approval.status === "failed") {
     return "The local write did not finish cleanly.";
   }
+  const sourceDomain = String(approval.source_domain || "").toLowerCase();
   switch (approval.tool_name) {
     case "create_checklist":
-      return "Review or refine the checklist before it is saved locally.";
+      return sourceDomain === "image" || sourceDomain === "video"
+        ? "Drafted from the attached media findings. Review it, refine it, or save it."
+        : "Drafted from the current conversation. Review it, refine it, or save it.";
     case "create_task":
-      return "Review or refine the task before it is saved locally.";
+      return "Drafted from the current conversation. Review it, refine it, or save it.";
     case "create_report":
-      return "Review or refine the report before it is saved locally.";
+      return sourceDomain === "workspace"
+        ? "Drafted from the local workspace review. Review it, refine it, or save it."
+        : sourceDomain === "document"
+          ? "Drafted from the document findings. Review it, refine it, or save it."
+          : "Drafted from the current conversation. Review it, refine it, or save it.";
     case "create_message_draft":
-      return "Review or refine the message draft before it is saved locally.";
+      return sourceDomain === "image" || sourceDomain === "video"
+        ? "Drafted from the attached media findings. Review it, refine it, or save it."
+        : "Drafted from the current conversation. Review it, refine it, or save it.";
     case "export_brief":
-      return "Review or refine the markdown export before it is written locally.";
+      return sourceDomain === "workspace"
+        ? "Drafted from the local workspace review. Review it, refine it, or export it."
+        : "Drafted from the current conversation. Review it, refine it, or export it.";
     case "log_observation":
-      return "Review or refine the observation before it is saved locally.";
+      return "Drafted from the current conversation. Review it, refine it, or save it.";
     case "create_note":
-      return "Review or refine the note before it is saved locally.";
+      return sourceDomain === "workspace"
+        ? "Drafted from the local workspace review. Review it, refine it, or save it."
+        : sourceDomain === "document"
+          ? "Drafted from the document findings. Review it, refine it, or save it."
+          : "Drafted from the current conversation. Review it, refine it, or save it.";
     default:
-      return "Review this local draft before it is saved.";
+      return "Drafted locally. Review it, refine it, or save it.";
+  }
+}
+
+function approvalHeadingText(approval, payload = undefined) {
+  const resolvedPayload = payload || approvalEffectivePayload(approval);
+  const title = resolvedPayload?.title ? clipCopy(resolvedPayload.title, 88) : "";
+  if (title) {
+    return title;
+  }
+  const noun = approvalSurfaceNoun(approval?.tool_name || "");
+  switch (approval?.status) {
+    case "executed":
+      return `Saved ${noun}`;
+    case "rejected":
+      return `${noun.charAt(0).toUpperCase() + noun.slice(1)} not saved`;
+    case "failed":
+      return `${noun.charAt(0).toUpperCase() + noun.slice(1)} needs attention`;
+    default:
+      return `${noun.charAt(0).toUpperCase() + noun.slice(1)} draft`;
+  }
+}
+
+function approvalPrimaryActionLabel(approval) {
+  switch (approval?.tool_name) {
+    case "create_note":
+      return "Save note";
+    case "create_report":
+      return "Save report";
+    case "create_message_draft":
+      return "Save message";
+    case "create_checklist":
+      return "Save checklist";
+    case "create_task":
+      return "Save task";
+    case "export_brief":
+      return "Export markdown";
+    case "log_observation":
+      return "Save observation";
+    default:
+      return "Save";
   }
 }
 
@@ -1082,10 +1140,12 @@ function stripAssistantApprovalBoilerplate(content) {
       /^i can (save|create|write|log)\b/i.test(normalized) ||
       /^tool action detected:?/i.test(normalized) ||
       /^i will now\b/i.test(normalized) ||
+      /^i prepared a .*ready for your approval\.?$/i.test(normalized) ||
       /^please approve\b/i.test(normalized) ||
       /^approval required:?/i.test(normalized) ||
       /^please confirm if you approve this action\b/i.test(normalized) ||
       /^please confirm if you want me to proceed\b/i.test(normalized) ||
+      /^please confirm if you want me to generate\b/i.test(normalized) ||
       /^action:\s+/i.test(normalized) ||
       /^content summary:/i.test(normalized)
     ) {
@@ -1356,24 +1416,15 @@ function renderApprovalPreview(approval, overridePayload = undefined) {
   if (!payload || !Object.keys(payload).length) {
     return "";
   }
-  const previewTitle = payload.title
-    ? `<div class="approval-preview-title">${escapeHtml(payload.title)}</div>`
-    : "";
   const previewSummary = approvalPayloadExcerpt(approval, payload);
   const meta = approvalPayloadMeta(approval, payload)
     .map((bit) => `<span>${escapeHtml(bit)}</span>`)
     .join("");
-  const helperCopy =
-    approval.status === "pending"
-      ? "Open Edit to inspect or refine the full draft before saving."
-      : "This is the saved draft summary for the completed action.";
 
   return `
     <section class="approval-preview">
-      ${previewTitle}
       ${previewSummary ? `<p class="approval-preview-summary">${escapeHtml(previewSummary)}</p>` : ""}
       ${meta ? `<div class="approval-preview-meta">${meta}</div>` : ""}
-      <p class="approval-preview-note">${escapeHtml(helperCopy)}</p>
     </section>
   `;
 }
@@ -1406,11 +1457,11 @@ function renderApprovalEditor(approval) {
         <div class="approval-editor-grid approval-editor-grid-task">
           <label class="approval-field approval-field-full">
             <span>Title</span>
-            <input data-approval-field="title" type="text" value="${escapeHtml(payload.title || "")}" />
+            <input data-approval-field="title" name="approval_title" type="text" value="${escapeHtml(payload.title || "")}" />
           </label>
           <label class="approval-field approval-field-full">
             <span>Details</span>
-            <textarea data-approval-field="details" rows="5">${escapeHtml(payload.details || "")}</textarea>
+            <textarea data-approval-field="details" name="approval_details" rows="5">${escapeHtml(payload.details || "")}</textarea>
           </label>
           <label class="approval-field approval-field-status">
             <span>Status</span>
@@ -1456,7 +1507,7 @@ function renderApprovalEditor(approval) {
         <div class="approval-editor-grid">
           <label class="approval-field approval-field-full">
             <span>Title</span>
-            <input data-approval-field="title" type="text" value="${escapeHtml(payload.title || "")}" />
+            <input data-approval-field="title" name="approval_title" type="text" value="${escapeHtml(payload.title || "")}" />
           </label>
           <label class="approval-field approval-field-full">
             <span>${
@@ -1470,7 +1521,7 @@ function renderApprovalEditor(approval) {
                   ? "Markdown content"
                   : "Content"
             }</span>
-            <textarea data-approval-field="content" rows="${approval.tool_name === "create_checklist" ? "6" : "5"}">${escapeHtml(payload.content || "")}</textarea>
+            <textarea data-approval-field="content" name="approval_content" rows="${approval.tool_name === "create_checklist" ? "6" : "5"}">${escapeHtml(payload.content || "")}</textarea>
           </label>
         </div>
       </section>
@@ -1494,7 +1545,7 @@ function renderApprovalEditor(approval) {
       <div class="approval-editor-grid">
         <label class="approval-field approval-field-code approval-field-full">
           <span>Payload JSON</span>
-          <textarea data-approval-json rows="7">${escapeHtml(JSON.stringify(payload, null, 2))}</textarea>
+          <textarea data-approval-json name="approval_json" rows="7">${escapeHtml(JSON.stringify(payload, null, 2))}</textarea>
         </label>
       </div>
     </section>
@@ -1983,41 +2034,29 @@ function renderApprovalMarkup(approval) {
     return "";
   }
 
-  const previewExpanded = isApprovalSectionExpanded(approval, "preview");
+  const payload = approvalEffectivePayload(approval);
   const editorExpanded = approval.status === "pending" ? isApprovalSectionExpanded(approval, "editor") : false;
-  const sectionControls = `
-    <div class="approval-view-switch">
-      <button
-        class="approval-view-toggle${previewExpanded ? " is-active" : ""}"
-        data-approval-section-toggle="preview"
-        data-approval-id="${approval.id}"
-        type="button"
-      >
-        Draft
-      </button>
-      ${
-        approval.status === "pending"
-          ? `
+  const editToggle =
+    approval.status === "pending"
+      ? `
         <button
-          class="approval-view-toggle${editorExpanded ? " is-active" : ""}"
+          class="approval-action edit"
           data-approval-section-toggle="editor"
           data-approval-id="${approval.id}"
           type="button"
         >
-          Edit
+          ${editorExpanded ? "Close edit" : "Edit draft"}
         </button>
       `
-          : ""
-      }
-    </div>
-  `;
+      : "";
 
   const actions =
     approval.status === "pending"
       ? `
         <div class="approval-actions">
-          <button class="approval-action approve" data-approval-action="approve" data-approval-id="${approval.id}" type="button">Save locally</button>
-          <button class="approval-action reject" data-approval-action="reject" data-approval-id="${approval.id}" type="button">Not now</button>
+          ${editToggle}
+          <button class="approval-action reject" data-approval-action="reject" data-approval-id="${approval.id}" type="button">Discard draft</button>
+          <button class="approval-action approve" data-approval-action="approve" data-approval-id="${approval.id}" type="button">${escapeHtml(approvalPrimaryActionLabel(approval))}</button>
         </div>
       `
       : "";
@@ -2027,18 +2066,18 @@ function renderApprovalMarkup(approval) {
       <div class="approval-header approval-header-inline">
         <div class="approval-header-main">
           <div class="approval-heading-line">
-            <span class="approval-kicker">${approvalStatusKicker(approval.status)}</span>
-            <h4>${escapeHtml(approvalSurfaceTitle(approval.tool_name))}</h4>
+            <span class="approval-kicker">${escapeHtml(approvalStatusKicker(approval.status))}</span>
+            <h4>${escapeHtml(approvalHeadingText(approval, payload))}</h4>
           </div>
-          <p class="approval-summary">${escapeHtml(approvalSummaryText(approval))}</p>
+          <p class="approval-summary">${escapeHtml(approvalReasonCopy(approval))}</p>
         </div>
-        <div class="approval-toolbar">
-          <div class="approval-status is-${escapeHtml(approval.status)}" data-approval-status>${escapeHtml(approvalStatusLabel(approval.status))}</div>
-          ${sectionControls}
-          ${actions}
-        </div>
+        ${
+          approval.status === "pending"
+            ? ""
+            : `<div class="approval-toolbar"><div class="approval-status is-${escapeHtml(approval.status)}" data-approval-status>${escapeHtml(approvalStatusLabel(approval.status))}</div></div>`
+        }
       </div>
-      <div class="approval-section approval-section-preview"${previewExpanded ? "" : " hidden"}>
+      <div class="approval-section approval-section-preview">
         ${renderApprovalPreviewSlot(approval)}
       </div>
       ${
@@ -2050,6 +2089,7 @@ function renderApprovalMarkup(approval) {
       `
           : ""
       }
+      ${actions}
       ${renderApprovalResult(approval.result)}
     </section>
   `;

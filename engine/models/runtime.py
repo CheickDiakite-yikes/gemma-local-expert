@@ -185,7 +185,7 @@ class MockAssistantRuntime:
         if request.proposed_tool:
             tool_label = self._tool_label(request.proposed_tool)
             if request.approval_required:
-                lines.append(f"I prepared a {tool_label} and it is ready for your approval.")
+                lines.append(self._drafted_work_product_reply(request.proposed_tool))
             elif request.tool_result:
                 lines.append(f"I already completed the {tool_label} for this turn.")
             else:
@@ -563,7 +563,7 @@ class MockAssistantRuntime:
                     f'The current {draft_label} is titled "{title}". '
                     "If you want, I can help tighten the title or the body before you save it."
                 )
-            return f'The most recent saved {saved_label} is titled "{title}".'
+            return f'The latest {saved_label} is titled "{title}".'
 
         if any(
             phrase in lowered
@@ -589,7 +589,7 @@ class MockAssistantRuntime:
                 revised_bits.append("It is still waiting for your approval.")
                 return " ".join(revised_bits)
             return (
-                f'The most recent saved {saved_label} is "{title}". '
+                f'The latest {saved_label} is "{title}". '
                 "If you want a revised version, I can prepare an updated draft."
             )
 
@@ -627,8 +627,8 @@ class MockAssistantRuntime:
                         f"It currently centers on: {request.referent_excerpt}"
                     )
                 return (
-                    f'The {saved_label} is "{title}". '
-                    f"It currently centers on: {request.referent_excerpt}"
+                    f'The {saved_label} "{title}" centers on: '
+                    f"{request.referent_excerpt}"
                 )
             return (
                 f'The {(draft_label if request.referent_kind == "pending_output" else saved_label)} is "{title}". '
@@ -640,11 +640,11 @@ class MockAssistantRuntime:
                 cleaned_excerpt = self._memory_summary_for_recall(request.referent_excerpt)
                 if request.referent_kind == "pending_output":
                     return (
-                        f'Yes. The main point in the current {draft_label} "{title}" is: '
+                        f'Yes. In the current {draft_label} "{title}", the main point is: '
                         f"{cleaned_excerpt}"
                     )
                 return (
-                    f'Yes. The main point in the saved {saved_label} "{title}" is: '
+                    f'Yes. In the {saved_label} "{title}", the main point is: '
                     f"{cleaned_excerpt}"
                 )
             if request.referent_kind == "pending_output":
@@ -653,7 +653,7 @@ class MockAssistantRuntime:
                     "I can summarize the body more tightly if you want."
                 )
             return (
-                f'Yes. The most recent saved {saved_label} is "{title}". '
+                f'Yes. The latest {saved_label} is "{title}". '
                 "I can summarize the body more tightly if you want."
             )
 
@@ -993,6 +993,19 @@ class MockAssistantRuntime:
         }
         return mapping.get(tool_name, tool_name.replace("_", " "))
 
+    def _drafted_work_product_reply(self, tool_name: str) -> str:
+        mapping = {
+            "create_note": "I drafted a note below.",
+            "create_report": "I drafted a report below.",
+            "create_message_draft": "I drafted a message below.",
+            "create_checklist": "I drafted a checklist below.",
+            "create_task": "I drafted a task below.",
+            "log_observation": "I drafted an observation below.",
+            "export_brief": "I drafted an export below.",
+            "generate_heatmap_overlay": "I prepared a heatmap overlay draft below.",
+        }
+        return mapping.get(tool_name, f"I drafted a {self._tool_label(tool_name)} below.")
+
     def _saved_output_label(self, tool_name: str) -> str:
         mapping = {
             "create_note": "note",
@@ -1001,7 +1014,7 @@ class MockAssistantRuntime:
             "create_checklist": "checklist",
             "create_task": "task",
             "log_observation": "saved observation",
-            "export_brief": "markdown export",
+            "export_brief": "export",
             "generate_heatmap_overlay": "heatmap overlay",
         }
         return mapping.get(tool_name, tool_name.replace("_", " "))

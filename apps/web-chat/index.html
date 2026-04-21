@@ -8,8 +8,8 @@
     />
     <title>Field Assistant Chat</title>
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
-    <link rel="stylesheet" href="./styles.css?v=20260420d" />
-    <script defer src="./app.js?v=20260420d"></script>
+    <link rel="stylesheet" href="./styles.css?v=20260421a" />
+    <script defer src="./app.js?v=20260421a"></script>
   </head>
   <body>
     <div class="app-shell">
@@ -96,9 +96,10 @@
         </section>
 
         <form class="composer" id="composer">
-          <input id="file-input" type="file" accept="image/*,video/*,.pdf,.txt,.md" multiple hidden />
+          <input id="file-input" name="attachments" type="file" accept="image/*,video/*,.pdf,.txt,.md" multiple hidden />
           <input
             id="camera-capture-input"
+            name="camera_capture"
             type="file"
             accept="image/*,video/*"
             capture="environment"
@@ -189,6 +190,7 @@
               </div>
               <textarea
                 id="composer-input"
+                name="prompt"
                 rows="1"
                 placeholder="Ask the local assistant"
               ></textarea>

@@ -439,6 +439,9 @@ def test_report_turn_requires_approval_and_persists_report_kind(tmp_path: Path) 
     approval_payload = json.loads(approval_event)
     assert approval_payload["payload"]["tool_name"] == "create_report"
     assert approval_payload["payload"]["payload"]["title"] == "Field Assistant Architecture Report"
+    completed_event = next(line for line in lines if '"type":"assistant.message.completed"' in line)
+    completed_payload = json.loads(completed_event)
+    assert completed_payload["payload"]["text"] == "I drafted a report below."
     approval_id = approval_payload["payload"]["id"]
 
     decision = client.post(
@@ -1337,7 +1340,7 @@ def test_pending_export_follow_up_can_answer_title_without_reusing_media_context
     )
     tighten_approval = next(line for line in tighten_lines if line["type"] == "approval.required")
     tighten_text = tighten_completed["payload"]["text"]
-    assert "i tightened the current markdown export draft" in tighten_text.lower()
+    assert "i updated the markdown export" in tighten_text.lower()
     assert "field assistant architecture brief" in tighten_text.lower()
     assert "pit edge" not in tighten_text.lower()
     assert (

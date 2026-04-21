@@ -1021,9 +1021,9 @@ a {
 .tool-result-kicker,
 .approval-kicker {
   color: var(--text-faint);
-  font-size: 0.68rem;
-  text-transform: uppercase;
-  letter-spacing: 0.16em;
+  font-size: 0.72rem;
+  text-transform: none;
+  letter-spacing: 0.03em;
 }
 
 .tool-result-card strong,
@@ -1042,10 +1042,10 @@ a {
 }
 
 .approval-card {
-  margin-top: 8px;
+  margin-top: 10px;
   padding: 10px 0 0;
   display: grid;
-  gap: 8px;
+  gap: 10px;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 
@@ -1059,7 +1059,7 @@ a {
 
 .approval-header {
   display: grid;
-  gap: 4px;
+  gap: 6px;
 }
 
 .approval-header-inline {
@@ -1081,9 +1081,9 @@ a {
 }
 
 .approval-card .approval-summary {
-  font-size: 0.84rem;
+  font-size: 0.87rem;
   color: var(--text-muted);
-  line-height: 1.38;
+  line-height: 1.45;
 }
 
 .approval-toolbar {
@@ -1135,18 +1135,12 @@ a {
 .approval-preview {
   display: grid;
   gap: 7px;
-  padding: 2px 0 0 2px;
-}
-
-.approval-preview-title {
-  font-size: 0.9rem;
-  font-weight: 640;
-  color: var(--text);
+  padding: 2px 0 0;
 }
 
 .approval-card .approval-preview-summary {
   color: var(--text);
-  line-height: 1.52;
+  line-height: 1.56;
 }
 
 .approval-preview-meta {
@@ -1164,11 +1158,6 @@ a {
   color: var(--text-faint);
   font-size: 0.72rem;
   letter-spacing: 0.02em;
-}
-
-.approval-card .approval-preview-note {
-  color: var(--text-faint);
-  font-size: 0.8rem;
 }
 
 .approval-editor {
@@ -1360,10 +1349,11 @@ a {
 }
 
 .approval-actions {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  justify-content: flex-start;
 }
 
 .approval-action {
@@ -1380,10 +1370,16 @@ a {
   border: 1px solid rgba(109, 207, 144, 0.22);
 }
 
-.approval-action.reject {
-  background: rgba(255, 255, 255, 0.04);
+.approval-action.edit {
+  background: rgba(255, 255, 255, 0.03);
   color: var(--text);
   border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.approval-action.reject {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .approval-action:disabled {
