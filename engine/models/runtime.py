@@ -132,7 +132,7 @@ class MockAssistantRuntime:
         ):
             if request.active_topic:
                 return (
-                    f"For the earlier topic about {request.active_topic}, start with the most practical point from "
+                    "For what we were just discussing, start with the most practical point from "
                     f"[{primary.label}] {primary.excerpt}"
                 )
 
@@ -280,29 +280,19 @@ class MockAssistantRuntime:
                 request.messages, request.user_text
             )
             if "what do you mean by that" in lowered:
-                if prior_topic:
-                    return (
-                        f"I mean we can keep the conversation natural while still preserving continuity with the earlier thread about {prior_topic}, "
-                        "and only switch into local retrieval, media analysis, or saved actions when that actually helps."
-                    )
                 return (
                     "I mean we can keep the conversation natural, and only switch into local retrieval, analysis, or saved actions when that actually helps."
                 )
             if any(phrase in lowered for phrase in {"bring that up again", "go back to that", "come back to that"}):
                 if prior_topic:
-                    return f"Yes. The main thread we were on was {prior_topic}. We can stay with that and go deeper."
+                    return "Yes. We can stay with what we were just discussing and go deeper."
                 return "Yes. We can stay with the earlier thread and go deeper."
             if any(phrase in lowered for phrase in {"what should i emphasize first", "what matters first"}):
-                if prior_topic:
-                    return (
-                        f"Start with the most practical first point from our earlier discussion about {prior_topic}: "
-                        "state the goal in plain language, demonstrate the first action once, and repeat the key safety check."
-                    )
                 return (
                     "Start with the most practical first point: state the goal in plain language, demonstrate the first action once, and repeat the key safety check."
                 )
             if prior_topic:
-                return f"To build on the earlier discussion about {prior_topic}, I would keep the next step practical and easy to act on."
+                return "To build on what we were just discussing, I would keep the next step practical and easy to act on."
             return "To build on the last point, I would keep the next step practical and easy to act on."
         if request.interaction_kind == "teaching":
             topic = self._topic_from_request(request.user_text)

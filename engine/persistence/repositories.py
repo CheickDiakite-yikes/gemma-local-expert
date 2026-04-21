@@ -26,6 +26,7 @@ from engine.contracts.api import (
     ConversationMessage,
     ConversationSummary,
     ConversationCreateRequest,
+    EvidencePacket,
     ExportRequest,
     ExportResult,
     KnowledgeDocumentInput,
@@ -78,6 +79,7 @@ class PersistenceStore(Protocol):
         content: str,
         asset_ids: list[str] | None = None,
         turn_id: str | None = None,
+        evidence_packet: EvidencePacket | None = None,
     ) -> TranscriptMessage: ...
 
     def list_recent_messages(
@@ -390,14 +392,15 @@ class SQLiteStore:
         content: str,
         asset_ids: list[str] | None = None,
         turn_id: str | None = None,
+        evidence_packet: EvidencePacket | None = None,
     ) -> TranscriptMessage:
         created_at = utc_now()
         message_id = new_id("msg")
         with self._lock:
             self._connection.execute(
                 """
-                INSERT INTO conversation_messages (id, conversation_id, role, content, created_at, turn_id)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO conversation_messages (id, conversation_id, role, content, created_at, turn_id, evidence_packet_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message_id,
@@ -406,6 +409,7 @@ class SQLiteStore:
                     content,
                     created_at.isoformat(),
                     turn_id,
+                    evidence_packet.model_dump_json() if evidence_packet else None,
                 ),
             )
             for asset_id in asset_ids or []:
@@ -423,6 +427,7 @@ class SQLiteStore:
             content=content,
             turn_id=turn_id,
             assets=self.list_assets(asset_ids or []),
+            evidence_packet=evidence_packet,
             created_at=created_at,
         )
 
@@ -459,7 +464,7 @@ class SQLiteStore:
     ) -> list[TranscriptMessage]:
         rows = self._fetchall(
             """
-            SELECT id, role, content, created_at, turn_id
+            SELECT id, role, content, created_at, turn_id, evidence_packet_json
             FROM conversation_messages
             WHERE conversation_id = ?
             ORDER BY created_at DESC
@@ -483,6 +488,11 @@ class SQLiteStore:
                 approval=(
                     approvals_by_turn.get(row["turn_id"])
                     if row["role"] == "assistant" and row["turn_id"]
+                    else None
+                ),
+                evidence_packet=(
+                    EvidencePacket.model_validate_json(row["evidence_packet_json"])
+                    if row["evidence_packet_json"]
                     else None
                 ),
                 created_at=row["created_at"],

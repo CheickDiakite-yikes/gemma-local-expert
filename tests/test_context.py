@@ -1,6 +1,13 @@
 from engine.context.service import ConversationContextService
 from engine.contracts.api import (
     ApprovalState,
+    EvidenceFact,
+    EvidencePacket,
+    EvidenceRef,
+    ExecutionMode,
+    GroundingStatus,
+    RuntimeProfile,
+    SourceDomain,
     AssetKind,
     AssetSummary,
     TranscriptMessage,
@@ -477,6 +484,70 @@ def test_context_service_preserves_earlier_image_across_longer_transcript_with_c
     assert snapshot.selected_context_assets[0].id == "asset_image"
     assert snapshot.selected_context_summary is not None
     assert "lantern batteries" in snapshot.selected_context_summary.lower()
+
+
+def test_context_service_selects_persisted_grounded_evidence_for_earlier_video() -> None:
+    service = ConversationContextService()
+    video_asset = AssetSummary(
+        id="asset_video",
+        display_name="mine.mov",
+        source_path="mine.mov",
+        kind=AssetKind.VIDEO,
+    )
+    packet = EvidencePacket(
+        source_domain=SourceDomain.VIDEO,
+        asset_ids=[video_asset.id],
+        profile=RuntimeProfile.LOW_MEMORY,
+        execution_mode=ExecutionMode.FALLBACK,
+        grounding_status=GroundingStatus.PARTIAL,
+        summary="Sampled frames show vehicle movement near the pit edge.",
+        facts=[
+            EvidenceFact(
+                summary="A possible rifle-like object is visible near one figure.",
+                refs=[EvidenceRef(label="frame", ref="00:12")],
+            )
+        ],
+        uncertainties=["Tracking and isolation did not run in low-memory mode."],
+    )
+
+    snapshot = service.build(
+        turn_text="Go back to the earlier video. What did we actually see around 00:12?",
+        transcript=[
+            TranscriptMessage(
+                id="msg1",
+                role="user",
+                content="Review this uploaded video conservatively.",
+                assets=[video_asset],
+            ),
+            TranscriptMessage(
+                id="msg2",
+                role="assistant",
+                content="I reviewed sampled frames from the video conservatively.",
+                evidence_packet=packet,
+            ),
+            TranscriptMessage(
+                id="msg3",
+                role="user",
+                content="Thanks, now help me think through tomorrow.",
+            ),
+            TranscriptMessage(
+                id="msg4",
+                role="assistant",
+                content="We can keep it simple and calm.",
+            ),
+        ],
+        attached_assets=[],
+    )
+
+    assert snapshot.selected_context_kind == "video"
+    assert snapshot.selected_context_assets
+    assert snapshot.selected_context_assets[0].id == "asset_video"
+    assert snapshot.selected_evidence_summary == "Sampled frames show vehicle movement near the pit edge."
+    assert snapshot.selected_evidence_facts
+    assert "00:12" in snapshot.selected_evidence_facts[0]
+    assert snapshot.selected_evidence_uncertainties == [
+        "Tracking and isolation did not run in low-memory mode."
+    ]
 
 
 def test_context_service_combines_both_video_summaries_for_comparison_follow_up() -> None:

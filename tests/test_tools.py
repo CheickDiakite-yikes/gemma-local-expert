@@ -1,3 +1,5 @@
+import pytest
+
 from engine.contracts.api import AssistantMode, ConversationTurnRequest
 from engine.tools.runtime import ToolRuntime
 
@@ -411,3 +413,101 @@ def test_revise_pending_note_payload_can_rename_title_explicitly() -> None:
     assert revised is not None
     assert revised["title"] == "Architecture Build Contract"
     assert revised["content"] == "A concise note about the architecture."
+
+
+def test_merge_edited_payload_allows_grounded_refinement_and_keeps_metadata() -> None:
+    runtime = ToolRuntime(_UnusedStore())
+    base_payload = {
+        "title": "Field Assistant Architecture Briefing",
+        "content": (
+            "Key points:\n"
+            "- Local-first assistant built on Gemma.\n"
+            "- Uses bounded routing, retrieval, vision, and approvals.\n"
+        ),
+        "kind": "note",
+        "source_domain": "workspace",
+        "evidence_packet_id": "evidence_workspace_1",
+        "source_asset_ids": ["asset_workspace_1"],
+        "grounding_status": "grounded",
+    }
+
+    merged = runtime.merge_edited_payload(
+        "create_note",
+        base_payload,
+        {
+            "title": "Field Assistant Architecture Brief",
+            "content": (
+                "Key points:\n"
+                "- Local-first assistant built on Gemma.\n"
+                "- Uses bounded routing and approvals.\n"
+            ),
+        },
+    )
+
+    assert merged["title"] == "Field Assistant Architecture Brief"
+    assert merged["evidence_packet_id"] == "evidence_workspace_1"
+    assert merged["source_asset_ids"] == ["asset_workspace_1"]
+    assert merged["grounding_status"] == "grounded"
+
+
+def test_merge_edited_payload_rejects_unrelated_grounded_overwrite() -> None:
+    runtime = ToolRuntime(_UnusedStore())
+    base_payload = {
+        "title": "Field Assistant Architecture Briefing",
+        "content": (
+            "Key points:\n"
+            "- Local-first assistant built on Gemma.\n"
+            "- Uses bounded routing, retrieval, vision, and approvals.\n"
+        ),
+        "kind": "note",
+        "source_domain": "workspace",
+        "evidence_packet_id": "evidence_workspace_1",
+        "source_asset_ids": ["asset_workspace_1"],
+        "grounding_status": "grounded",
+    }
+
+    with pytest.raises(ValueError, match="grounded in earlier local workspace evidence"):
+        runtime.merge_edited_payload(
+            "create_note",
+            base_payload,
+            {
+                "title": "Weekend errands",
+                "content": (
+                    "Shopping list\n"
+                    "- Buy oranges\n"
+                    "- Fix the porch light\n"
+                ),
+            },
+        )
+
+
+def test_merge_edited_payload_rejects_mixed_grounded_drift() -> None:
+    runtime = ToolRuntime(_UnusedStore())
+    base_payload = {
+        "title": "Field Assistant Architecture Briefing",
+        "content": (
+            "Key points:\n"
+            "- Local-first assistant built on Gemma.\n"
+            "- Uses bounded routing, retrieval, vision, and approvals.\n"
+        ),
+        "kind": "note",
+        "source_domain": "workspace",
+        "evidence_packet_id": "evidence_workspace_1",
+        "source_asset_ids": ["asset_workspace_1"],
+        "grounding_status": "grounded",
+    }
+
+    with pytest.raises(ValueError, match="mixing in unrelated content"):
+        runtime.merge_edited_payload(
+            "create_note",
+            base_payload,
+            {
+                "title": "Reviewed field briefing",
+                "content": (
+                    "Reviewed field briefing\n"
+                    "- Pack oral rehydration salts\n"
+                    "- Uses bounded routing, retrieval, vision, and approvals\n"
+                    "- Confirm translator contact sheet before departure\n"
+                ),
+            },
+        )

@@ -243,6 +243,10 @@ class PromptBuilder:
             lines.append(
                 "Treat the referent summary and referent preview in that snapshot as the main continuity anchor for follow-up turns."
             )
+            if conversation_context.selected_evidence_summary:
+                lines.append(
+                    "If the continuity snapshot includes grounded evidence memory, prefer it over assistant prose. Reuse its facts directly and treat its uncertainty lines as hard limits."
+                )
 
         if self._is_teaching_request(user_text):
             lines.append(
@@ -411,6 +415,19 @@ class PromptBuilder:
             for item in evidence_packet.uncertainties[:3]:
                 evidence_lines.append(f"uncertainty={item}")
             sections.append("Evidence packet:\n- " + "\n- ".join(evidence_lines))
+        elif conversation_context and conversation_context.selected_evidence_summary:
+            evidence_memory_lines = [
+                f"domain={conversation_context.active_domain or 'unknown'}",
+                f"summary={conversation_context.selected_evidence_summary}",
+            ]
+            for fact in conversation_context.selected_evidence_facts[:4]:
+                evidence_memory_lines.append(f"fact={fact}")
+            for item in conversation_context.selected_evidence_uncertainties[:3]:
+                evidence_memory_lines.append(f"uncertainty={item}")
+            sections.append(
+                "Selected grounded evidence memory:\n- "
+                + "\n- ".join(evidence_memory_lines)
+            )
         elif specialist_analysis:
             sections.append("Specialist visual analysis:\n" + specialist_analysis)
 

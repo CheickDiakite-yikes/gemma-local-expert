@@ -11,6 +11,7 @@ const state = {
   agentRuns: new Map(),
   approvals: new Map(),
   approvalDrafts: new Map(),
+  approvalErrors: new Map(),
   approvalPanels: new Map(),
   messagePanels: new Map(),
   runPanels: new Map(),
@@ -283,6 +284,10 @@ function approvalDraftFor(approvalId) {
   return state.approvalDrafts.get(approvalId) || null;
 }
 
+function approvalErrorFor(approvalId) {
+  return state.approvalErrors.get(approvalId) || "";
+}
+
 function approvalEditableFields(approval) {
   switch (approval?.tool_name) {
     case "create_task":
@@ -346,6 +351,32 @@ function approvalEffectivePayload(approval, overridePayload = undefined) {
     }
   }
   return approval.payload;
+}
+
+function approvalGroundingLabel(payload) {
+  switch (payload?.source_domain) {
+    case "video":
+      return "video evidence";
+    case "image":
+      return "image evidence";
+    case "document":
+      return "document evidence";
+    case "workspace":
+      return "workspace evidence";
+    default:
+      return "local evidence";
+  }
+}
+
+function approvalGroundingNotice(approval, payload) {
+  if (!payload || !payload.grounding_status || !["grounded", "partial"].includes(payload.grounding_status)) {
+    return "";
+  }
+  const label = approvalGroundingLabel(payload);
+  if (payload.grounding_status === "partial") {
+    return `This draft is only partially grounded in ${label}. Keep edits anchored to the same source material if you want to save it.`;
+  }
+  return `This draft is grounded in ${label}. Refine or shorten it, but keep it anchored to the same source material.`;
 }
 
 function approvalHasDraftChanges(approval, overridePayload = undefined) {
@@ -1355,6 +1386,8 @@ function renderApprovalEditor(approval) {
   const payload = approvalEffectivePayload(approval);
   const isDirty = approvalHasDraftChanges(approval, payload);
   const draftStateText = approvalDraftStateText({ dirty: isDirty });
+  const groundingNotice = approvalGroundingNotice(approval, payload);
+  const errorMessage = approvalErrorFor(approval.id);
   if (approval.tool_name === "create_task") {
     return `
       <section class="approval-editor approval-editor-task" data-approval-editor="${approval.id}">
@@ -1368,6 +1401,8 @@ function renderApprovalEditor(approval) {
             <button class="approval-editor-reset" data-approval-reset type="button"${isDirty ? "" : " disabled"}>Revert</button>
           </div>
         </div>
+        ${groundingNotice ? `<p class="approval-grounding-note">${escapeHtml(groundingNotice)}</p>` : ""}
+        <p class="approval-editor-error"${errorMessage ? "" : " hidden"} data-approval-error>${escapeHtml(errorMessage)}</p>
         <div class="approval-editor-grid approval-editor-grid-task">
           <label class="approval-field approval-field-full">
             <span>Title</span>
@@ -1416,6 +1451,8 @@ function renderApprovalEditor(approval) {
             <button class="approval-editor-reset" data-approval-reset type="button"${isDirty ? "" : " disabled"}>Revert</button>
           </div>
         </div>
+        ${groundingNotice ? `<p class="approval-grounding-note">${escapeHtml(groundingNotice)}</p>` : ""}
+        <p class="approval-editor-error"${errorMessage ? "" : " hidden"} data-approval-error>${escapeHtml(errorMessage)}</p>
         <div class="approval-editor-grid">
           <label class="approval-field approval-field-full">
             <span>Title</span>
@@ -1452,6 +1489,8 @@ function renderApprovalEditor(approval) {
           <button class="approval-editor-reset" data-approval-reset type="button"${isDirty ? "" : " disabled"}>Revert</button>
         </div>
       </div>
+      ${groundingNotice ? `<p class="approval-grounding-note">${escapeHtml(groundingNotice)}</p>` : ""}
+      <p class="approval-editor-error"${errorMessage ? "" : " hidden"} data-approval-error>${escapeHtml(errorMessage)}</p>
       <div class="approval-editor-grid">
         <label class="approval-field approval-field-code approval-field-full">
           <span>Payload JSON</span>
@@ -2058,9 +2097,16 @@ function refreshApprovalCardState(container, approval, collected = undefined) {
   const stateLabel = container.querySelector("[data-approval-draft-state]");
   const resetButton = container.querySelector("[data-approval-reset]");
   const approveButton = container.querySelector('[data-approval-action="approve"]');
+  const errorLabel = container.querySelector("[data-approval-error]");
   const editor = container.querySelector(`[data-approval-editor="${approval.id}"]`);
   if (!editor) {
     return;
+  }
+
+  if (errorLabel) {
+    const errorMessage = approvalErrorFor(approval.id);
+    errorLabel.textContent = errorMessage;
+    errorLabel.hidden = !errorMessage;
   }
 
   if (currentEdit === null) {
@@ -2117,6 +2163,9 @@ function wireApprovalActions(container, approval) {
   if (editor) {
     for (const field of editor.querySelectorAll("[data-approval-field], [data-approval-json]")) {
       field.addEventListener("input", () => {
+        if (state.approvalErrors.has(approval.id)) {
+          state.approvalErrors.delete(approval.id);
+        }
         refreshApprovalCardState(container, approval);
         resizeApprovalTextareas(container);
       });
@@ -2124,6 +2173,7 @@ function wireApprovalActions(container, approval) {
     const resetButton = editor.querySelector("[data-approval-reset]");
     if (resetButton) {
       resetButton.addEventListener("click", () => {
+        state.approvalErrors.delete(approval.id);
         clearApprovalDraft(approval.id);
         render();
       });
@@ -2335,7 +2385,18 @@ async function requestJson(path, init = {}) {
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(text || `Request failed: ${response.status}`);
+    let message = text || `Request failed: ${response.status}`;
+    if (text) {
+      try {
+        const parsed = JSON.parse(text);
+        if (typeof parsed?.detail === "string" && parsed.detail.trim()) {
+          message = parsed.detail.trim();
+        }
+      } catch (error) {
+        // Keep the raw response body when parsing fails.
+      }
+    }
+    throw new Error(message);
   }
 
   if (response.status === 204) {
@@ -3163,26 +3224,33 @@ function handleStreamEvent(event) {
 }
 
 async function submitApprovalDecision(approvalId, action, editedPayload = {}) {
-  const approval = await requestJson(`/v1/approvals/${approvalId}/decisions`, {
-    method: "POST",
-    body: JSON.stringify({
-      action,
-      edited_payload: editedPayload,
-    }),
-  });
+  try {
+    const approval = await requestJson(`/v1/approvals/${approvalId}/decisions`, {
+      method: "POST",
+      body: JSON.stringify({
+        action,
+        edited_payload: editedPayload,
+      }),
+    });
 
-  clearApprovalDraft(approvalId);
-  state.approvals.set(approvalId, approval);
-  const messages = activeMessages();
-  for (const message of messages) {
-    if (message.approval && message.approval.id === approvalId) {
-      message.approval = approval;
+    clearApprovalDraft(approvalId);
+    state.approvalErrors.delete(approvalId);
+    state.approvals.set(approvalId, approval);
+    const messages = activeMessages();
+    for (const message of messages) {
+      if (message.approval && message.approval.id === approvalId) {
+        message.approval = approval;
+      }
     }
+    if (state.activeConversationId) {
+      await refreshAgentRuns(state.activeConversationId);
+    }
+    render();
+  } catch (error) {
+    state.approvalErrors.set(approvalId, error.message || "Unable to save that draft.");
+    render({ preserveScroll: true });
+    addSystemMessage(error.message || "Unable to save that draft.");
   }
-  if (state.activeConversationId) {
-    await refreshAgentRuns(state.activeConversationId);
-  }
-  render();
 }
 
 function closeSidebar() {

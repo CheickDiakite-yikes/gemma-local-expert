@@ -116,12 +116,12 @@ def main() -> None:
                 json={
                     "action": "approve",
                     "edited_payload": {
-                        "title": "Reviewed field briefing",
+                        "title": "Field Assistant Architecture Brief",
                         "content": (
-                            "Reviewed field briefing\n"
-                            "- Pack oral rehydration salts\n"
-                            "- Uses bounded routing, retrieval, vision, and approvals\n"
-                            "- Confirm translator contact sheet before departure\n"
+                            "Field Assistant Architecture Brief\n\n"
+                            "Key points:\n"
+                            "- Local-first assistant built on Gemma.\n"
+                            "- Uses bounded routing, retrieval, vision, and approvals.\n"
                         ),
                     },
                 },

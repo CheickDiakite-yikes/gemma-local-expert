@@ -20,11 +20,14 @@ async def decide_approval(
 
     effective_payload = existing.payload
     if request.action.value == "approve":
-        effective_payload = container.tool_runtime.merge_edited_payload(
-            existing.tool_name,
-            existing.payload,
-            request.edited_payload,
-        )
+        try:
+            effective_payload = container.tool_runtime.merge_edited_payload(
+                existing.tool_name,
+                existing.payload,
+                request.edited_payload,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     approval = container.store.resolve_approval(
         approval_id,
         request,

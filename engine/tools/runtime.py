@@ -254,6 +254,7 @@ class ToolRuntime:
                 merged["content"] = content
             if kind is not None:
                 merged["kind"] = kind
+            self._validate_grounded_edit(tool_name, base_payload, merged, edited_payload)
             return merged
 
         if tool_name == "create_task":
@@ -276,6 +277,7 @@ class ToolRuntime:
                 merged["destination_path"] = self._default_export_path(title)
             if content is not None:
                 merged["content"] = content
+            self._validate_grounded_edit(tool_name, base_payload, merged, edited_payload)
             return merged
 
         return merged
@@ -926,6 +928,151 @@ class ToolRuntime:
         payload["evidence_packet_id"] = evidence_packet.id
         payload["source_asset_ids"] = list(evidence_packet.asset_ids)
         payload["grounding_status"] = evidence_packet.grounding_status.value
+
+    def _validate_grounded_edit(
+        self,
+        tool_name: str,
+        base_payload: dict[str, object],
+        merged_payload: dict[str, object],
+        edited_payload: dict[str, object] | None,
+    ) -> None:
+        if not edited_payload or not self._is_grounded_draft_payload(base_payload):
+            return
+        if not self._grounded_body_changed(tool_name, base_payload, merged_payload):
+            return
+
+        base_text = self._grounded_edit_text(tool_name, base_payload)
+        merged_text = self._grounded_edit_text(tool_name, merged_payload)
+        if not base_text or not merged_text:
+            return
+
+        base_tokens = self._grounding_tokens(base_text)
+        merged_tokens = self._grounding_tokens(merged_text)
+        if not base_tokens or not merged_tokens:
+            return
+
+        shared_tokens = base_tokens & merged_tokens
+        novel_tokens = merged_tokens - base_tokens
+        overlap_count = len(shared_tokens)
+        merged_overlap = overlap_count / max(len(merged_tokens), 1)
+        base_overlap = overlap_count / max(len(base_tokens), 1)
+        novel_ratio = len(novel_tokens) / max(len(merged_tokens), 1)
+        required_shared = min(12, max(4, len(merged_tokens) // 6))
+
+        if (
+            (
+                overlap_count < required_shared
+                and merged_overlap < 0.45
+                and not (merged_overlap >= 0.28 and base_overlap >= 0.18)
+            )
+            or (
+                len(novel_tokens) >= 5
+                and novel_ratio > 0.45
+                and merged_overlap < 0.62
+            )
+        ):
+            domain = self._grounded_source_label(base_payload)
+            raise ValueError(
+                f"This draft is grounded in earlier local {domain} evidence. "
+                "Please refine or shorten it instead of replacing it or mixing in unrelated content."
+            )
+
+    def _is_grounded_draft_payload(self, payload: dict[str, object]) -> bool:
+        grounding_status = str(payload.get("grounding_status") or "").lower()
+        evidence_packet_id = str(payload.get("evidence_packet_id") or "").strip()
+        source_domain = str(payload.get("source_domain") or "").strip()
+        return (
+            grounding_status in {
+                GroundingStatus.GROUNDED.value,
+                GroundingStatus.PARTIAL.value,
+            }
+            and bool(evidence_packet_id)
+            and bool(source_domain)
+        )
+
+    def _grounded_body_changed(
+        self,
+        tool_name: str,
+        base_payload: dict[str, object],
+        merged_payload: dict[str, object],
+    ) -> bool:
+        field_name = self._grounded_body_field(tool_name)
+        if not field_name:
+            return False
+        return str(base_payload.get(field_name) or "") != str(merged_payload.get(field_name) or "")
+
+    def _grounded_body_field(self, tool_name: str) -> str | None:
+        if tool_name == "create_task":
+            return "details"
+        if tool_name in {
+            "create_note",
+            "create_report",
+            "create_message_draft",
+            "create_checklist",
+            "log_observation",
+            "export_brief",
+        }:
+            return "content"
+        return None
+
+    def _grounded_edit_text(self, tool_name: str, payload: dict[str, object]) -> str:
+        parts = [str(payload.get("title") or "").strip()]
+        body_field = self._grounded_body_field(tool_name)
+        if body_field:
+            parts.append(str(payload.get(body_field) or "").strip())
+        return "\n".join(part for part in parts if part).strip()
+
+    def _grounding_tokens(self, text: str) -> set[str]:
+        stop_words = {
+            "a",
+            "an",
+            "and",
+            "are",
+            "as",
+            "at",
+            "be",
+            "before",
+            "but",
+            "by",
+            "for",
+            "from",
+            "has",
+            "have",
+            "in",
+            "into",
+            "is",
+            "it",
+            "its",
+            "local",
+            "of",
+            "on",
+            "or",
+            "that",
+            "the",
+            "their",
+            "this",
+            "to",
+            "with",
+            "you",
+            "your",
+        }
+        return {
+            token
+            for token in re.findall(r"[a-z0-9]+", text.lower())
+            if len(token) >= 3 and token not in stop_words
+        }
+
+    def _grounded_source_label(self, payload: dict[str, object]) -> str:
+        domain = str(payload.get("source_domain") or "").strip().lower()
+        if domain == "video":
+            return "video"
+        if domain == "image":
+            return "image"
+        if domain == "document":
+            return "document"
+        if domain == "workspace":
+            return "workspace"
+        return "grounded"
 
     def _message_draft_from_evidence_packet(
         self, evidence_packet: EvidencePacket

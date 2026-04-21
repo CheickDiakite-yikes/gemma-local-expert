@@ -992,6 +992,28 @@ def test_orchestrator_persists_video_specialist_artifacts_and_streams_them(
                     model_name=request.tracking_model_name,
                     model_source="/tmp/fake-sam",
                     available=True,
+                    evidence_packet=EvidencePacket(
+                        source_domain=SourceDomain.VIDEO,
+                        asset_ids=[asset.asset_id for asset in request.assets],
+                        profile=RuntimeProfile.LOW_MEMORY,
+                        execution_mode=ExecutionMode.FALLBACK,
+                        grounding_status=GroundingStatus.PARTIAL,
+                        summary="Sampled frames show vehicle movement near the pit edge.",
+                        facts=[
+                            EvidenceFact(
+                                summary="Heavy vehicle movement is visible near the pit edge.",
+                                refs=[
+                                    EvidenceRef(
+                                        label="contact sheet",
+                                        ref="site-contact-sheet.png",
+                                    )
+                                ],
+                            )
+                        ],
+                        uncertainties=[
+                            "Tracking and isolation did not run in this test runtime."
+                        ],
+                    ),
                     artifacts=[
                         VideoArtifact(
                             display_name="site-contact-sheet.png",
@@ -1034,6 +1056,9 @@ def test_orchestrator_persists_video_specialist_artifacts_and_streams_them(
         assistant_message = transcript[-1]
         assert assistant_message.assets
         assert assistant_message.assets[0].display_name == "site-contact-sheet.png"
+        assert assistant_message.evidence_packet is not None
+        assert assistant_message.evidence_packet.source_domain == SourceDomain.VIDEO
+        assert assistant_message.evidence_packet.summary
     finally:
         container.store.close()
 

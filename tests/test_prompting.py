@@ -7,7 +7,11 @@ from engine.contracts.api import (
     ConversationTurnRequest,
 )
 from engine.contracts.api import ConversationMessage
-from engine.context.service import ConversationContextSnapshot, WorkProductReference
+from engine.context.service import (
+    ConversationContextSnapshot,
+    GroundedEvidenceMemory,
+    WorkProductReference,
+)
 from engine.models.gateway import ModelRouteSelection
 from engine.orchestrator.prompting import PromptBuilder
 from engine.policy.service import PolicyDecision
@@ -222,6 +226,55 @@ def test_prompt_builder_adds_selected_work_product_referent_block() -> None:
     assert "title=Departure checklist" in prompt
     assert "answer with the current title" in prompt
     assert "summarize that preview" in prompt
+
+
+def test_prompt_builder_includes_selected_grounded_evidence_memory() -> None:
+    builder = PromptBuilder()
+    context = builder.build(
+        turn=ConversationTurnRequest(
+            conversation_id="conv_evidence_memory",
+            mode=AssistantMode.GENERAL,
+            text="Go back to the earlier video. What did we actually see around 00:12?",
+        ),
+        history=[],
+        assets=[],
+        context_assets=[],
+        conversation_context=ConversationContextSnapshot(
+            active_domain="video",
+            selected_context_kind="video",
+            selected_evidence_summary="Sampled frames show vehicle movement near the pit edge.",
+            selected_evidence_facts=[
+                "A possible rifle-like object is visible near one figure. (00:12)"
+            ],
+            selected_evidence_uncertainties=[
+                "Tracking and isolation did not run in low-memory mode."
+            ],
+            recent_evidence_memories=[
+                GroundedEvidenceMemory(
+                    domain="video",
+                    asset_ids=["asset_video"],
+                    asset_labels=["mine.mov"],
+                    summary="Sampled frames show vehicle movement near the pit edge.",
+                )
+            ],
+        ),
+        specialist_analysis=None,
+        workspace_summary=None,
+        route=RouteDecision(interaction_kind="conversation", is_follow_up=True),
+        policy=PolicyDecision(),
+        model_selection=ModelRouteSelection(
+            assistant_model="gemma-4-e2b-it-4bit",
+            embedding_model="embeddinggemma-300m",
+        ),
+        results=[],
+        tool_result=None,
+    )
+
+    prompt = "\n\n".join(message["content"] for message in context.messages)
+    assert "grounded evidence memory" in context.messages[0]["content"]
+    assert "Selected grounded evidence memory:" in prompt
+    assert "fact=A possible rifle-like object is visible near one figure. (00:12)" in prompt
+    assert "uncertainty=Tracking and isolation did not run in low-memory mode." in prompt
 
 
 def test_prompt_builder_treats_media_grounded_tool_turn_as_already_grounded() -> None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from engine.contracts.api import AssetKind, AssetSummary, TranscriptMessage
+from engine.contracts.api import AssetKind, AssetSummary, EvidencePacket, TranscriptMessage
 
 
 _LOW_SIGNAL_USER_TURNS = {
@@ -243,6 +243,19 @@ _REFERENT_STOPWORDS = {
 
 
 @dataclass(slots=True)
+class GroundedEvidenceMemory:
+    domain: str
+    asset_ids: list[str] = field(default_factory=list)
+    asset_labels: list[str] = field(default_factory=list)
+    summary: str | None = None
+    fact_lines: list[str] = field(default_factory=list)
+    uncertainty_lines: list[str] = field(default_factory=list)
+    execution_mode: str | None = None
+    grounding_status: str | None = None
+    turn_id: str | None = None
+
+
+@dataclass(slots=True)
 class ConversationContextSnapshot:
     active_topic: str | None = None
     active_domain: str | None = None
@@ -257,6 +270,9 @@ class ConversationContextSnapshot:
     selected_context_kind: str | None = None
     selected_context_reason: str | None = None
     selected_context_summary: str | None = None
+    selected_evidence_summary: str | None = None
+    selected_evidence_facts: list[str] = field(default_factory=list)
+    selected_evidence_uncertainties: list[str] = field(default_factory=list)
     selected_referent_kind: str | None = None
     selected_referent_tool: str | None = None
     selected_referent_title: str | None = None
@@ -273,6 +289,7 @@ class ConversationContextSnapshot:
     last_completed_output_excerpt: str | None = None
     last_agent_summary: str | None = None
     recent_outputs: list["WorkProductReference"] = field(default_factory=list)
+    recent_evidence_memories: list[GroundedEvidenceMemory] = field(default_factory=list)
 
     def prompt_lines(self) -> list[str]:
         lines: list[str] = []
@@ -305,6 +322,12 @@ class ConversationContextSnapshot:
             lines.append(f"Relevant earlier {kind}: {labels}")
             if self.selected_context_summary:
                 lines.append(f"Relevant earlier {kind} summary: {self.selected_context_summary}")
+            if self.selected_evidence_summary:
+                lines.append(f"Relevant grounded {kind} evidence: {self.selected_evidence_summary}")
+            for fact in self.selected_evidence_facts[:3]:
+                lines.append(f"Relevant grounded fact: {fact}")
+            for item in self.selected_evidence_uncertainties[:2]:
+                lines.append(f"Relevant grounded limit: {item}")
         elif self.last_image_assets or self.last_video_assets:
             available: list[str] = []
             if self.last_image_assets:
@@ -356,6 +379,15 @@ class ConversationContextSnapshot:
             ]
             if labels:
                 lines.append("Recent local outputs: " + "; ".join(labels))
+        if self.recent_evidence_memories:
+            evidence_labels = []
+            for memory in self.recent_evidence_memories[:3]:
+                label = memory.domain
+                if memory.asset_labels:
+                    label += f" ({', '.join(memory.asset_labels[:2])})"
+                evidence_labels.append(label)
+            if evidence_labels:
+                lines.append("Recent grounded evidence memory: " + "; ".join(evidence_labels))
         return lines
 
     def _format_referent(
@@ -453,6 +485,7 @@ class ConversationContextService:
         )
         snapshot.last_image_assets = image_reference_groups[0] if image_reference_groups else []
         snapshot.last_video_assets = video_reference_groups[0] if video_reference_groups else []
+        snapshot.recent_evidence_memories = self._recent_evidence_memories(transcript)
 
         if not attached_assets or self._should_mix_attached_assets_with_prior_context(turn_text):
             (
@@ -473,6 +506,14 @@ class ConversationContextService:
                     assets=snapshot.selected_context_assets,
                     kind=snapshot.selected_context_kind,
                 )
+        selected_evidence = self._select_evidence_memory(
+            turn_text=turn_text,
+            snapshot=snapshot,
+        )
+        if selected_evidence is not None:
+            snapshot.selected_evidence_summary = selected_evidence.summary
+            snapshot.selected_evidence_facts = selected_evidence.fact_lines
+            snapshot.selected_evidence_uncertainties = selected_evidence.uncertainty_lines
         (
             snapshot.selected_referent_kind,
             snapshot.selected_referent_tool,
@@ -484,18 +525,159 @@ class ConversationContextService:
             snapshot.selected_referent_summary = snapshot.selected_referent_title
         elif snapshot.selected_referent_kind == "saved_output":
             snapshot.selected_referent_summary = snapshot.selected_referent_title
-        elif snapshot.selected_referent_kind in {"image", "video"}:
-            snapshot.selected_referent_summary = snapshot.selected_context_summary
-            snapshot.selected_referent_excerpt = snapshot.selected_context_summary
+        elif snapshot.selected_referent_kind in {"image", "video", "document"}:
+            media_summary = snapshot.selected_context_summary or snapshot.selected_evidence_summary
+            snapshot.selected_referent_summary = media_summary
+            snapshot.selected_referent_excerpt = media_summary
         elif snapshot.selected_referent_kind == "topic" and snapshot.active_topic:
             snapshot.selected_referent_summary = snapshot.active_topic
-        snapshot.active_domain = snapshot.selected_referent_kind or snapshot.selected_context_kind
-        snapshot.active_asset_ids = [asset.id for asset in snapshot.selected_context_assets]
-        snapshot.active_asset_labels = [
-            asset.display_name for asset in snapshot.selected_context_assets[:3]
-        ]
+        snapshot.active_domain = (
+            snapshot.selected_referent_kind
+            or snapshot.selected_context_kind
+            or (selected_evidence.domain if selected_evidence is not None else None)
+        )
+        if snapshot.selected_context_assets:
+            snapshot.active_asset_ids = [asset.id for asset in snapshot.selected_context_assets]
+            snapshot.active_asset_labels = [
+                asset.display_name for asset in snapshot.selected_context_assets[:3]
+            ]
+        elif selected_evidence is not None:
+            snapshot.active_asset_ids = selected_evidence.asset_ids[:3]
+            snapshot.active_asset_labels = selected_evidence.asset_labels[:3]
         snapshot.active_draft_lineage = snapshot.pending_approval_id
         return snapshot
+
+    def _recent_evidence_memories(
+        self,
+        transcript: list[TranscriptMessage],
+    ) -> list[GroundedEvidenceMemory]:
+        asset_lookup: dict[str, AssetSummary] = {}
+        for message in transcript:
+            for asset in message.assets:
+                asset_lookup[asset.id] = asset
+
+        memories: list[GroundedEvidenceMemory] = []
+        seen_packet_ids: set[str] = set()
+        for message in reversed(transcript):
+            evidence_packet = message.evidence_packet
+            if evidence_packet is None or evidence_packet.id in seen_packet_ids:
+                continue
+            seen_packet_ids.add(evidence_packet.id)
+            asset_labels = self._evidence_asset_labels(
+                evidence_packet=evidence_packet,
+                message=message,
+                asset_lookup=asset_lookup,
+            )
+            memories.append(
+                GroundedEvidenceMemory(
+                    domain=evidence_packet.source_domain.value,
+                    asset_ids=list(evidence_packet.asset_ids),
+                    asset_labels=asset_labels,
+                    summary=self._trim(self._compact(evidence_packet.summary), 180),
+                    fact_lines=self._evidence_fact_lines(evidence_packet),
+                    uncertainty_lines=[
+                        self._trim(self._compact(item), 140)
+                        for item in evidence_packet.uncertainties[:3]
+                        if self._compact(item)
+                    ],
+                    execution_mode=evidence_packet.execution_mode.value,
+                    grounding_status=evidence_packet.grounding_status.value,
+                    turn_id=message.turn_id,
+                )
+            )
+            if len(memories) == 6:
+                break
+        return memories
+
+    def _evidence_asset_labels(
+        self,
+        *,
+        evidence_packet: EvidencePacket,
+        message: TranscriptMessage,
+        asset_lookup: dict[str, AssetSummary],
+    ) -> list[str]:
+        labels: list[str] = []
+        seen_ids: set[str] = set()
+        for asset_id in evidence_packet.asset_ids:
+            asset = asset_lookup.get(asset_id)
+            if asset is None or asset.id in seen_ids:
+                continue
+            seen_ids.add(asset.id)
+            labels.append(asset.display_name)
+        if labels:
+            return labels
+        for asset in message.assets:
+            if asset.id in seen_ids or self._is_video_contact_sheet(asset):
+                continue
+            seen_ids.add(asset.id)
+            labels.append(asset.display_name)
+        return labels
+
+    def _evidence_fact_lines(self, evidence_packet: EvidencePacket) -> list[str]:
+        fact_lines: list[str] = []
+        for fact in evidence_packet.facts[:4]:
+            summary = self._compact(fact.summary)
+            if not summary:
+                continue
+            refs = ", ".join(ref.ref for ref in fact.refs[:2] if ref.ref)
+            line = f"{summary} ({refs})" if refs else summary
+            fact_lines.append(self._trim(line, 160))
+        return fact_lines
+
+    def _select_evidence_memory(
+        self,
+        *,
+        turn_text: str,
+        snapshot: ConversationContextSnapshot,
+    ) -> GroundedEvidenceMemory | None:
+        if not snapshot.recent_evidence_memories:
+            return None
+
+        query_tokens = self._meaningful_referent_tokens(turn_text)
+        selected_asset_ids = {asset.id for asset in snapshot.selected_context_assets}
+        selected_domain = snapshot.selected_context_kind
+        best_memory: GroundedEvidenceMemory | None = None
+        best_score = -1
+        best_signal = -1
+
+        for index, memory in enumerate(snapshot.recent_evidence_memories):
+            score = max(0, 12 - index)
+            signal = 0
+            if selected_domain and memory.domain == selected_domain:
+                score += 18
+                signal += 18
+            overlap = len(selected_asset_ids & set(memory.asset_ids))
+            if overlap:
+                score += overlap * 60
+                signal += overlap * 60
+            if (
+                snapshot.selected_referent_kind
+                and snapshot.selected_referent_kind == memory.domain
+            ):
+                score += 10
+                signal += 10
+
+            memory_tokens = self._meaningful_referent_tokens(
+                " ".join(
+                    [
+                        memory.summary or "",
+                        " ".join(memory.fact_lines[:3]),
+                        " ".join(memory.asset_labels[:2]),
+                    ]
+                )
+            )
+            token_overlap = len(query_tokens & memory_tokens) * 5
+            score += token_overlap
+            signal += token_overlap
+
+            if best_memory is None or (signal, score) > (best_signal, best_score):
+                best_memory = memory
+                best_score = score
+                best_signal = signal
+
+        if best_signal <= 0:
+            return None
+        return best_memory
 
     def _should_mix_attached_assets_with_prior_context(self, turn_text: str) -> bool:
         lowered = turn_text.lower().strip()

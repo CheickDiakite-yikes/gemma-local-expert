@@ -1180,6 +1180,27 @@ a {
   background: rgba(255, 255, 255, 0.018);
 }
 
+.approval-grounding-note,
+.approval-editor-error {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  font-size: 0.81rem;
+  line-height: 1.45;
+}
+
+.approval-grounding-note {
+  border: 1px solid rgba(211, 139, 88, 0.16);
+  background: rgba(211, 139, 88, 0.08);
+  color: var(--text-muted);
+}
+
+.approval-editor-error {
+  border: 1px solid rgba(255, 143, 143, 0.24);
+  background: rgba(255, 143, 143, 0.08);
+  color: #ffd9d9;
+}
+
 .approval-editor-copy {
   display: grid;
   gap: 4px;

@@ -112,6 +112,19 @@ def test_workspace_agent_architecture_brief_ignores_generated_noise_and_metadata
         "Offline-first field workflows with approvals for durable actions.\n",
         encoding="utf-8",
     )
+    (docs / "field-prep.md").write_text(
+        "Field prep checklist\n"
+        "Pack oral rehydration salts\n"
+        "Pack backup batteries\n"
+        "Confirm translator contact sheet before departure\n",
+        encoding="utf-8",
+    )
+    (docs / "route-notes.md").write_text(
+        "Route notes\n"
+        "Bring printed maps for the first village visit.\n"
+        "Meet the translator at first light.\n",
+        encoding="utf-8",
+    )
 
     output_dir = tmp_path / "output" / "playwright" / "live-qa"
     output_dir.mkdir(parents=True)
@@ -167,3 +180,6 @@ def test_workspace_agent_architecture_brief_ignores_generated_noise_and_metadata
     assert "Thanks for contributing" not in state.summary_text
     assert "Local-first orchestration for grounded answers" in state.summary_text
     assert "One assistant surface with specialist routes underneath" in state.summary_text
+    assert "Pack oral rehydration salts" not in state.summary_text
+    assert "Pack backup batteries" not in state.summary_text
+    assert "Confirm translator contact sheet before departure" not in state.summary_text

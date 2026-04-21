@@ -808,6 +808,7 @@ class OrchestratorService:
             assistant_message,
             turn_id=turn_id,
             asset_ids=completed_asset_ids,
+            evidence_packet=evidence_packet,
         )
 
     def _multi_output_recall_reply(

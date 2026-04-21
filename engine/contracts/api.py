@@ -162,6 +162,7 @@ class TranscriptMessage(StrictModel):
     turn_id: str | None = None
     assets: list[AssetSummary] = Field(default_factory=list)
     approval: ApprovalState | None = None
+    evidence_packet: EvidencePacket | None = None
     created_at: datetime = Field(default_factory=utc_now)
 
 

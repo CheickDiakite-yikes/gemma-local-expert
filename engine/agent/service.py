@@ -144,6 +144,70 @@ ACTION_HINTS = (
     "translate",
 )
 
+ARCHITECTURE_TOKENS = {
+    "agent",
+    "architecture",
+    "architectural",
+    "assistant",
+    "contract",
+    "engine",
+    "memory",
+    "model",
+    "offline",
+    "orchestrator",
+    "policy",
+    "routing",
+    "shell",
+    "system",
+}
+
+ARCHITECTURE_PATH_HINTS = {
+    "agent",
+    "architecture",
+    "architectural",
+    "approval",
+    "contract",
+    "design",
+    "engine",
+    "model",
+    "offline",
+    "orchestr",
+    "overview",
+    "policy",
+    "research",
+    "routing",
+    "shell",
+    "spec",
+    "system",
+}
+
+OPERATIONAL_PATH_HINTS = {
+    "checklist",
+    "contact",
+    "contacts",
+    "departure",
+    "field-prep",
+    "field_prep",
+    "prep",
+    "route",
+    "routes",
+    "visit",
+    "visits",
+}
+
+OPERATIONAL_LINE_HINTS = {
+    "backup batteries",
+    "consent forms",
+    "contact sheet",
+    "departure",
+    "oral rehydration salts",
+    "pack ",
+    "restock",
+    "top up",
+    "translator",
+    "visit",
+}
+
 STOPWORDS = {
     "a",
     "about",
@@ -287,6 +351,7 @@ class WorkspaceAgentService:
         step: AgentRunStep,
     ) -> AgentRunStep:
         tokens = self._search_tokens(plan.goal)
+        architecture_focus = self._is_architecture_focused(tokens)
         candidate_limit = self._candidate_limit(tokens)
         candidates: list[WorkspaceCandidate] = []
         for path in self._iter_supported_files(state.scope_root):
@@ -315,6 +380,23 @@ class WorkspaceAgentService:
         )
         strong_match_target = min(candidate_limit, 2)
         strong_candidates = [candidate for candidate in candidates if candidate.score >= 1.0]
+        if architecture_focus and strong_candidates:
+            focused_candidates = [
+                candidate
+                for candidate in strong_candidates
+                if self._matches_architecture_focus(candidate)
+            ]
+            state.candidate_files = (
+                focused_candidates or strong_candidates
+            )[: max(candidate_limit, 1)]
+            detail = (
+                f"Found {len(state.candidate_files)} candidate files inside the workspace scope."
+            )
+            return self._complete_step(
+                step,
+                detail,
+                references=[candidate.relative_path for candidate in state.candidate_files[:4]],
+            )
         seen_paths = {candidate.path for candidate in candidates}
         if len(strong_candidates) < strong_match_target:
             for path in self._iter_supported_files(state.scope_root):
@@ -429,7 +511,8 @@ class WorkspaceAgentService:
                 summary += "\n\nVisible scope entries:\n- " + "\n- ".join(state.top_entries[:5])
             return summary[: self.max_context_chars - 1].rstrip() + "…" if len(summary) > self.max_context_chars else summary
 
-        key_points = self._key_points_from_documents(state.read_documents)
+        tokens = self._search_tokens(plan.goal)
+        key_points = self._key_points_from_documents(state.read_documents, tokens=tokens)
         reviewed_files = [document.relative_path for document in state.read_documents[: self.max_file_reads]]
         sections = [
             self._overview_sentence(plan.goal, reviewed_files, scope_display),
@@ -479,11 +562,13 @@ class WorkspaceAgentService:
     def _key_points_from_documents(
         self,
         documents: list[WorkspaceReadDocument],
+        *,
+        tokens: list[str],
     ) -> list[str]:
         points: list[str] = []
         seen: set[str] = set()
         for document in documents:
-            for point in self._document_points(document):
+            for point in self._document_points(document, tokens=tokens):
                 normalized = point.lower()
                 if normalized in seen:
                     continue
@@ -493,9 +578,15 @@ class WorkspaceAgentService:
                     return points
         return points
 
-    def _document_points(self, document: WorkspaceReadDocument) -> list[str]:
+    def _document_points(
+        self,
+        document: WorkspaceReadDocument,
+        *,
+        tokens: list[str],
+    ) -> list[str]:
         candidates: list[tuple[float, str]] = []
         seen: set[str] = set()
+        architecture_focus = self._is_architecture_focused(tokens)
 
         for raw_line in document.excerpt.splitlines():
             line = self._clean_summary_line(raw_line)
@@ -505,7 +596,18 @@ class WorkspaceAgentService:
                 continue
             if self._is_link_only_line(raw_line, line):
                 continue
-            score = self._point_signal_score(line)
+            if self._should_skip_line_for_goal(
+                line=line,
+                relative_path=document.relative_path,
+                tokens=tokens,
+                architecture_focus=architecture_focus,
+            ):
+                continue
+            score = self._point_signal_score(
+                line,
+                tokens=tokens,
+                relative_path=document.relative_path,
+            )
             if score <= 0:
                 continue
             normalized = line.lower()
@@ -554,13 +656,20 @@ class WorkspaceAgentService:
             or re.match(r"^[A-Z][\w\s&/-]+(?:Architecture Brief|Product Spec|Research Synthesis)$", cleaned_line)
         )
 
-    def _point_signal_score(self, line: str) -> float:
+    def _point_signal_score(
+        self,
+        line: str,
+        *,
+        tokens: list[str],
+        relative_path: str,
+    ) -> float:
         lowered = line.lower()
         words = lowered.split()
         if len(words) < 2:
             return -1.0
 
         score = 0.0
+        architecture_focus = self._is_architecture_focused(tokens)
         if len(words) >= 7:
             score += 1.2
         elif len(words) >= 5:
@@ -576,6 +685,13 @@ class WorkspaceAgentService:
             score += 0.8
         if any(token in lowered for token in {" is ", " are ", " should ", " can ", " will "}):
             score += 0.8
+        score += self._goal_token_overlap_boost(lowered, tokens)
+        if architecture_focus and any(hint in relative_path.lower() for hint in OPERATIONAL_PATH_HINTS):
+            score -= 0.8
+        if architecture_focus and any(hint in lowered for hint in OPERATIONAL_LINE_HINTS):
+            score -= 2.0
+        if architecture_focus and any(hint in lowered for hint in SIGNAL_HINTS):
+            score += 1.1
         if self._looks_like_heading(line):
             score -= 1.4
         if (
@@ -590,6 +706,54 @@ class WorkspaceAgentService:
             score -= 0.8
 
         return score
+
+    def _should_skip_line_for_goal(
+        self,
+        *,
+        line: str,
+        relative_path: str,
+        tokens: list[str],
+        architecture_focus: bool,
+    ) -> bool:
+        lowered = line.lower()
+        words = lowered.split()
+        if not architecture_focus:
+            return False
+        if (
+            (self._looks_like_heading(line) or (len(words) <= 4 and line == re.sub(r"[.]+$", "", line)))
+            and not any(hint in lowered for hint in VERB_HINTS)
+            and not any(token in lowered for token in {" is ", " are ", " should ", " can ", " will "})
+        ):
+            return True
+        if self._goal_token_overlap_boost(lowered, tokens) > 0:
+            return False
+        if any(hint in lowered for hint in SIGNAL_HINTS):
+            return False
+        if any(hint in lowered for hint in VERB_HINTS):
+            return False
+        if any(hint in lowered for hint in OPERATIONAL_LINE_HINTS):
+            return True
+        return any(hint in relative_path.lower() for hint in OPERATIONAL_PATH_HINTS) and bool(
+            re.match(r"^(pack|confirm|bring|top|restock|review|meet|check)\b", lowered)
+        )
+
+    def _goal_token_overlap_boost(self, lowered_line: str, tokens: list[str]) -> float:
+        overlap_tokens = [
+            token
+            for token in tokens
+            if token in lowered_line and token not in STOPWORDS and len(token) > 3
+        ]
+        return min(2.4, len(overlap_tokens) * 0.8)
+
+    def _is_architecture_focused(self, tokens: list[str]) -> bool:
+        return any(token in ARCHITECTURE_TOKENS for token in tokens)
+
+    def _matches_architecture_focus(self, candidate: WorkspaceCandidate) -> bool:
+        lowered_path = candidate.relative_path.lower()
+        if any(hint in lowered_path for hint in ARCHITECTURE_PATH_HINTS):
+            return True
+        lowered_preview = candidate.preview.lower()
+        return any(hint in lowered_preview for hint in ARCHITECTURE_PATH_HINTS)
 
     def _resolve_scope_root(self, goal: str) -> Path:
         requested = self._extract_scope_hint(goal)
@@ -650,6 +814,7 @@ class WorkspaceAgentService:
         haystack = f"{path.as_posix()} {preview.lower()}"
         score = 0.0
         lowered_path = path.as_posix().lower()
+        architecture_focus = self._is_architecture_focused(tokens)
         for token in tokens:
             if token in lowered_path:
                 score += 2.0
@@ -658,6 +823,8 @@ class WorkspaceAgentService:
                 score += min(3.0, matches * 0.35)
         score += self._path_priority_boost(tokens, lowered_path)
         score -= self._path_noise_penalty(lowered_path)
+        if architecture_focus and any(hint in lowered_path for hint in OPERATIONAL_PATH_HINTS):
+            score -= 2.4
         return score
 
     def _path_priority_boost(self, tokens: list[str], lowered_path: str) -> float:

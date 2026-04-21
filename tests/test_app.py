@@ -951,6 +951,67 @@ def test_workspace_agent_briefing_requires_approval_and_completes_after_decision
     assert "Confirm the village route before departure" in notes[0]["content"]
 
 
+def test_grounded_approval_edit_rejects_unrelated_overwrite_and_stays_pending(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    (workspace_root / "field-assistant-architecture.md").write_text(
+        "Field Assistant Architecture Overview\n"
+        "- Local-first assistant built on Gemma.\n"
+        "- Uses bounded routing, retrieval, vision, and approvals.\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings(
+        database_path=str(tmp_path / "test-grounded-approval-guardrail.db"),
+        workspace_root=str(workspace_root),
+    )
+    client = TestClient(create_app(settings))
+    conversation = client.post(
+        "/v1/conversations",
+        json={"title": "Grounded Edit", "mode": "research"},
+    ).json()
+
+    response = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Prepare a short workspace briefing about the current field assistant architecture.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+
+    assert response.status_code == 200
+    lines = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+    approval_event = next(line for line in lines if line["type"] == "approval.required")
+    approval_id = approval_event["payload"]["id"]
+
+    decision_response = client.post(
+        f"/v1/approvals/{approval_id}/decisions",
+        json={
+            "action": "approve",
+            "edited_payload": {
+                "title": "Weekend errands",
+                "content": "Shopping list\n- Buy oranges\n- Fix the porch light\n",
+            },
+        },
+    )
+
+    assert decision_response.status_code == 400
+    assert "grounded in earlier local workspace evidence" in decision_response.json()["detail"]
+
+    transcript = client.get(f"/v1/conversations/{conversation['id']}/messages").json()
+    assert transcript[-1]["approval"]["status"] == "pending"
+
+    notes_response = client.get("/v1/notes")
+    assert notes_response.status_code == 200
+    assert notes_response.json() == []
+
+
 def test_workspace_agent_can_export_brief_as_markdown(tmp_path: Path) -> None:
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
@@ -1868,6 +1929,8 @@ def test_mixed_conversation_can_revisit_media_and_pending_draft_after_pivot(
     assert "workers near excavation equipment" in responses[2].lower()
     assert latest_approval_payload is not None
     assert latest_approval_payload["payload"]["title"] == "Field Assistant Architecture Brief"
+    assert "oral rehydration salts" not in completed_texts[3].lower()
+    assert "translator contact sheet" not in completed_texts[3].lower()
     assert "pit edge" not in completed_texts[6].lower()
     assert "field assistant architecture brief" not in completed_texts[6].lower()
     assert "lantern batteries" in completed_texts[7].lower()
