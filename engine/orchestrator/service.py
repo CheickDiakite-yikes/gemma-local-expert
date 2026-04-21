@@ -7,6 +7,7 @@ import re
 from engine.agent.service import WorkspaceAgentError, WorkspaceAgentService
 from engine.audit.service import AuditService
 from engine.config.settings import Settings
+from engine.context.memory import ConversationMemoryService
 from engine.context.service import ConversationContextService
 from engine.contracts.api import (
     AgentRun,
@@ -77,6 +78,7 @@ class OrchestratorService:
         self.workspace_agent = workspace_agent
         self.audit = audit
         self.context_service = ConversationContextService()
+        self.memory_service = ConversationMemoryService(runtime)
 
     async def stream_turn(
         self, turn: ConversationTurnRequest
@@ -94,11 +96,16 @@ class OrchestratorService:
                 self.settings.conversation_history_limit,
             ),
         )
+        recent_memories = self.store.list_conversation_memories(
+            turn.conversation_id,
+            limit=self.settings.conversation_memory_limit,
+        )
         attached_assets = self.store.list_assets(turn.asset_ids)
         conversation_context = self.context_service.build(
             turn_text=turn.text,
             transcript=prior_transcript,
             attached_assets=attached_assets,
+            recent_memories=recent_memories,
         )
         contextual_assets = conversation_context.selected_context_assets
         routed_assets = self._merge_assets(attached_assets, contextual_assets)
@@ -216,6 +223,17 @@ class OrchestratorService:
                 "assistant",
                 blocked_message,
                 turn_id=turn_id,
+            )
+            self._persist_conversation_memory(
+                conversation_id=turn.conversation_id,
+                turn_id=turn_id,
+                turn_text=turn.text,
+                assistant_text=blocked_message,
+                interaction_kind=route.interaction_kind,
+                conversation_context=conversation_context,
+                evidence_packet=None,
+                workspace_summary=None,
+                tool_name=None,
             )
             return
 
@@ -751,6 +769,8 @@ class OrchestratorService:
                     is_follow_up=route.is_follow_up,
                     active_topic=conversation_context.active_topic,
                     conversation_context_summary="\n".join(conversation_context.prompt_lines()) or None,
+                    selected_memory_topic=conversation_context.selected_memory_topic,
+                    selected_memory_summary=conversation_context.selected_memory_summary,
                     referent_kind=conversation_context.selected_referent_kind,
                     referent_tool=conversation_context.selected_referent_tool,
                     referent_title=conversation_context.selected_referent_title,
@@ -809,6 +829,17 @@ class OrchestratorService:
             turn_id=turn_id,
             asset_ids=completed_asset_ids,
             evidence_packet=evidence_packet,
+        )
+        self._persist_conversation_memory(
+            conversation_id=turn.conversation_id,
+            turn_id=turn_id,
+            turn_text=turn.text,
+            assistant_text=assistant_message,
+            interaction_kind=route.interaction_kind,
+            conversation_context=conversation_context,
+            evidence_packet=evidence_packet,
+            workspace_summary=workspace_summary,
+            tool_name=planned_tool_name or conversation_context.selected_referent_tool,
         )
 
     def _multi_output_recall_reply(
@@ -1327,6 +1358,90 @@ class OrchestratorService:
         if result.get("status"):
             return f"Tool finished with status {result['status']}."
         return "The local tool completed successfully."
+
+    def _persist_conversation_memory(
+        self,
+        *,
+        conversation_id: str,
+        turn_id: str,
+        turn_text: str,
+        assistant_text: str,
+        interaction_kind: str,
+        conversation_context,
+        evidence_packet: EvidencePacket | None,
+        workspace_summary: str | None,
+        tool_name: str | None,
+    ) -> None:
+        source_domain = self._memory_source_domain(
+            evidence_packet=evidence_packet,
+            workspace_summary=workspace_summary,
+            conversation_context=conversation_context,
+        )
+        asset_ids = (
+            list(evidence_packet.asset_ids)
+            if evidence_packet is not None
+            else list(getattr(conversation_context, "active_asset_ids", []) or [])
+        )
+        try:
+            entry = self.memory_service.build_entry(
+                conversation_id=conversation_id,
+                turn_id=turn_id,
+                user_text=turn_text,
+                assistant_text=assistant_text,
+                interaction_kind=interaction_kind,
+                active_topic=getattr(conversation_context, "active_topic", None),
+                source_domain=source_domain,
+                asset_ids=asset_ids,
+                referent_kind=getattr(conversation_context, "selected_referent_kind", None),
+                referent_title=(
+                    getattr(conversation_context, "selected_referent_title", None)
+                    or getattr(conversation_context, "selected_memory_topic", None)
+                ),
+                evidence_packet=evidence_packet,
+                workspace_summary_text=workspace_summary,
+                tool_name=tool_name,
+            )
+            if entry is None:
+                return
+            self.store.create_conversation_memory(entry)
+        except Exception:
+            return
+
+    def _memory_source_domain(
+        self,
+        *,
+        evidence_packet: EvidencePacket | None,
+        workspace_summary: str | None,
+        conversation_context,
+    ) -> SourceDomain | None:
+        if evidence_packet is not None:
+            return evidence_packet.source_domain
+        if workspace_summary:
+            return SourceDomain.WORKSPACE
+        for candidate in (
+            getattr(conversation_context, "selected_referent_kind", None),
+            getattr(conversation_context, "selected_context_kind", None),
+            getattr(conversation_context, "active_domain", None),
+        ):
+            mapped = self._source_domain_from_label(candidate)
+            if mapped is not None:
+                return mapped
+        return None
+
+    def _source_domain_from_label(self, label: str | None) -> SourceDomain | None:
+        mapping = {
+            "image": SourceDomain.IMAGE,
+            "video": SourceDomain.VIDEO,
+            "document": SourceDomain.DOCUMENT,
+            "workspace": SourceDomain.WORKSPACE,
+            "conversation": SourceDomain.CONVERSATION,
+            "topic": SourceDomain.CONVERSATION,
+            "pending_output": SourceDomain.CONVERSATION,
+            "saved_output": SourceDomain.CONVERSATION,
+        }
+        if not label:
+            return None
+        return mapping.get(label)
 
     def _workspace_evidence_packet(
         self,

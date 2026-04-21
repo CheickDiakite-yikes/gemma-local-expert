@@ -5,7 +5,14 @@ from fastapi.testclient import TestClient
 
 from engine.api.app import build_container, create_app
 from engine.config.settings import Settings
-from engine.contracts.api import AssetCareContext, AssetKind
+from engine.contracts.api import (
+    AssetCareContext,
+    AssetKind,
+    ConversationMemoryEntry,
+    ConversationMemoryKind,
+    SourceDomain,
+    new_id,
+)
 from engine.models.video import VideoAnalysisResult, VideoArtifact
 from engine.models.vision import VisionAnalysisResult
 
@@ -80,7 +87,8 @@ def test_conversation_listing_and_transcript_endpoints(tmp_path: Path) -> None:
 
 def test_conversation_delete_removes_transcript_and_listing(tmp_path: Path) -> None:
     settings = Settings(database_path=str(tmp_path / "test-delete.db"))
-    client = TestClient(create_app(settings))
+    app = create_app(settings)
+    client = TestClient(app)
     conversation = client.post(
         "/v1/conversations",
         json={"title": "Delete me", "mode": "general"},
@@ -99,6 +107,20 @@ def test_conversation_delete_removes_transcript_and_listing(tmp_path: Path) -> N
     )
     assert turn_response.status_code == 200
 
+    app.state.container.store.create_conversation_memory(
+        ConversationMemoryEntry(
+            id=new_id("memory"),
+            conversation_id=conversation["id"],
+            turn_id="turn_memory",
+            kind=ConversationMemoryKind.GENERAL,
+            topic="Deletion test memory",
+            summary="This memory should disappear when the conversation is deleted.",
+            keywords=["deletion", "memory"],
+            source_domain=SourceDomain.CONVERSATION,
+        )
+    )
+    assert app.state.container.store.list_conversation_memories(conversation["id"])
+
     delete_response = client.delete(f"/v1/conversations/{conversation['id']}")
     assert delete_response.status_code == 204
     assert delete_response.text == ""
@@ -110,6 +132,101 @@ def test_conversation_delete_removes_transcript_and_listing(tmp_path: Path) -> N
     assert conversations_response.status_code == 200
     conversations = conversations_response.json()
     assert all(item["id"] != conversation["id"] for item in conversations)
+    assert app.state.container.store.list_conversation_memories(conversation["id"]) == []
+
+
+def test_turn_persists_conversation_memory_entry(tmp_path: Path) -> None:
+    settings = Settings(database_path=str(tmp_path / "test-memory-persist.db"))
+    app = create_app(settings)
+    client = TestClient(app)
+    conversation = client.post(
+        "/v1/conversations",
+        json={"title": "Memory", "mode": "field"},
+    ).json()
+
+    response = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "field",
+            "text": "Teach me how to explain oral rehydration solution simply.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+
+    assert response.status_code == 200
+    memories = app.state.container.store.list_conversation_memories(conversation["id"])
+    assert memories
+    assert memories[0].kind == ConversationMemoryKind.TEACHING
+    assert memories[0].summary
+
+
+def test_follow_up_can_use_selected_conversation_memory_after_topic_pivot(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(database_path=str(tmp_path / "test-memory-follow-up.db"))
+    app = create_app(settings)
+    client = TestClient(app)
+    conversation = client.post(
+        "/v1/conversations",
+        json={"title": "Memory follow up", "mode": "general"},
+    ).json()
+    store = app.state.container.store
+
+    store.append_transcript(
+        conversation["id"],
+        "user",
+        "Explain the architecture direction plainly.",
+        turn_id="turn_seed_user",
+    )
+    store.append_transcript(
+        conversation["id"],
+        "assistant",
+        "The main direction is one orchestrator with grounded specialist routes and explicit approvals.",
+        turn_id="turn_seed_assistant",
+    )
+    store.append_transcript(
+        conversation["id"],
+        "user",
+        "Separate tangent about lunch.",
+        turn_id="turn_pivot_user",
+    )
+    store.append_transcript(
+        conversation["id"],
+        "assistant",
+        "We can talk about lunch too.",
+        turn_id="turn_pivot_assistant",
+    )
+    store.create_conversation_memory(
+        ConversationMemoryEntry(
+            id=new_id("memory"),
+            conversation_id=conversation["id"],
+            turn_id="turn_seed_assistant",
+            kind=ConversationMemoryKind.GENERAL,
+            topic="Architecture direction",
+            summary="Keep one orchestrator with grounded specialist routes and explicit approvals.",
+            keywords=["architecture", "orchestrator", "approvals"],
+            source_domain=SourceDomain.CONVERSATION,
+        )
+    )
+
+    response = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "general",
+            "text": "Can we go back to that architecture point again?",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+        },
+    )
+
+    assert response.status_code == 200
+    assert "one orchestrator" in response.text.lower()
+    assert "grounded specialist routes" in response.text.lower()
 
 
 def test_approval_executes_checklist_tool_and_persists_note(tmp_path: Path) -> None:
@@ -1284,6 +1401,84 @@ def test_multi_output_recall_question_does_not_trigger_new_export(tmp_path: Path
     assert "Field Assistant Architecture Briefing" in text
 
 
+def test_same_type_output_recall_can_resolve_first_report_by_ordinal(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    (workspace_root / "field-assistant-architecture.md").write_text(
+        "Field Assistant architecture overview\n"
+        "Local-first assistant built on Gemma.\n"
+        "Uses bounded routing and approvals.\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings(
+        database_path=str(tmp_path / "test-first-report-recall.db"),
+        workspace_root=str(workspace_root),
+    )
+    client = TestClient(create_app(settings))
+    conversation = client.post(
+        "/v1/conversations",
+        json={"title": "First Report Recall", "mode": "research"},
+    ).json()
+
+    first_report = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Create a report summarizing the current field assistant architecture.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+        },
+    )
+    first_lines = [json.loads(line) for line in first_report.text.splitlines() if line.strip()]
+    first_approval = next(line for line in first_lines if line["type"] == "approval.required")
+    client.post(
+        f"/v1/approvals/{first_approval['payload']['id']}/decisions",
+        json={"action": "approve", "edited_payload": {"title": "Architecture baseline report"}},
+    )
+
+    second_report = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Create another report summarizing the current field assistant architecture.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+        },
+    )
+    second_lines = [json.loads(line) for line in second_report.text.splitlines() if line.strip()]
+    second_approval = next(line for line in second_lines if line["type"] == "approval.required")
+    client.post(
+        f"/v1/approvals/{second_approval['payload']['id']}/decisions",
+        json={"action": "approve", "edited_payload": {"title": "Architecture follow-up report"}},
+    )
+
+    follow_up = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "What was in the first report again?",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+        },
+    )
+    assert follow_up.status_code == 200
+    completed = next(
+        json.loads(line)
+        for line in follow_up.text.splitlines()
+        if '"type":"assistant.message.completed"' in line
+    )
+    text = completed["payload"]["text"]
+    assert "Architecture baseline report" in text
+    assert "Architecture follow-up report" not in text
+
+
 def test_multimodal_conversation_handles_topic_pivots_follow_ups_and_workspace_output(
     tmp_path: Path,
 ) -> None:
@@ -2005,7 +2200,7 @@ def test_follow_up_can_target_earlier_checklist_even_after_newer_export_draft(
         if '"type":"assistant.message.completed"' in line
     )
     text = completed_line["payload"]["text"].lower()
-    assert "current checklist" in text
+    assert "checklist" in text
     assert "checklist for tomorrow's village visits" in text
     assert "markdown export" not in text
 

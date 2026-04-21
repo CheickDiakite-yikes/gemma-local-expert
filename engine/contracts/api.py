@@ -77,6 +77,14 @@ class GroundingStatus(str, Enum):
     UNAVAILABLE = "unavailable"
 
 
+class ConversationMemoryKind(str, Enum):
+    GENERAL = "general"
+    TEACHING = "teaching"
+    MEDIA = "media"
+    WORKSPACE = "workspace"
+    OUTPUT = "output"
+
+
 class StreamEventType(str, Enum):
     ASSISTANT_DELTA = "assistant.delta"
     ASSISTANT_MESSAGE_COMPLETED = "assistant.message.completed"
@@ -138,6 +146,21 @@ class ConversationSummary(StrictModel):
 class ConversationMessage(StrictModel):
     role: str
     content: str
+
+
+class ConversationMemoryEntry(StrictModel):
+    id: str
+    conversation_id: str
+    turn_id: str
+    kind: ConversationMemoryKind = ConversationMemoryKind.GENERAL
+    topic: str
+    summary: str
+    keywords: list[str] = Field(default_factory=list)
+    source_domain: SourceDomain | None = None
+    asset_ids: list[str] = Field(default_factory=list)
+    tool_name: str | None = None
+    referent_title: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
 
 
 class AssetSummary(StrictModel):

@@ -31,6 +31,8 @@ class AssistantGenerationRequest:
     is_follow_up: bool
     active_topic: str | None
     conversation_context_summary: str | None
+    selected_memory_topic: str | None
+    selected_memory_summary: str | None
     referent_kind: str | None
     referent_tool: str | None
     referent_title: str | None
@@ -58,10 +60,39 @@ class AssistantGenerationResult:
     model_source: str | None
 
 
+@dataclass(slots=True)
+class ConversationMemoryRequest:
+    conversation_id: str
+    turn_id: str
+    user_text: str
+    assistant_text: str
+    interaction_kind: str
+    active_topic: str | None
+    source_domain: SourceDomain | None
+    asset_ids: list[str]
+    referent_kind: str | None
+    referent_title: str | None
+    evidence_packet: EvidencePacket | None
+    workspace_summary_text: str | None
+    tool_name: str | None
+
+
+@dataclass(slots=True)
+class ConversationMemoryResult:
+    topic: str
+    summary: str
+    keywords: list[str]
+    backend: str
+
+
 class AssistantRuntime(Protocol):
     backend_name: str
 
     def generate(self, request: AssistantGenerationRequest) -> AssistantGenerationResult: ...
+
+    def synthesize_memory(
+        self, request: ConversationMemoryRequest
+    ) -> ConversationMemoryResult | None: ...
 
 
 class MockAssistantRuntime:
@@ -110,6 +141,11 @@ class MockAssistantRuntime:
             model_name=request.assistant_model_name,
             model_source=request.assistant_model_source,
         )
+
+    def synthesize_memory(
+        self, request: ConversationMemoryRequest
+    ) -> ConversationMemoryResult | None:
+        return _heuristic_memory_result(request, backend=self.backend_name)
 
     def _summary_from_sources(self, citations: list[SearchResultItem]) -> str:
         primary = citations[0]
@@ -267,7 +303,7 @@ class MockAssistantRuntime:
             return work_product_reply
         if any(token in lowered for token in {"thank you", "thanks"}):
             return "You're welcome. We can keep talking normally, or turn the next step into a local action if useful."
-        if any(token == lowered or token in lowered for token in {"hi", "hello", "hey", "how are you"}):
+        if lowered == "how are you" or re.match(r"^(hi|hello|hey)\b", lowered):
             return "Hi. We can talk normally here, reason through a question, or switch into local research and tasks when needed."
         if self._is_supportive_request(lowered):
             return (
@@ -279,6 +315,25 @@ class MockAssistantRuntime:
             prior_topic = request.active_topic or self._recent_topic(
                 request.messages, request.user_text
             )
+            if any(
+                phrase in lowered
+                for phrase in {
+                    "what was the main point again",
+                    "what was the point again",
+                    "remind me what we were saying",
+                    "what were we saying",
+                    "bring that up again",
+                    "go back to that",
+                    "come back to that",
+                    "go deeper on that",
+                }
+            ) and request.selected_memory_summary:
+                if request.selected_memory_topic:
+                    return (
+                        f"Yes. The thread we should pick back up is {request.selected_memory_topic}. "
+                        f"The main point was: {request.selected_memory_summary}"
+                    )
+                return f"Yes. The main point there was: {request.selected_memory_summary}"
             if "what do you mean by that" in lowered:
                 return (
                     "I mean we can keep the conversation natural, and only switch into local retrieval, analysis, or saved actions when that actually helps."
@@ -301,7 +356,7 @@ class MockAssistantRuntime:
                 "break it into a few simple steps, explain the first step plainly, and check understanding before adding detail."
             )
         return (
-            "Yes. We can have a normal conversation here, and I can also switch into local analysis or task execution when you want."
+            "Yes. We can talk normally here, and I can also switch into local analysis or task execution when you want."
         )
 
     def _work_product_follow_up(
@@ -316,6 +371,9 @@ class MockAssistantRuntime:
 
         title = request.referent_title or "Untitled draft"
         label = self._tool_label(request.referent_tool or "")
+        recall_intent = lowered.startswith(
+            ("what was in", "what is in", "what's in", "remind me", "show me")
+        )
 
         if any(
             phrase in lowered
@@ -391,15 +449,15 @@ class MockAssistantRuntime:
                 "summarize that export",
                 "summarise that export",
             }
-        ):
+        ) or recall_intent:
             if request.referent_excerpt:
                 return (
-                    f'The current {label} is "{title}". '
+                    f'The {label} is "{title}". '
                     f"It currently centers on: {request.referent_excerpt}"
                 )
             return (
-                f'The current {label} draft is "{title}". '
-                "You can review the full content in the draft panel, and I can help tighten the wording before you save it."
+                f'The {label} is "{title}". '
+                "I can also summarize it more tightly or prepare a revised version if you want."
             )
 
         return None
@@ -644,6 +702,67 @@ class MLXAssistantRuntime:
             model_source=resolved_source,
         )
 
+    def synthesize_memory(
+        self, request: ConversationMemoryRequest
+    ) -> ConversationMemoryResult | None:
+        heuristic = _heuristic_memory_result(request, backend=self.backend_name)
+        if heuristic is None:
+            return None
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You compress a single assistant turn into a bounded continuity memory. "
+                    "Return strict JSON with keys topic, summary, keywords. "
+                    "The summary must stay factual, concise, and grounded in the provided turn only. "
+                    "Do not invent new details, advice, or citations."
+                ),
+            },
+            {
+                "role": "user",
+                "content": "\n".join(
+                    [
+                        f"user_text={request.user_text}",
+                        f"assistant_text={request.assistant_text}",
+                        f"interaction_kind={request.interaction_kind}",
+                        f"active_topic={request.active_topic or ''}",
+                        f"source_domain={request.source_domain.value if request.source_domain else ''}",
+                        f"referent_title={request.referent_title or ''}",
+                        f"heuristic_topic={heuristic.topic}",
+                        f"heuristic_summary={heuristic.summary}",
+                        "Return JSON only.",
+                    ]
+                ),
+            },
+        ]
+        try:
+            model_source = next(iter(self._cache), None)
+            if model_source is None:
+                return heuristic
+            model, tokenizer = self._load_model(model_source)
+            prompt = self._build_prompt(tokenizer, messages)
+            sampler = make_sampler(temp=0.1, top_p=0.9)
+            text = generate(
+                model,
+                tokenizer,
+                prompt,
+                verbose=False,
+                max_tokens=140,
+                sampler=sampler,
+            ).strip()
+            parsed = _parse_memory_json(text)
+            if parsed is None:
+                return heuristic
+            return ConversationMemoryResult(
+                topic=parsed.topic or heuristic.topic,
+                summary=parsed.summary or heuristic.summary,
+                keywords=parsed.keywords or heuristic.keywords,
+                backend=self.backend_name,
+            )
+        except Exception:
+            return heuristic
+
     def _load_model(self, source: str) -> tuple[object, object]:
         with self._lock:
             cached = self._cache.get(source)
@@ -667,3 +786,125 @@ class MLXAssistantRuntime:
             parts.append(f"{message['role'].upper()}:\n{message['content']}")
         parts.append("ASSISTANT:\n")
         return "\n\n".join(parts)
+
+
+def _heuristic_memory_result(
+    request: ConversationMemoryRequest,
+    *,
+    backend: str,
+) -> ConversationMemoryResult | None:
+    topic = _memory_topic(request)
+    summary = _memory_summary(request)
+    if not topic or not summary:
+        return None
+    return ConversationMemoryResult(
+        topic=topic,
+        summary=summary,
+        keywords=_memory_keywords(request, topic, summary),
+        backend=backend,
+    )
+
+
+def _memory_topic(request: ConversationMemoryRequest) -> str | None:
+    if request.referent_title:
+        return _trim_memory_text(request.referent_title, 96)
+    if request.active_topic:
+        return _trim_memory_text(request.active_topic, 96)
+    cleaned = request.user_text.strip().splitlines()[0].rstrip("?.! ")
+    return _trim_memory_text(cleaned, 96) if cleaned else None
+
+
+def _memory_summary(request: ConversationMemoryRequest) -> str | None:
+    if request.tool_name and request.referent_title:
+        label = _tool_memory_label(request.tool_name)
+        return _trim_memory_text(
+            f'{label.title()} "{request.referent_title}" is the current work product for this thread.',
+            180,
+        )
+    if request.evidence_packet and request.evidence_packet.summary.strip():
+        return _trim_memory_text(request.evidence_packet.summary.strip(), 180)
+    if request.workspace_summary_text:
+        cleaned_workspace = request.workspace_summary_text.strip().split("\n\n")[0]
+        return _trim_memory_text(cleaned_workspace, 180)
+    cleaned = " ".join(request.assistant_text.split())
+    return _trim_memory_text(cleaned, 180) if cleaned else None
+
+
+def _memory_keywords(
+    request: ConversationMemoryRequest,
+    topic: str,
+    summary: str,
+) -> list[str]:
+    stop_words = {
+        "the",
+        "and",
+        "that",
+        "this",
+        "with",
+        "from",
+        "what",
+        "when",
+        "where",
+        "which",
+        "have",
+        "your",
+        "about",
+        "into",
+        "just",
+    }
+    seen: set[str] = set()
+    keywords: list[str] = []
+    for token in re.findall(r"[a-z0-9]+", " ".join([request.user_text, topic, summary]).lower()):
+        if len(token) < 4 or token in stop_words or token in seen:
+            continue
+        seen.add(token)
+        keywords.append(token)
+        if len(keywords) == 8:
+            break
+    return keywords
+
+
+def _tool_memory_label(tool_name: str) -> str:
+    mapping = {
+        "create_note": "note",
+        "create_report": "report",
+        "create_message_draft": "message draft",
+        "create_checklist": "checklist",
+        "create_task": "task",
+        "export_brief": "markdown export",
+        "log_observation": "observation",
+    }
+    return mapping.get(tool_name, tool_name.replace("_", " "))
+
+
+def _trim_memory_text(text: str, limit: int) -> str:
+    cleaned = " ".join(text.split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: limit - 1].rstrip() + "…"
+
+
+def _parse_memory_json(text: str) -> ConversationMemoryResult | None:
+    match = re.search(r"\{.*\}", text, flags=re.S)
+    if not match:
+        return None
+    try:
+        import json
+
+        payload = json.loads(match.group(0))
+    except Exception:
+        return None
+    topic = _trim_memory_text(str(payload.get("topic") or "").strip(), 96)
+    summary = _trim_memory_text(str(payload.get("summary") or "").strip(), 180)
+    raw_keywords = payload.get("keywords") if isinstance(payload, dict) else None
+    keywords = []
+    if isinstance(raw_keywords, list):
+        keywords = [str(item).strip().lower() for item in raw_keywords if str(item).strip()][:8]
+    if not topic or not summary:
+        return None
+    return ConversationMemoryResult(
+        topic=topic,
+        summary=summary,
+        keywords=keywords,
+        backend="mlx",
+    )

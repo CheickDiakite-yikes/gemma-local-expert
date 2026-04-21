@@ -3,7 +3,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from engine.contracts.api import AssetKind, AssetSummary, EvidencePacket, TranscriptMessage
+from engine.contracts.api import (
+    AssetKind,
+    AssetSummary,
+    ConversationMemoryEntry,
+    EvidencePacket,
+    TranscriptMessage,
+)
 
 
 _LOW_SIGNAL_USER_TURNS = {
@@ -290,6 +296,9 @@ class ConversationContextSnapshot:
     last_agent_summary: str | None = None
     recent_outputs: list["WorkProductReference"] = field(default_factory=list)
     recent_evidence_memories: list[GroundedEvidenceMemory] = field(default_factory=list)
+    recent_conversation_memories: list[ConversationMemoryEntry] = field(default_factory=list)
+    selected_memory_topic: str | None = None
+    selected_memory_summary: str | None = None
 
     def prompt_lines(self) -> list[str]:
         lines: list[str] = []
@@ -388,6 +397,18 @@ class ConversationContextSnapshot:
                 evidence_labels.append(label)
             if evidence_labels:
                 lines.append("Recent grounded evidence memory: " + "; ".join(evidence_labels))
+        if self.selected_memory_summary:
+            selected_memory = self.selected_memory_summary
+            if self.selected_memory_topic:
+                selected_memory = f"{self.selected_memory_topic}: {selected_memory}"
+            lines.append(f"Selected conversation memory: {selected_memory}")
+        elif self.recent_conversation_memories:
+            memory_labels = [
+                self._trim(f"{memory.topic}: {memory.summary}", 140)
+                for memory in self.recent_conversation_memories[:2]
+            ]
+            if memory_labels:
+                lines.append("Recent conversation memories: " + " ; ".join(memory_labels))
         return lines
 
     def _format_referent(
@@ -426,6 +447,12 @@ class ConversationContextSnapshot:
             return "output"
         return tool_name.replace("_", " ")
 
+    def _trim(self, text: str, limit: int) -> str:
+        cleaned = " ".join(text.split())
+        if len(cleaned) <= limit:
+            return cleaned
+        return cleaned[: limit - 1].rstrip() + "…"
+
 
 @dataclass(slots=True)
 class WorkProductReference:
@@ -455,6 +482,7 @@ class ConversationContextService:
         turn_text: str,
         transcript: list[TranscriptMessage],
         attached_assets: list[AssetSummary],
+        recent_memories: list[ConversationMemoryEntry] | None = None,
     ) -> ConversationContextSnapshot:
         snapshot = ConversationContextSnapshot()
         snapshot.recent_topics = self._recent_topics(transcript)
@@ -483,6 +511,7 @@ class ConversationContextService:
         document_reference_groups = self._recent_reference_assets_by_kind(
             transcript, AssetKind.DOCUMENT
         )
+        snapshot.recent_conversation_memories = list(recent_memories or [])
         snapshot.last_image_assets = image_reference_groups[0] if image_reference_groups else []
         snapshot.last_video_assets = video_reference_groups[0] if video_reference_groups else []
         snapshot.recent_evidence_memories = self._recent_evidence_memories(transcript)
@@ -531,6 +560,13 @@ class ConversationContextService:
             snapshot.selected_referent_excerpt = media_summary
         elif snapshot.selected_referent_kind == "topic" and snapshot.active_topic:
             snapshot.selected_referent_summary = snapshot.active_topic
+        selected_memory = self._select_conversation_memory(
+            turn_text=turn_text,
+            snapshot=snapshot,
+        )
+        if selected_memory is not None:
+            snapshot.selected_memory_topic = selected_memory.topic
+            snapshot.selected_memory_summary = selected_memory.summary
         snapshot.active_domain = (
             snapshot.selected_referent_kind
             or snapshot.selected_context_kind
@@ -546,6 +582,50 @@ class ConversationContextService:
             snapshot.active_asset_labels = selected_evidence.asset_labels[:3]
         snapshot.active_draft_lineage = snapshot.pending_approval_id
         return snapshot
+
+    def _select_conversation_memory(
+        self,
+        *,
+        turn_text: str,
+        snapshot: ConversationContextSnapshot,
+    ) -> ConversationMemoryEntry | None:
+        if not snapshot.recent_conversation_memories:
+            return None
+        if snapshot.selected_referent_kind in {
+            "pending_output",
+            "saved_output",
+            "image",
+            "video",
+            "document",
+        }:
+            return None
+        if snapshot.selected_context_assets or snapshot.selected_evidence_summary:
+            return None
+        query_tokens = self._meaningful_referent_tokens(turn_text)
+        best_memory: ConversationMemoryEntry | None = None
+        best_score = 0
+        for index, memory in enumerate(snapshot.recent_conversation_memories):
+            score = max(0, 10 - index)
+            searchable = " ".join(
+                part
+                for part in [
+                    memory.topic,
+                    memory.summary,
+                    " ".join(memory.keywords),
+                    memory.referent_title or "",
+                ]
+                if part
+            )
+            memory_tokens = self._meaningful_referent_tokens(searchable)
+            score += len(query_tokens & memory_tokens) * 5
+            if memory.referent_title and memory.referent_title.lower() in turn_text.lower():
+                score += 12
+            if not query_tokens and self._looks_like_topic_reference(turn_text.lower().strip()):
+                score += 4
+            if score > best_score:
+                best_score = score
+                best_memory = memory
+        return best_memory if best_score > 6 else None
 
     def _recent_evidence_memories(
         self,
@@ -1068,6 +1148,10 @@ class ConversationContextService:
         if title_match is not None:
             return title_match
 
+        ordinal_match = self._match_output_by_ordinal(filtered, lowered)
+        if ordinal_match is not None:
+            return ordinal_match
+
         if "first" in lowered or "original" in lowered:
             return filtered[-1]
 
@@ -1091,14 +1175,35 @@ class ConversationContextService:
         best_match: WorkProductReference | None = None
         best_score = 0
         for output in outputs:
-            title_tokens = self._meaningful_referent_tokens(output.title or "")
-            if not title_tokens:
+            search_tokens = self._meaningful_referent_tokens(
+                " ".join(part for part in {output.title or "", output.excerpt or ""} if part)
+            )
+            if not search_tokens:
                 continue
-            score = len(query_tokens & title_tokens)
+            score = len(query_tokens & search_tokens)
             if score > best_score:
                 best_score = score
                 best_match = output
         return best_match if best_score > 0 else None
+
+    def _match_output_by_ordinal(
+        self,
+        outputs: list[WorkProductReference],
+        lowered: str,
+    ) -> WorkProductReference | None:
+        ordered = list(reversed(outputs))
+        ordinal_map = {
+            "first": 0,
+            "1st": 0,
+            "second": 1,
+            "2nd": 1,
+            "third": 2,
+            "3rd": 2,
+        }
+        for token, index in ordinal_map.items():
+            if token in lowered and len(ordered) > index:
+                return ordered[index]
+        return None
 
     def _meaningful_referent_tokens(self, text: str) -> set[str]:
         return {

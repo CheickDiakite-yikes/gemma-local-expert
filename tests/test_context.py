@@ -1,6 +1,8 @@
 from engine.context.service import ConversationContextService
 from engine.contracts.api import (
     ApprovalState,
+    ConversationMemoryEntry,
+    ConversationMemoryKind,
     EvidenceFact,
     EvidencePacket,
     EvidenceRef,
@@ -230,6 +232,100 @@ def test_context_service_selects_last_saved_output_referent() -> None:
     assert snapshot.selected_referent_title == "Field Assistant Architecture Briefing"
     assert snapshot.selected_referent_excerpt is not None
     assert "field assistant architecture overview" in snapshot.selected_referent_excerpt.lower()
+
+
+def test_context_service_selects_recent_conversation_memory_without_stronger_referent() -> None:
+    service = ConversationContextService()
+
+    snapshot = service.build(
+        turn_text="Can we go back to that architecture point again?",
+        transcript=[
+            TranscriptMessage(
+                id="msg1",
+                role="user",
+                content="Explain the architecture direction plainly.",
+            ),
+            TranscriptMessage(
+                id="msg2",
+                role="assistant",
+                content=(
+                    "The main direction is one orchestrator with grounded specialist routes "
+                    "and explicit approvals for durable writes."
+                ),
+            ),
+            TranscriptMessage(
+                id="msg3",
+                role="user",
+                content="Separate tangent about lunch.",
+            ),
+            TranscriptMessage(
+                id="msg4",
+                role="assistant",
+                content="We can talk about lunch too.",
+            ),
+        ],
+        attached_assets=[],
+        recent_memories=[
+            ConversationMemoryEntry(
+                id="memory_1",
+                conversation_id="conv_1",
+                turn_id="turn_1",
+                kind=ConversationMemoryKind.GENERAL,
+                topic="Architecture direction",
+                summary="Keep one orchestrator with grounded specialist routes and explicit approvals.",
+                keywords=["architecture", "orchestrator", "approvals"],
+                source_domain=SourceDomain.CONVERSATION,
+            )
+        ],
+    )
+
+    assert snapshot.selected_memory_topic == "Architecture direction"
+    assert snapshot.selected_memory_summary is not None
+    assert "one orchestrator" in snapshot.selected_memory_summary.lower()
+
+
+def test_context_service_suppresses_conversation_memory_when_pending_draft_is_stronger() -> None:
+    service = ConversationContextService()
+    approval = ApprovalState(
+        id="approval_1",
+        conversation_id="conv_1",
+        turn_id="turn_1",
+        tool_name="create_note",
+        reason="save locally",
+        status="pending",
+        payload={
+            "title": "Architecture brief",
+            "content": "Field Assistant architecture overview\nUses bounded routing and explicit approvals.\n",
+        },
+    )
+
+    snapshot = service.build(
+        turn_text="What's in that draft again?",
+        transcript=[
+            TranscriptMessage(
+                id="msg1",
+                role="assistant",
+                content="I prepared a note draft for approval.",
+                approval=approval,
+            ),
+        ],
+        attached_assets=[],
+        recent_memories=[
+            ConversationMemoryEntry(
+                id="memory_1",
+                conversation_id="conv_1",
+                turn_id="turn_0",
+                kind=ConversationMemoryKind.GENERAL,
+                topic="Older architecture thread",
+                summary="Keep one orchestrator with grounded specialist routes and explicit approvals.",
+                keywords=["architecture", "orchestrator", "approvals"],
+                source_domain=SourceDomain.CONVERSATION,
+            )
+        ],
+    )
+
+    assert snapshot.selected_referent_kind == "pending_output"
+    assert snapshot.selected_memory_summary is None
 
 
 def test_context_service_prefers_matching_output_kind_over_newer_pending_draft() -> None:

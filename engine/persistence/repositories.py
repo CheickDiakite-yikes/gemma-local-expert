@@ -24,6 +24,7 @@ from engine.contracts.api import (
     AssetSummary,
     Conversation,
     ConversationMessage,
+    ConversationMemoryEntry,
     ConversationSummary,
     ConversationCreateRequest,
     EvidencePacket,
@@ -89,6 +90,14 @@ class PersistenceStore(Protocol):
     def list_transcript(
         self, conversation_id: str, limit: int = 200
     ) -> list[TranscriptMessage]: ...
+
+    def create_conversation_memory(
+        self, entry: ConversationMemoryEntry
+    ) -> ConversationMemoryEntry: ...
+
+    def list_conversation_memories(
+        self, conversation_id: str, limit: int = 12
+    ) -> list[ConversationMemoryEntry]: ...
 
     def create_asset_record(
         self,
@@ -495,6 +504,88 @@ class SQLiteStore:
                     if row["evidence_packet_json"]
                     else None
                 ),
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
+
+    def create_conversation_memory(
+        self, entry: ConversationMemoryEntry
+    ) -> ConversationMemoryEntry:
+        with self._lock:
+            self._connection.execute(
+                """
+                INSERT INTO conversation_memories (
+                    id,
+                    conversation_id,
+                    turn_id,
+                    kind,
+                    topic,
+                    summary,
+                    keywords_json,
+                    source_domain,
+                    asset_ids_json,
+                    tool_name,
+                    referent_title,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    entry.id,
+                    entry.conversation_id,
+                    entry.turn_id,
+                    entry.kind.value,
+                    entry.topic,
+                    entry.summary,
+                    json.dumps(entry.keywords),
+                    entry.source_domain.value if entry.source_domain else None,
+                    json.dumps(entry.asset_ids),
+                    entry.tool_name,
+                    entry.referent_title,
+                    entry.created_at.isoformat(),
+                ),
+            )
+            self._connection.commit()
+        return entry
+
+    def list_conversation_memories(
+        self, conversation_id: str, limit: int = 12
+    ) -> list[ConversationMemoryEntry]:
+        rows = self._fetchall(
+            """
+            SELECT
+                id,
+                conversation_id,
+                turn_id,
+                kind,
+                topic,
+                summary,
+                keywords_json,
+                source_domain,
+                asset_ids_json,
+                tool_name,
+                referent_title,
+                created_at
+            FROM conversation_memories
+            WHERE conversation_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (conversation_id, limit),
+        )
+        return [
+            ConversationMemoryEntry(
+                id=row["id"],
+                conversation_id=row["conversation_id"],
+                turn_id=row["turn_id"],
+                kind=row["kind"],
+                topic=row["topic"],
+                summary=row["summary"],
+                keywords=json.loads(row["keywords_json"] or "[]"),
+                source_domain=row["source_domain"],
+                asset_ids=json.loads(row["asset_ids_json"] or "[]"),
+                tool_name=row["tool_name"],
+                referent_title=row["referent_title"],
                 created_at=row["created_at"],
             )
             for row in rows

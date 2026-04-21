@@ -247,6 +247,10 @@ class PromptBuilder:
                 lines.append(
                     "If the continuity snapshot includes grounded evidence memory, prefer it over assistant prose. Reuse its facts directly and treat its uncertainty lines as hard limits."
                 )
+            if conversation_context.selected_memory_summary:
+                lines.append(
+                    "If the continuity snapshot includes a selected conversation memory, treat it as a secondary continuity hint. Use it to recover topic-level context only when there is no stronger explicit referent or grounded evidence for this turn."
+                )
 
         if self._is_teaching_request(user_text):
             lines.append(
@@ -491,16 +495,28 @@ class PromptBuilder:
             "markdown export": 5,
             "observation": 6,
         }
-        typed_titles: dict[str, str] = {}
+        grouped_titles: dict[str, list[str]] = {}
         for output in recent_outputs:
             label = self._tool_label(output.tool_name)
-            if output.title and label not in typed_titles:
-                typed_titles[label] = output.title
+            if not output.title:
+                continue
+            grouped_titles.setdefault(label, [])
+            if output.title not in grouped_titles[label]:
+                grouped_titles[label].append(output.title)
 
-        return [
-            f"{label}={typed_titles[label]}"
-            for label in sorted(typed_titles, key=lambda item: (order.get(item, 99), item))
-        ]
+        lines: list[str] = []
+        for label in sorted(grouped_titles, key=lambda item: (order.get(item, 99), item)):
+            titles = grouped_titles[label]
+            if len(titles) == 1:
+                lines.append(f"{label}={titles[0]}")
+                continue
+            latest = titles[0]
+            oldest = titles[-1]
+            lines.append(f"{label}.latest={latest}")
+            lines.append(f"{label}.first={oldest}")
+            if len(titles) > 2:
+                lines.append(f"{label}.second={titles[-2]}")
+        return lines
 
     def _format_tool_result(self, tool_result: dict[str, object]) -> str:
         lines: list[str] = []

@@ -824,4 +824,7 @@ class RouterService:
         has_noun = any(token in lowered for token in self._WORK_PRODUCT_NOUNS)
         has_edit_intent = any(token in lowered for token in self._WORK_PRODUCT_EDIT_TOKENS)
         has_reference_cue = any(token in lowered for token in self._WORK_PRODUCT_REFERENCE_CUES)
-        return has_noun and has_edit_intent and has_reference_cue
+        has_recall_intent = lowered.startswith(
+            ("what was in", "what is in", "what's in", "remind me", "show me")
+        )
+        return has_noun and (has_recall_intent or (has_edit_intent and has_reference_cue))

@@ -4,7 +4,10 @@ from engine.contracts.api import (
     AssetKind,
     AssetSummary,
     AssistantMode,
+    ConversationMemoryEntry,
+    ConversationMemoryKind,
     ConversationTurnRequest,
+    SourceDomain,
 )
 from engine.contracts.api import ConversationMessage
 from engine.context.service import (
@@ -275,6 +278,52 @@ def test_prompt_builder_includes_selected_grounded_evidence_memory() -> None:
     assert "Selected grounded evidence memory:" in prompt
     assert "fact=A possible rifle-like object is visible near one figure. (00:12)" in prompt
     assert "uncertainty=Tracking and isolation did not run in low-memory mode." in prompt
+
+
+def test_prompt_builder_marks_selected_conversation_memory_as_secondary_hint() -> None:
+    builder = PromptBuilder()
+    context = builder.build(
+        turn=ConversationTurnRequest(
+            conversation_id="conv_memory",
+            mode=AssistantMode.GENERAL,
+            text="Can we go back to that architecture point again?",
+        ),
+        history=[],
+        assets=[],
+        context_assets=[],
+        conversation_context=ConversationContextSnapshot(
+            recent_conversation_memories=[
+                ConversationMemoryEntry(
+                    id="memory_1",
+                    conversation_id="conv_memory",
+                    turn_id="turn_1",
+                    kind=ConversationMemoryKind.GENERAL,
+                    topic="Architecture direction",
+                    summary="Keep one orchestrator with grounded specialist routes and explicit approvals.",
+                    keywords=["architecture", "orchestrator", "approvals"],
+                    source_domain=SourceDomain.CONVERSATION,
+                )
+            ],
+            selected_memory_topic="Architecture direction",
+            selected_memory_summary="Keep one orchestrator with grounded specialist routes and explicit approvals.",
+        ),
+        specialist_analysis=None,
+        workspace_summary=None,
+        route=RouteDecision(interaction_kind="conversation", is_follow_up=True),
+        policy=PolicyDecision(),
+        model_selection=ModelRouteSelection(
+            assistant_model="gemma-4-e2b-it-4bit",
+            embedding_model="embeddinggemma-300m",
+        ),
+        results=[],
+        tool_result=None,
+    )
+
+    system_prompt = context.messages[0]["content"]
+    user_prompt = context.messages[-1]["content"]
+    assert "secondary continuity hint" in system_prompt
+    assert "Selected conversation memory:" in user_prompt
+    assert "Keep one orchestrator" in user_prompt
 
 
 def test_prompt_builder_treats_media_grounded_tool_turn_as_already_grounded() -> None:
@@ -564,3 +613,47 @@ def test_prompt_builder_adds_multi_output_recall_guidance() -> None:
     assert "Field Assistant Architecture Briefing" in prompt
     assert "Departure shortage checklist" in prompt
     assert "Architecture status report" in prompt
+
+
+def test_prompt_builder_lists_multiple_reports_with_ordinal_hints() -> None:
+    builder = PromptBuilder()
+    context = builder.build(
+        turn=ConversationTurnRequest(
+            conversation_id="conv_report_ordinals",
+            mode=AssistantMode.RESEARCH,
+            text="What was in the first report again?",
+        ),
+        history=[],
+        assets=[],
+        context_assets=[],
+        conversation_context=ConversationContextSnapshot(
+            recent_outputs=[
+                WorkProductReference(
+                    kind="saved_output",
+                    tool_name="create_report",
+                    title="Architecture follow-up report",
+                    excerpt="Refined architecture summary",
+                ),
+                WorkProductReference(
+                    kind="saved_output",
+                    tool_name="create_report",
+                    title="Architecture baseline report",
+                    excerpt="Original architecture summary",
+                ),
+            ],
+        ),
+        specialist_analysis=None,
+        workspace_summary=None,
+        route=RouteDecision(interaction_kind="draft_follow_up", is_follow_up=True),
+        policy=PolicyDecision(),
+        model_selection=ModelRouteSelection(
+            assistant_model="gemma-4-e2b-it-4bit",
+            embedding_model="embeddinggemma-300m",
+        ),
+        results=[],
+        tool_result=None,
+    )
+
+    prompt = "\n\n".join(message["content"] for message in context.messages)
+    assert "report.latest=Architecture follow-up report" in prompt
+    assert "report.first=Architecture baseline report" in prompt
