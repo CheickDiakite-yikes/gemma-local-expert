@@ -372,7 +372,7 @@ flowchart LR
     UI["Client Surface<br/>Web chat today, native later"] --> API["Local FastAPI Engine"]
     API --> ORCH["Orchestrator"]
     ORCH --> ROUTER["Router + Policy"]
-    ORCH --> CONTEXT["Continuity / Referent Resolution"]
+    ORCH --> CONTEXT["Continuity / Memory Focus"]
     ROUTER --> RETR["Retrieval"]
     ROUTER --> MODELS["Assistant + Specialists"]
     ROUTER --> TOOLS["Tool Runtime"]
@@ -397,9 +397,12 @@ flowchart LR
 │ Local engine                                                       │
 │  - turn entrypoint                                                 │
 │  - continuity snapshot                                             │
+│  - bounded memory focus                                            │
 │  - router + policy                                                 │
 │  - retrieval                                                       │
+│  - typed evidence packets                                          │
 │  - assistant generation                                            │
+│  - deterministic draft handoffs                                    │
 │  - multimodal specialist paths                                     │
 │  - workspace agent runs                                            │
 │  - approvals + durable writes                                      │
@@ -419,11 +422,11 @@ flowchart LR
 | Layer | Owns | Does not own |
 | --- | --- | --- |
 | Client surface | display, input, upload flow, approval editing UX, responsive layout | routing, DB writes, retrieval policy |
-| Orchestrator | turn lifecycle, continuity, route selection, tool/run coordination | direct UI logic |
+| Orchestrator | turn lifecycle, continuity, memory focus, evidence-aware routing, tool/run coordination | direct UI logic |
 | Router + policy | decide broad path, enforce boundaries | durable write execution |
-| Tool runtime | typed plans and typed executors | arbitrary shell commands |
+| Tool runtime | typed plans, typed executors, pending-draft revision helpers | arbitrary shell commands |
 | Workspace agent | bounded workspace research and synthesis | filesystem access outside workspace root |
-| Persistence | transcript, notes, tasks, approvals, runs, exports, assets | model selection |
+| Persistence | transcript, approvals, runs, notes, reports, tasks, exports, assets, conversation memories | model selection |
 
 ### Execution path at a glance
 
@@ -431,11 +434,13 @@ flowchart LR
 user turn
   -> transcript recovery
   -> continuity snapshot
+  -> memory reranking + MemoryFocus
   -> route decision
   -> optional retrieval or specialist analysis
+  -> typed evidence packet
   -> optional workspace run
-  -> assistant synthesis
   -> optional approval proposal
+  -> deterministic handoff or assistant synthesis
   -> durable write only after approval
   -> transcript + state persistence
 ```
@@ -484,6 +489,7 @@ The current architecture prefers:
 - one visible assistant
 - one orchestrator
 - specialist routes when justified
+- deterministic shortcuts when truth should beat free-form generation
 - typed tool interfaces
 - explicit limits
 
@@ -546,16 +552,27 @@ The current continuity model combines several layers:
    The system tracks recent image and video assets and can reuse them only when
    the new turn clearly refers back to them.
 
-4. **Work-product continuity**
+4. **Grounded evidence continuity**
+
+   Assistant messages can persist typed `EvidencePacket` state, and follow-up
+   turns can reuse grounded facts and uncertainties instead of relying on
+   assistant prose alone.
+
+5. **Work-product continuity**
 
    The system tracks pending approval drafts and recent saved outputs as
    separate referents.
 
-5. **Explicit referent selection**
+6. **Explicit referent selection**
 
    The system tries to decide what "that" most likely means before generation.
 
-6. **Workspace continuity**
+7. **Bounded memory focus**
+
+   A small local `MemoryFocus` step reranks recent conversation memories and can
+   recover older topic continuity without overriding stronger explicit referents.
+
+8. **Workspace continuity**
 
    The system carries forward current run state and approval linkage for
    workspace-generated outputs.
@@ -572,10 +589,19 @@ The continuity snapshot currently carries information such as:
 - recent video assets
 - selected context assets
 - selected context kind and reason
+- selected evidence summary
+- selected evidence facts
+- selected evidence uncertainties
 - selected referent kind
 - selected referent title
 - selected referent summary
 - selected referent preview
+- recent conversation memories
+- selected conversation memory topic
+- selected conversation memory summary
+- memory focus kind
+- memory focus reason
+- memory focus confidence
 - pending approval id
 - pending approval tool
 - pending approval summary
@@ -591,12 +617,22 @@ The continuity snapshot currently carries information such as:
 ConversationContextSnapshot
 ├── active topic
 ├── recent earlier topics
+├── recent conversation memories
 ├── recent image assets
 ├── recent video assets
 ├── selected context
 │   ├── kind
 │   ├── summary
 │   └── assets
+├── selected grounded evidence
+│   ├── summary
+│   ├── facts
+│   └── uncertainties
+├── memory focus
+│   ├── kind
+│   ├── topic frame
+│   ├── confidence
+│   └── reason
 ├── selected referent
 │   ├── kind
 │   ├── tool
@@ -622,6 +658,8 @@ The current system explicitly reasons about referent types such as:
 - saved output
 - image
 - video
+- document
+- missing output
 - topic
 
 It also recognizes many work-product phrases directly, including:
@@ -669,10 +707,12 @@ not magical.
 
 Important current limits:
 
-- conversational instructions about a pending draft are not yet guaranteed to
-  mutate the pending approval payload automatically
+- common tighten / rename / title follow-ups on the active pending draft now
+  mutate the pending payload heuristically, but broader free-form rewrite
+  requests are still not guaranteed to rewrite the draft in place
 - very broad workspace questions can still pull in overly broad repo context
-- live multimodal continuity is still improving under long conversations
+- live multimodal continuity is much stronger, but long mixed conversations can
+  still expose weaker ranking or answer-surface seams
 
 ## Routing and Specialist Selection
 
@@ -888,25 +928,27 @@ writes.
 | Tool | Purpose | Requires approval | Execution status |
 | --- | --- | --- | --- |
 | `create_note` | persist a note | yes | implemented |
+| `create_report` | persist a report-shaped note record | yes | implemented |
+| `create_message_draft` | persist a message draft record | yes | implemented |
 | `update_note` | update a note | yes | registry only / early |
 | `create_task` | persist a task | yes | implemented |
 | `update_task` | update a task | yes | registry only / early |
 | `create_checklist` | persist a checklist note | yes | implemented |
-| `draft_report` | produce a draft report shape | no | draft helper |
-| `draft_message` | produce a draft message shape | no | draft helper |
 | `log_observation` | persist an observation note | yes | implemented |
 | `export_brief` | write a markdown brief under `data/exports` | yes | implemented |
 | `medical_case_summary` | medical-domain helper surface | yes | early / bounded |
 | `workspace_search` | internal workspace-agent helper | n/a | implemented |
 | `workspace_read_files` | internal workspace-agent helper | n/a | implemented |
 | `workspace_summarize` | internal workspace-agent helper | n/a | implemented |
-| `generate_heatmap_overlay` | derive annotated overlay asset | yes | implemented |
+| `generate_heatmap_overlay` | derive annotated overlay asset | no | implemented |
 
 ### Common durable outputs in current practice
 
 The most common current outputs are:
 
 - note
+- report
+- message draft
 - checklist
 - task
 - observation
@@ -974,13 +1016,25 @@ Current edited fields include:
 - export title
 - export content
 
+The current engine also supports a bounded conversational edit path for the
+active pending draft. Common turns such as:
+
+- `what is that report called?`
+- `what's in that draft again?`
+- `keep the same report, but make it shorter before I save it`
+- `rename that checklist`
+
+can now resolve the active draft and update or summarize it without forcing the
+user back into the editor first.
+
 ### Important current limit
 
-The UI editor is authoritative for pending draft edits today.
+The UI editor is still the authoritative edit surface for arbitrary rewrites.
 
 The assistant can discuss the draft conversationally, summarize it, and answer
-questions about it, but conversational rewrite requests are not yet guaranteed
-to mutate the pending payload automatically.
+questions about it, and common tighten/rename requests now mutate the pending
+payload automatically. But wide-open rewrite requests are still not guaranteed
+to rewrite the payload in place.
 
 ### Why typed tools matter
 
@@ -1042,6 +1096,8 @@ The current design direction is:
 - concise human-facing summary in the main thread
 - compact work-state facts near the answer
 - deeper details behind opt-in disclosure
+- short deterministic draft handoffs when the work product itself should carry
+  the substance
 
 That is especially important for:
 
@@ -1064,6 +1120,8 @@ It is a **conversational workbench**.
 5. Media should remain conversational, not trap the user in a mode.
 6. The composer should feel like the operational center of gravity.
 7. Debug-style traces should not dominate the main thread.
+8. Draft-producing turns should usually hand off quickly, then let the draft UI
+   carry the details.
 
 ### Current web shell capabilities
 
@@ -2004,7 +2062,7 @@ This project is already useful, but several important gaps remain.
 - not a clinically validated medical system
 - no broad autonomous shell execution
 - no fully mature realtime camera monitoring stack
-- conversational draft rewrite requests are not yet guaranteed to directly mutate the pending approval payload
+- bounded conversational draft edits now handle common same-report / same-checklist / same-note follow-ups, but broad free-form rewrites still fall back to the editor or a clarification turn
 - workspace synthesis on very broad repos still needs another ranking pass
 - video review is usable but still shallower than the long-term ambition
 - stronger local segmentation and tracking paths are still in progress
