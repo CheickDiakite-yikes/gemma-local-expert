@@ -785,6 +785,20 @@ class RouterService:
                 "tell me more about that",
                 "go back to that",
                 "bring that up again",
+                "one sentence",
+                "say that plainly",
+                "say that simply",
+                "put it plainly",
+                "what should make me stop",
+                "what should make you stop",
+                "what should make us stop",
+                "what should i watch for",
+                "what would make me stop",
+                "what would make me escalate",
+                "what should make me escalate",
+                "what's the first action again",
+                "what is the first action again",
+                "first action again",
             }
         ):
             return True

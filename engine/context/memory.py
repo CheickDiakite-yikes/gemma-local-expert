@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from engine.contracts.api import (
     ConversationMemoryEntry,
     ConversationMemoryKind,
@@ -11,7 +13,12 @@ from engine.models.runtime import (
     ConversationMemoryRankingRequest,
     AssistantRuntime,
     ConversationMemoryRequest,
+    MemoryFocusRequest,
+    MemoryFocusResult,
 )
+
+if TYPE_CHECKING:
+    from engine.context.service import ConversationContextSnapshot
 
 
 class ConversationMemoryService:
@@ -119,6 +126,65 @@ class ConversationMemoryService:
         remaining = [entry for entry in bounded if entry.id not in seen]
         return ranked + remaining + list(entries[limit:])
 
+    def resolve_focus(
+        self,
+        *,
+        user_text: str,
+        conversation_context: "ConversationContextSnapshot",
+        entries: list[ConversationMemoryEntry],
+        limit: int,
+    ) -> MemoryFocusResult | None:
+        deterministic = self._deterministic_focus(conversation_context)
+        if deterministic is not None:
+            return deterministic
+        bounded = list(entries[:limit])
+        return self.runtime.resolve_memory_focus(
+            MemoryFocusRequest(
+                user_text=user_text,
+                active_topic=conversation_context.active_topic,
+                selected_referent_kind=conversation_context.selected_referent_kind,
+                selected_referent_title=conversation_context.selected_referent_title,
+                selected_referent_summary=conversation_context.selected_referent_summary,
+                selected_evidence_summary=conversation_context.selected_evidence_summary,
+                selected_evidence_facts=list(conversation_context.selected_evidence_facts),
+                recent_topics=list(conversation_context.recent_topics),
+                memories=bounded,
+            )
+        )
+
+    def _deterministic_focus(
+        self,
+        conversation_context: "ConversationContextSnapshot",
+    ) -> MemoryFocusResult | None:
+        if conversation_context.selected_referent_kind in {"pending_output", "saved_output"}:
+            topic_frame = (
+                conversation_context.selected_referent_title
+                or conversation_context.selected_referent_summary
+            )
+            return MemoryFocusResult(
+                primary_anchor_kind="referent",
+                memory_id=None,
+                topic_frame=topic_frame,
+                reason="An explicit current work product is already selected.",
+                confidence=1.0,
+                conflict_note=None,
+                ask_clarifying_question=None,
+                backend="deterministic",
+            )
+        if conversation_context.selected_evidence_summary:
+            return MemoryFocusResult(
+                primary_anchor_kind="grounded_evidence",
+                memory_id=None,
+                topic_frame=conversation_context.selected_referent_title
+                or conversation_context.active_topic,
+                reason="Grounded evidence is already selected and should outrank conversation memory.",
+                confidence=0.98,
+                conflict_note=None,
+                ask_clarifying_question=None,
+                backend="deterministic",
+            )
+        return None
+
     def _should_store(
         self,
         *,
@@ -142,6 +208,15 @@ class ConversationMemoryService:
             "let's continue",
         }:
             return False
+        if self._is_derivative_teaching_follow_up(
+            lowered=lowered,
+            interaction_kind=interaction_kind,
+            source_domain=source_domain,
+            tool_name=tool_name,
+            evidence_packet=evidence_packet,
+            workspace_summary_text=workspace_summary_text,
+        ):
+            return False
         if referent_kind == "missing_output":
             return False
         if interaction_kind == "draft_follow_up" and not tool_name:
@@ -162,6 +237,53 @@ class ConversationMemoryService:
         if evidence_packet or workspace_summary_text or tool_name:
             return True
         return interaction_kind in {"conversation", "teaching", "draft_follow_up"}
+
+    def _is_derivative_teaching_follow_up(
+        self,
+        *,
+        lowered: str,
+        interaction_kind: str,
+        source_domain: SourceDomain | None,
+        tool_name: str | None,
+        evidence_packet: EvidencePacket | None,
+        workspace_summary_text: str | None,
+    ) -> bool:
+        if tool_name or evidence_packet or workspace_summary_text:
+            return False
+        if source_domain in {SourceDomain.IMAGE, SourceDomain.VIDEO, SourceDomain.DOCUMENT}:
+            return False
+        if interaction_kind not in {"conversation", "teaching"}:
+            return False
+        return any(
+            phrase in lowered
+            for phrase in {
+                "what did you mean by that",
+                "what do you mean by that",
+                "can you explain that",
+                "tell me more about that",
+                "go back to that",
+                "bring that up again",
+                "come back to that",
+                "go deeper on that",
+                "what was the point again",
+                "what was the main point again",
+                "remind me what we were saying",
+                "one sentence",
+                "say that plainly",
+                "say that simply",
+                "put it plainly",
+                "what should make me stop",
+                "what should make you stop",
+                "what should make us stop",
+                "what should i watch for",
+                "what would make me stop",
+                "what would make me escalate",
+                "what should make me escalate",
+                "what's the first action again",
+                "what is the first action again",
+                "first action again",
+            }
+        )
 
     def _is_low_signal_assistant_text(
         self,

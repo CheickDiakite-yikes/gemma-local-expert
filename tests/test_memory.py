@@ -1,5 +1,6 @@
 from engine.context.memory import ConversationMemoryService
 from engine.contracts.api import SourceDomain
+from engine.context.service import ConversationContextSnapshot
 from engine.models.runtime import MockAssistantRuntime
 
 
@@ -145,6 +146,8 @@ def test_memory_service_normalizes_teaching_topic_before_storing() -> None:
 
     assert entry is not None
     assert entry.topic.lower() == "prepare oral rehydration solution in the field"
+    assert entry.summary.lower().startswith("start with the core action from ors guidance")
+    assert "here is a practical way" not in entry.summary.lower()
 
 
 def test_memory_service_prefers_referent_excerpt_for_output_memory() -> None:
@@ -170,3 +173,78 @@ def test_memory_service_prefers_referent_excerpt_for_output_memory() -> None:
     assert entry is not None
     assert "current work product" not in entry.summary.lower()
     assert "lantern batteries" in entry.summary.lower()
+
+
+def test_memory_service_normalizes_recap_style_summary_before_storing() -> None:
+    service = ConversationMemoryService(MockAssistantRuntime())
+
+    entry = service.build_entry(
+        conversation_id="conv_1",
+        turn_id="turn_6",
+        user_text="Summarize the architecture direction plainly.",
+        assistant_text=(
+            "Yes. Earlier we were talking about architecture direction. "
+            "The main point was: Keep one orchestrator with grounded specialist routes "
+            "and explicit approvals."
+        ),
+        interaction_kind="conversation",
+        active_topic="Architecture direction",
+        source_domain=None,
+        asset_ids=[],
+        referent_kind=None,
+        referent_title=None,
+        referent_excerpt=None,
+        evidence_packet=None,
+        workspace_summary_text=None,
+        tool_name=None,
+    )
+
+    assert entry is not None
+    assert entry.summary == "Keep one orchestrator with grounded specialist routes and explicit approvals."
+
+
+def test_memory_service_skips_derivative_teaching_follow_up_turn() -> None:
+    service = ConversationMemoryService(MockAssistantRuntime())
+
+    entry = service.build_entry(
+        conversation_id="conv_1",
+        turn_id="turn_7",
+        user_text="What should make me stop and escalate?",
+        assistant_text=(
+            "Stop and escalate if you see worsening weakness, confusion, or inability to drink. "
+            "That comes from [ORS Guidance]."
+        ),
+        interaction_kind="conversation",
+        active_topic="Can we go back to that oral rehydration point again?",
+        source_domain=None,
+        asset_ids=[],
+        referent_kind=None,
+        referent_title=None,
+        referent_excerpt=None,
+        evidence_packet=None,
+        workspace_summary_text=None,
+        tool_name=None,
+    )
+
+    assert entry is None
+
+
+def test_memory_service_resolve_focus_keeps_explicit_referent_override() -> None:
+    service = ConversationMemoryService(MockAssistantRuntime())
+
+    focus = service.resolve_focus(
+        user_text="What title is that draft using?",
+        conversation_context=ConversationContextSnapshot(
+            active_topic="Field Assistant Architecture Briefing",
+            selected_referent_kind="pending_output",
+            selected_referent_tool="export_brief",
+            selected_referent_title="Field Assistant Architecture Brief",
+            selected_referent_summary="Field Assistant Architecture Brief",
+        ),
+        entries=[],
+        limit=4,
+    )
+
+    assert focus is not None
+    assert focus.primary_anchor_kind == "referent"
+    assert focus.topic_frame == "Field Assistant Architecture Brief"

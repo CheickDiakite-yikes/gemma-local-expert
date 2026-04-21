@@ -33,6 +33,7 @@ from engine.models.runtime import (
     AssistantGenerationRequest,
     AssistantGenerationResult,
     AssistantRuntime,
+    MemoryFocusResult,
 )
 from engine.models.video import VideoAnalysisRequest, VideoAsset, VideoRuntime
 from engine.models.vision import VisionAnalysisRequest, VisionAsset, VisionRuntime
@@ -128,6 +129,18 @@ class OrchestratorService:
                 recent_memories=ranked_memories,
             )
         )
+        memory_focus = self.memory_service.resolve_focus(
+            user_text=turn.text,
+            conversation_context=conversation_context,
+            entries=ranked_memories,
+            limit=self.settings.conversation_memory_ranking_limit,
+        )
+        if memory_focus is not None:
+            self._apply_memory_focus(
+                conversation_context=conversation_context,
+                focus=memory_focus,
+                entries=ranked_memories,
+            )
         contextual_assets = conversation_context.selected_context_assets
         routed_assets = self._merge_assets(attached_assets, contextual_assets)
         attached_asset_ids = [asset.id for asset in attached_assets]
@@ -804,6 +817,11 @@ class OrchestratorService:
                     conversation_context_summary="\n".join(conversation_context.prompt_lines()) or None,
                     selected_memory_topic=conversation_context.selected_memory_topic,
                     selected_memory_summary=conversation_context.selected_memory_summary,
+                    memory_focus_kind=conversation_context.memory_focus_kind,
+                    memory_focus_reason=conversation_context.memory_focus_reason,
+                    memory_focus_confidence=conversation_context.memory_focus_confidence,
+                    memory_focus_topic_frame=conversation_context.memory_focus_topic_frame,
+                    memory_focus_clarifying_question=conversation_context.memory_focus_clarifying_question,
                     referent_kind=conversation_context.selected_referent_kind,
                     referent_tool=conversation_context.selected_referent_tool,
                     referent_title=conversation_context.selected_referent_title,
@@ -1470,6 +1488,33 @@ class OrchestratorService:
             self.store.create_conversation_memory(entry)
         except Exception:
             return
+
+    def _apply_memory_focus(
+        self,
+        *,
+        conversation_context,
+        focus: MemoryFocusResult,
+        entries,
+    ) -> None:
+        conversation_context.memory_focus_kind = focus.primary_anchor_kind
+        conversation_context.memory_focus_reason = focus.reason
+        conversation_context.memory_focus_confidence = focus.confidence
+        conversation_context.memory_focus_topic_frame = focus.topic_frame
+        conversation_context.memory_focus_conflict_note = focus.conflict_note
+        conversation_context.memory_focus_clarifying_question = (
+            focus.ask_clarifying_question
+        )
+        if focus.topic_frame:
+            conversation_context.active_topic = focus.topic_frame
+        if focus.primary_anchor_kind != "conversation_memory" or not focus.memory_id:
+            conversation_context.selected_memory_topic = None
+            conversation_context.selected_memory_summary = None
+            return
+        selected = next((entry for entry in entries if entry.id == focus.memory_id), None)
+        if selected is None:
+            return
+        conversation_context.selected_memory_topic = selected.topic
+        conversation_context.selected_memory_summary = selected.summary
 
     def _memory_source_domain(
         self,

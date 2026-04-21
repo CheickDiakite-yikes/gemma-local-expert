@@ -7,6 +7,7 @@ from engine.contracts.api import (
     AssetKind,
     AssetSummary,
     ConversationMemoryEntry,
+    ConversationMemoryKind,
     EvidencePacket,
     TranscriptMessage,
 )
@@ -126,6 +127,23 @@ _WORK_PRODUCT_REFERENCE_PHRASES = {
     "retitle that",
     "make that shorter",
     "tighten that draft",
+}
+
+_TEACHING_FOLLOW_UP_PHRASES = {
+    "one sentence",
+    "say that plainly",
+    "say that simply",
+    "put it plainly",
+    "what should make me stop",
+    "what should make you stop",
+    "what should make us stop",
+    "what should i watch for",
+    "what would make me stop",
+    "what would make me escalate",
+    "what should make me escalate",
+    "what's the first action again",
+    "what is the first action again",
+    "first action again",
 }
 
 _WORK_PRODUCT_NOUNS = {
@@ -299,6 +317,12 @@ class ConversationContextSnapshot:
     recent_conversation_memories: list[ConversationMemoryEntry] = field(default_factory=list)
     selected_memory_topic: str | None = None
     selected_memory_summary: str | None = None
+    memory_focus_kind: str | None = None
+    memory_focus_reason: str | None = None
+    memory_focus_confidence: float | None = None
+    memory_focus_topic_frame: str | None = None
+    memory_focus_conflict_note: str | None = None
+    memory_focus_clarifying_question: str | None = None
 
     def prompt_lines(self) -> list[str]:
         lines: list[str] = []
@@ -402,6 +426,23 @@ class ConversationContextSnapshot:
             if self.selected_memory_topic:
                 selected_memory = f"{self.selected_memory_topic}: {selected_memory}"
             lines.append(f"Selected conversation memory: {selected_memory}")
+        if self.memory_focus_kind:
+            confidence = (
+                f"{self.memory_focus_confidence:.2f}"
+                if self.memory_focus_confidence is not None
+                else "unknown"
+            )
+            lines.append(f"Memory focus: kind={self.memory_focus_kind} confidence={confidence}")
+            if self.memory_focus_topic_frame:
+                lines.append(f"Memory focus topic: {self.memory_focus_topic_frame}")
+            if self.memory_focus_reason:
+                lines.append(f"Memory focus reason: {self.memory_focus_reason}")
+            if self.memory_focus_conflict_note:
+                lines.append(f"Memory focus conflict: {self.memory_focus_conflict_note}")
+            if self.memory_focus_clarifying_question:
+                lines.append(
+                    f"Memory focus clarification: {self.memory_focus_clarifying_question}"
+                )
         elif self.recent_conversation_memories:
             memory_labels = [
                 self._trim(f"{memory.topic}: {memory.summary}", 140)
@@ -602,6 +643,8 @@ class ConversationContextService:
         if snapshot.selected_context_assets or snapshot.selected_evidence_summary:
             return None
         query_tokens = self._meaningful_referent_tokens(turn_text)
+        lowered_turn = turn_text.lower().strip()
+        teaching_follow_up = self._looks_like_teaching_follow_up(lowered_turn)
         best_memory: ConversationMemoryEntry | None = None
         best_score = 0
         for index, memory in enumerate(snapshot.recent_conversation_memories):
@@ -622,6 +665,13 @@ class ConversationContextService:
                 score += 12
             if not query_tokens and self._looks_like_topic_reference(turn_text.lower().strip()):
                 score += 4
+            if teaching_follow_up and memory.kind == ConversationMemoryKind.TEACHING:
+                score += 10
+                if snapshot.active_topic:
+                    active_topic_tokens = self._meaningful_referent_tokens(snapshot.active_topic)
+                    overlap = len(active_topic_tokens & memory_tokens)
+                    if overlap:
+                        score += 6 + (overlap * 2)
             if score > best_score:
                 best_score = score
                 best_memory = memory
@@ -814,8 +864,13 @@ class ConversationContextService:
         lowered = cleaned.lower().strip("?.! ")
         if lowered in _LOW_SIGNAL_USER_TURNS:
             return None
+        if self._looks_like_low_signal_topic_follow_up(lowered):
+            return None
         first_line = cleaned.splitlines()[0].strip()
         return self._trim(first_line, 96)
+
+    def _looks_like_low_signal_topic_follow_up(self, lowered: str) -> bool:
+        return any(phrase in lowered for phrase in _TEACHING_FOLLOW_UP_PHRASES)
 
     def _last_message_text(self, transcript: list[TranscriptMessage], *, role: str) -> str | None:
         for message in reversed(transcript):
@@ -903,7 +958,11 @@ class ConversationContextService:
 
         payload_excerpt = self._work_product_excerpt(payload)
         excerpt = self._work_product_excerpt(result)
-        if payload_excerpt and (excerpt is None or (title and excerpt.lower() == title.lower())):
+        if payload_excerpt and (
+            excerpt is None
+            or (title and excerpt.lower() == title.lower())
+            or self._looks_like_output_execution_message(excerpt)
+        ):
             excerpt = payload_excerpt
         return title, excerpt
 
@@ -1077,6 +1136,19 @@ class ConversationContextService:
                     "User referred back to the most recent saved local output.",
                 )
 
+        topic_reentry_output = self._match_output_by_topic_reentry(
+            snapshot.recent_outputs,
+            lowered=lowered,
+        )
+        if topic_reentry_output is not None:
+            return (
+                topic_reentry_output.kind,
+                topic_reentry_output.tool_name,
+                topic_reentry_output.title,
+                topic_reentry_output.excerpt,
+                f"User referred back to the earlier {self._tool_label(topic_reentry_output.tool_name)} by topic.",
+            )
+
         if snapshot.selected_context_assets:
             title = ", ".join(
                 asset.display_name for asset in snapshot.selected_context_assets[:2]
@@ -1205,6 +1277,35 @@ class ConversationContextService:
                 return ordered[index]
         return None
 
+    def _match_output_by_topic_reentry(
+        self,
+        outputs: list[WorkProductReference],
+        *,
+        lowered: str,
+    ) -> WorkProductReference | None:
+        if not outputs:
+            return None
+        if not any(phrase in lowered for phrase in _TOPIC_REFERENCE_PHRASES):
+            return None
+
+        query_tokens = self._meaningful_referent_tokens(lowered)
+        if not query_tokens:
+            return None
+
+        best_match: WorkProductReference | None = None
+        best_score = 0
+        for output in outputs:
+            search_tokens = self._meaningful_referent_tokens(
+                " ".join(part for part in {output.title or "", output.excerpt or ""} if part)
+            )
+            if not search_tokens:
+                continue
+            score = len(query_tokens & search_tokens)
+            if score > best_score:
+                best_score = score
+                best_match = output
+        return best_match if best_score > 0 else None
+
     def _meaningful_referent_tokens(self, text: str) -> set[str]:
         return {
             token
@@ -1279,6 +1380,9 @@ class ConversationContextService:
         if any(phrase in lowered for phrase in _TOPIC_REFERENCE_PHRASES):
             return True
         return lowered.startswith(("and what", "so what", "why is that", "how so"))
+
+    def _looks_like_teaching_follow_up(self, lowered: str) -> bool:
+        return any(phrase in lowered for phrase in _TEACHING_FOLLOW_UP_PHRASES)
 
     def _is_video_contact_sheet(self, asset: AssetSummary) -> bool:
         lowered_name = asset.display_name.lower().strip()
@@ -1469,16 +1573,58 @@ class ConversationContextService:
     def _work_product_excerpt(self, payload: dict[str, object] | None) -> str | None:
         if not payload:
             return None
+        title = payload.get("title")
+        normalized_title = title if isinstance(title, str) else None
         for key in ("content", "details", "summary", "message"):
             value = payload.get(key)
             if isinstance(value, str) and value.strip():
-                excerpt = self._best_excerpt(value)
+                excerpt = (
+                    self._best_work_product_body_excerpt(value, normalized_title)
+                    if key == "content"
+                    else self._best_excerpt(value)
+                )
                 if excerpt:
                     return excerpt
-        title = payload.get("title")
         if isinstance(title, str) and title.strip():
             return self._trim(self._compact(title), 120)
         return None
+
+    def _looks_like_output_execution_message(self, excerpt: str | None) -> bool:
+        if not excerpt:
+            return False
+        lowered = excerpt.lower().strip()
+        if not lowered:
+            return False
+        if lowered.startswith(("exported ", "created ", "saved ", "wrote ")):
+            return True
+        return "/private/" in lowered or "/exports/" in lowered or "/notes/" in lowered
+
+    def _best_work_product_body_excerpt(
+        self,
+        text: str,
+        title: str | None,
+    ) -> str | None:
+        title_line = self._compact(title).lower() if title else None
+        lines: list[str] = []
+        for raw_line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+            cleaned = self._clean_line(raw_line)
+            if not cleaned:
+                continue
+            lowered = cleaned.lower()
+            if title_line and lowered == title_line:
+                continue
+            if lowered in _REFERENT_METADATA_PREFIXES or lowered.startswith(tuple(_REFERENT_METADATA_PREFIXES)):
+                continue
+            if self._looks_like_filename_line(cleaned):
+                continue
+            lines.append(cleaned)
+            if len(lines) == 3:
+                break
+        if not lines:
+            return self._best_excerpt(text)
+        compact = " ".join(lines)
+        compact = re.sub(r"^key points:\s*", "", compact, flags=re.IGNORECASE)
+        return self._trim(compact, 220)
 
     def _best_excerpt(self, text: str) -> str | None:
         lines: list[str] = []

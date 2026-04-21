@@ -251,6 +251,10 @@ class PromptBuilder:
                 lines.append(
                     "If the continuity snapshot includes a selected conversation memory, treat it as a secondary continuity hint. Use it to recover topic-level context only when there is no stronger explicit referent or grounded evidence for this turn."
                 )
+            if conversation_context.memory_focus_kind:
+                lines.append(
+                    "If the continuity snapshot includes a memory focus block, treat it as the current best bounded continuity guess. Explicit referents and grounded evidence still override it."
+                )
 
         if self._is_teaching_request(user_text):
             lines.append(

@@ -413,6 +413,31 @@ def test_follow_up_short_turn_is_marked_as_follow_up() -> None:
     assert route.interaction_kind == "conversation"
 
 
+def test_teaching_paraphrase_turn_is_marked_as_follow_up() -> None:
+    router = RouterService(ToolRegistry())
+    request = ConversationTurnRequest(
+        conversation_id="conv_test",
+        mode=AssistantMode.GENERAL,
+        text="If I had to say that in one sentence, how would you put it?",
+    )
+
+    route = router.decide(
+        request,
+        history=[
+            ConversationMessage(
+                role="user",
+                content="Teach me how to prepare oral rehydration solution in the field.",
+            ),
+            ConversationMessage(
+                role="assistant",
+                content="Start with the core action from ORS guidance.",
+            ),
+        ],
+    )
+
+    assert route.is_follow_up is True
+
+
 def test_field_teaching_request_can_trigger_local_retrieval() -> None:
     router = RouterService(ToolRegistry())
     request = ConversationTurnRequest(

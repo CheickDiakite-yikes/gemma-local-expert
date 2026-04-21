@@ -11,6 +11,7 @@ from mlx_lm.sample_utils import make_sampler
 from engine.contracts.api import (
     AssistantMode,
     ConversationMemoryEntry,
+    ConversationMemoryKind,
     EvidencePacket,
     ExecutionMode,
     GroundingStatus,
@@ -34,6 +35,11 @@ class AssistantGenerationRequest:
     conversation_context_summary: str | None
     selected_memory_topic: str | None
     selected_memory_summary: str | None
+    memory_focus_kind: str | None
+    memory_focus_reason: str | None
+    memory_focus_confidence: float | None
+    memory_focus_topic_frame: str | None
+    memory_focus_clarifying_question: str | None
     referent_kind: str | None
     referent_tool: str | None
     referent_title: str | None
@@ -100,6 +106,31 @@ class ConversationMemoryRankingResult:
     backend: str
 
 
+@dataclass(slots=True)
+class MemoryFocusRequest:
+    user_text: str
+    active_topic: str | None
+    selected_referent_kind: str | None
+    selected_referent_title: str | None
+    selected_referent_summary: str | None
+    selected_evidence_summary: str | None
+    selected_evidence_facts: list[str]
+    recent_topics: list[str]
+    memories: list[ConversationMemoryEntry]
+
+
+@dataclass(slots=True)
+class MemoryFocusResult:
+    primary_anchor_kind: str
+    memory_id: str | None
+    topic_frame: str | None
+    reason: str
+    confidence: float
+    conflict_note: str | None
+    ask_clarifying_question: str | None
+    backend: str
+
+
 class AssistantRuntime(Protocol):
     backend_name: str
 
@@ -112,6 +143,10 @@ class AssistantRuntime(Protocol):
     def rank_memories(
         self, request: ConversationMemoryRankingRequest
     ) -> ConversationMemoryRankingResult | None: ...
+
+    def resolve_memory_focus(
+        self, request: MemoryFocusRequest
+    ) -> MemoryFocusResult | None: ...
 
 
 class MockAssistantRuntime:
@@ -172,6 +207,11 @@ class MockAssistantRuntime:
         self, request: ConversationMemoryRankingRequest
     ) -> ConversationMemoryRankingResult | None:
         return _heuristic_memory_ranking(request, backend=self.backend_name)
+
+    def resolve_memory_focus(
+        self, request: MemoryFocusRequest
+    ) -> MemoryFocusResult | None:
+        return _heuristic_memory_focus(request, backend=self.backend_name)
 
     def _summary_from_sources(self, citations: list[SearchResultItem]) -> str:
         primary = citations[0]
@@ -384,9 +424,18 @@ class MockAssistantRuntime:
                 "Pick one small next step, then stop there. If you want, tell me what part feels heaviest and we can just handle that one piece."
             )
         if request.is_follow_up:
-            prior_topic = request.active_topic or self._recent_topic(
+            prior_topic = request.memory_focus_topic_frame or request.active_topic or self._recent_topic(
                 request.messages, request.user_text
             )
+            recall_topic = request.selected_memory_topic
+            recall_summary = request.selected_memory_summary
+            if recall_summary is None:
+                fallback_memory = self._recent_memory_from_context_summary(
+                    request.conversation_context_summary or "",
+                    request.user_text,
+                )
+                if fallback_memory is not None:
+                    recall_topic, recall_summary = fallback_memory
             if not request.selected_memory_summary and any(
                 phrase in lowered
                 for phrase in {
@@ -405,16 +454,29 @@ class MockAssistantRuntime:
                     request.user_text,
                 )
                 if fallback_memory is not None:
-                    topic, summary = fallback_memory
-                    if topic:
+                    recall_topic, recall_summary = fallback_memory
+                    if recall_topic:
                         return (
-                            f"Yes. Earlier we were talking about {self._memory_topic_for_recall(topic)}. "
-                            f"The main point was: {self._memory_summary_for_recall(summary)}"
+                            f"Yes. Earlier we were talking about {self._memory_topic_for_recall(recall_topic)}. "
+                            f"The main point was: {self._memory_summary_for_recall(recall_summary)}"
                         )
                     return (
                         f"Yes. The main point there was: "
-                        f"{self._memory_summary_for_recall(summary)}"
+                        f"{self._memory_summary_for_recall(recall_summary)}"
                     )
+            targeted_teaching_reply = self._grounded_teaching_follow_up(
+                lowered,
+                recall_summary,
+            )
+            if targeted_teaching_reply:
+                return targeted_teaching_reply
+            if (
+                request.memory_focus_clarifying_question
+                and request.memory_focus_confidence is not None
+                and request.memory_focus_confidence < 0.55
+                and request.selected_memory_summary is None
+            ):
+                return request.memory_focus_clarifying_question
             if any(
                 phrase in lowered
                 for phrase in {
@@ -428,9 +490,9 @@ class MockAssistantRuntime:
                     "go deeper on that",
                 }
             ) and request.selected_memory_summary:
-                if request.selected_memory_topic:
+                if recall_topic:
                     return (
-                        f"Yes. Earlier we were talking about {self._memory_topic_for_recall(request.selected_memory_topic)}. "
+                        f"Yes. Earlier we were talking about {self._memory_topic_for_recall(recall_topic)}. "
                         f"The main point was: {self._memory_summary_for_recall(request.selected_memory_summary)}"
                     )
                 return (
@@ -479,6 +541,19 @@ class MockAssistantRuntime:
         )
         recall_intent = lowered.startswith(
             ("what was in", "what is in", "what's in", "remind me", "show me")
+        )
+        topic_reentry_intent = any(
+            phrase in lowered
+            for phrase in {
+                "go back to that",
+                "bring that up again",
+                "come back to that",
+                "go deeper on that",
+                "what was the main point again",
+                "what was the point again",
+                "remind me what we were saying",
+                "what were we saying",
+            }
         )
         title_intent = self._is_work_product_title_query(lowered)
 
@@ -558,6 +633,28 @@ class MockAssistantRuntime:
             return (
                 f'The {(draft_label if request.referent_kind == "pending_output" else saved_label)} is "{title}". '
                 "I can also summarize it more tightly or prepare a revised version if you want."
+            )
+
+        if topic_reentry_intent:
+            if request.referent_excerpt:
+                cleaned_excerpt = self._memory_summary_for_recall(request.referent_excerpt)
+                if request.referent_kind == "pending_output":
+                    return (
+                        f'Yes. The main point in the current {draft_label} "{title}" is: '
+                        f"{cleaned_excerpt}"
+                    )
+                return (
+                    f'Yes. The main point in the saved {saved_label} "{title}" is: '
+                    f"{cleaned_excerpt}"
+                )
+            if request.referent_kind == "pending_output":
+                return (
+                    f'Yes. The current {draft_label} is "{title}". '
+                    "I can summarize the body more tightly if you want."
+                )
+            return (
+                f'Yes. The most recent saved {saved_label} is "{title}". '
+                "I can summarize the body more tightly if you want."
             )
 
         return None
@@ -719,6 +816,76 @@ class MockAssistantRuntime:
         )
         return cleaned
 
+    def _grounded_teaching_follow_up(self, lowered: str, summary: str | None) -> str | None:
+        if not summary:
+            return None
+        if not any(
+            phrase in lowered
+            for phrase in {
+                "one sentence",
+                "say that plainly",
+                "say that simply",
+                "put it plainly",
+                "what should make me stop",
+                "what should make you stop",
+                "what should make us stop",
+                "what should i watch for",
+                "what would make me stop",
+                "what would make me escalate",
+                "what should make me escalate",
+                "what's the first action again",
+                "what is the first action again",
+                "first action again",
+            }
+        ):
+            return None
+
+        cleaned = self._memory_summary_for_recall(summary)
+        source_label = self._summary_source_label(cleaned)
+        body = self._teaching_body_from_summary(cleaned)
+        first_action = self._teaching_first_action(body)
+        warning = self._teaching_warning(body)
+
+        if any(
+            phrase in lowered
+            for phrase in {
+                "what should make me stop",
+                "what should make you stop",
+                "what should make us stop",
+                "what should i watch for",
+                "what would make me stop",
+                "what would make me escalate",
+                "what should make me escalate",
+            }
+        ) and warning:
+            source = f" That comes from [{source_label}]." if source_label else ""
+            return f"Stop and escalate if you see {warning}.{source}"
+
+        if any(
+            phrase in lowered
+            for phrase in {
+                "what's the first action again",
+                "what is the first action again",
+                "first action again",
+            }
+        ) and first_action:
+            source = f" That first step comes from [{source_label}]." if source_label else ""
+            return f"First, {first_action}.{source}"
+
+        if any(
+            phrase in lowered
+            for phrase in {
+                "one sentence",
+                "say that plainly",
+                "say that simply",
+                "put it plainly",
+            }
+        ) and body:
+            if source_label:
+                return f"In one sentence: {body} Grounded in [{source_label}]."
+            return f"In one sentence: {body}"
+        return None
+
     def _memory_topic_for_recall(self, topic: str) -> str:
         cleaned = topic.strip().rstrip(".")
         lowered = cleaned.lower()
@@ -746,6 +913,35 @@ class MockAssistantRuntime:
         ):
             return f"how to {cleaned}"
         return cleaned
+
+    def _summary_source_label(self, summary: str) -> str | None:
+        match = re.search(r"\[([^\]]+)\]", summary)
+        if not match:
+            return None
+        return match.group(1).strip() or None
+
+    def _teaching_body_from_summary(self, summary: str) -> str:
+        body = summary
+        if ":" in body:
+            body = body.split(":", 1)[1].strip()
+        body = re.sub(r"\s+", " ", body).strip()
+        if body.endswith("."):
+            return body
+        return body
+
+    def _teaching_first_action(self, body: str) -> str | None:
+        if not body:
+            return None
+        primary = re.split(r"\.\s+|Watch for ", body, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+        return primary.rstrip(".") or None
+
+    def _teaching_warning(self, body: str) -> str | None:
+        if not body:
+            return None
+        match = re.search(r"Watch for ([^.]+)", body, flags=re.IGNORECASE)
+        if not match:
+            return None
+        return match.group(1).strip().rstrip(".")
 
     def _teaching_intro(self, topic: str) -> str:
         first = topic.strip().split(" ", 1)[0].lower() if topic.strip() else ""
@@ -1084,6 +1280,88 @@ class MLXAssistantRuntime:
         except Exception:
             return heuristic
 
+    def resolve_memory_focus(
+        self, request: MemoryFocusRequest
+    ) -> MemoryFocusResult | None:
+        heuristic = _heuristic_memory_focus(request, backend=self.backend_name)
+        if heuristic is None:
+            return None
+        if not request.memories:
+            return heuristic
+
+        memory_lines = []
+        for memory in request.memories[:6]:
+            memory_lines.append(
+                "\n".join(
+                    [
+                        f"id={memory.id}",
+                        f"kind={memory.kind.value}",
+                        f"topic={memory.topic}",
+                        f"summary={memory.summary}",
+                        f"keywords={','.join(memory.keywords[:8])}",
+                        f"source_domain={memory.source_domain.value if memory.source_domain else ''}",
+                    ]
+                )
+            )
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You choose the strongest bounded continuity anchor for one new user turn. "
+                    "Return strict JSON with keys primary_anchor_kind, memory_id, topic_frame, reason, confidence, conflict_note, ask_clarifying_question. "
+                    "Valid primary_anchor_kind values are conversation_memory, topic, none. "
+                    "Do not invent ids. Keep explicit referents and grounded evidence out of scope because they already override memory."
+                ),
+            },
+            {
+                "role": "user",
+                "content": "\n\n".join(
+                    [
+                        f"user_text={request.user_text}",
+                        f"active_topic={request.active_topic or ''}",
+                        f"selected_referent_kind={request.selected_referent_kind or ''}",
+                        f"selected_referent_title={request.selected_referent_title or ''}",
+                        f"selected_evidence_summary={request.selected_evidence_summary or ''}",
+                        "candidate_memories:",
+                        *memory_lines,
+                        (
+                            "heuristic="
+                            + ",".join(
+                                [
+                                    f"kind={heuristic.primary_anchor_kind}",
+                                    f"memory_id={heuristic.memory_id or ''}",
+                                    f"topic_frame={heuristic.topic_frame or ''}",
+                                    f"confidence={heuristic.confidence:.2f}",
+                                ]
+                            )
+                        ),
+                        "Return JSON only.",
+                    ]
+                ),
+            },
+        ]
+        try:
+            model_source = next(iter(self._cache), None)
+            if model_source is None:
+                return heuristic
+            model, tokenizer = self._load_model(model_source)
+            prompt = self._build_prompt(tokenizer, messages)
+            sampler = make_sampler(temp=0.1, top_p=0.9)
+            text = generate(
+                model,
+                tokenizer,
+                prompt,
+                verbose=False,
+                max_tokens=140,
+                sampler=sampler,
+            ).strip()
+            parsed = _parse_memory_focus_json(text, request.memories)
+            if parsed is None:
+                return heuristic
+            return parsed
+        except Exception:
+            return heuristic
+
     def _load_model(self, source: str) -> tuple[object, object]:
         with self._lock:
             cached = self._cache.get(source)
@@ -1134,6 +1412,8 @@ def _heuristic_memory_ranking(
     if not request.memories:
         return None
     query_tokens = _ranking_tokens(request.user_text)
+    active_topic_tokens = _ranking_tokens(request.active_topic or "")
+    teaching_follow_up = _looks_like_teaching_follow_up_request(request.user_text.lower())
     if not query_tokens and request.active_topic:
         query_tokens = _ranking_tokens(request.active_topic)
     scored: list[tuple[int, int, str]] = []
@@ -1153,6 +1433,11 @@ def _heuristic_memory_ranking(
             score += 12
         if memory.topic and memory.topic.lower() in request.user_text.lower():
             score += 16
+        if teaching_follow_up and memory.kind == ConversationMemoryKind.TEACHING:
+            score += 12
+            overlap = len(active_topic_tokens & memory_tokens)
+            if overlap:
+                score += 8 + (overlap * 4)
         if (
             request.active_topic
             and memory.topic.lower() == request.active_topic.lower()
@@ -1163,6 +1448,140 @@ def _heuristic_memory_ranking(
     scored.sort(key=lambda item: (-item[0], item[1]))
     return ConversationMemoryRankingResult(
         ordered_ids=[memory_id for _, _, memory_id in scored],
+        backend=backend,
+    )
+
+
+def _heuristic_memory_focus(
+    request: MemoryFocusRequest,
+    *,
+    backend: str,
+) -> MemoryFocusResult | None:
+    if request.selected_referent_kind in {"pending_output", "saved_output"}:
+        topic_frame = request.selected_referent_title or request.selected_referent_summary
+        return MemoryFocusResult(
+            primary_anchor_kind="referent",
+            memory_id=None,
+            topic_frame=topic_frame,
+            reason="An explicit current work-product referent is already selected.",
+            confidence=1.0,
+            conflict_note=None,
+            ask_clarifying_question=None,
+            backend=backend,
+        )
+    if request.selected_evidence_summary and (
+        request.selected_referent_kind in {"image", "video", "document"}
+        or request.selected_referent_kind is None
+    ):
+        return MemoryFocusResult(
+            primary_anchor_kind="grounded_evidence",
+            memory_id=None,
+            topic_frame=request.selected_referent_title or request.active_topic,
+            reason="Grounded evidence is already selected for this turn and should outrank memory.",
+            confidence=0.98,
+            conflict_note=None,
+            ask_clarifying_question=None,
+            backend=backend,
+        )
+    if not request.memories:
+        if request.active_topic:
+            return MemoryFocusResult(
+                primary_anchor_kind="topic",
+                memory_id=None,
+                topic_frame=request.active_topic,
+                reason="No bounded memory candidate is available, so the active topic is the best continuity anchor.",
+                confidence=0.46,
+                conflict_note=None,
+                ask_clarifying_question=None,
+                backend=backend,
+            )
+        return MemoryFocusResult(
+            primary_anchor_kind="none",
+            memory_id=None,
+            topic_frame=None,
+            reason="No suitable memory anchor is available for this turn.",
+            confidence=0.0,
+            conflict_note=None,
+            ask_clarifying_question=None,
+            backend=backend,
+        )
+
+    lowered = request.user_text.lower().strip()
+    query_tokens = _ranking_tokens(request.user_text)
+    active_topic_tokens = _ranking_tokens(request.active_topic or "")
+    recent_topic_tokens = _ranking_tokens(" ".join(request.recent_topics[:3]))
+    teaching_follow_up = _looks_like_teaching_follow_up_request(lowered)
+    generic_follow_up = _is_generic_memory_follow_up(lowered)
+    scored: list[tuple[float, int, ConversationMemoryEntry]] = []
+    for index, memory in enumerate(request.memories):
+        searchable = " ".join(
+            [
+                memory.topic,
+                memory.summary,
+                " ".join(memory.keywords),
+                memory.referent_title or "",
+            ]
+        )
+        memory_tokens = _ranking_tokens(searchable)
+        score = max(0.0, 24.0 - index * 2.0)
+        score += len(query_tokens & memory_tokens) * 8.0
+        score += len(active_topic_tokens & memory_tokens) * 5.0
+        score += len(recent_topic_tokens & memory_tokens) * 2.0
+        if memory.referent_title and memory.referent_title.lower() in lowered:
+            score += 12.0
+        if memory.topic and memory.topic.lower() in lowered:
+            score += 16.0
+        if teaching_follow_up and memory.kind == ConversationMemoryKind.TEACHING:
+            score += 12.0
+            score += len(active_topic_tokens & _ranking_tokens(memory.topic)) * 4.0
+        if generic_follow_up and memory.kind in {
+            ConversationMemoryKind.GENERAL,
+            ConversationMemoryKind.TEACHING,
+            ConversationMemoryKind.WORKSPACE,
+        }:
+            score += 5.0
+        scored.append((score, index, memory))
+
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    best_score, _, best_memory = scored[0]
+    runner_up = scored[1] if len(scored) > 1 else None
+    confidence = min(0.98, 0.25 + (best_score / 60.0))
+    conflict_note = None
+    ask_clarifying_question = None
+    if (
+        runner_up is not None
+        and best_score > 0
+        and abs(best_score - runner_up[0]) <= 6
+        and runner_up[2].topic.lower() != best_memory.topic.lower()
+    ):
+        conflict_note = (
+            f'Two continuity candidates remain close: "{best_memory.topic}" and "{runner_up[2].topic}".'
+        )
+        if confidence < 0.62:
+            ask_clarifying_question = (
+                f'Do you mean "{best_memory.topic}" or "{runner_up[2].topic}"?'
+            )
+
+    if best_score <= 6 and request.active_topic:
+        return MemoryFocusResult(
+            primary_anchor_kind="topic",
+            memory_id=None,
+            topic_frame=request.active_topic,
+            reason="The active topic is stronger than the available bounded memory candidates for this turn.",
+            confidence=max(0.4, confidence - 0.1),
+            conflict_note=conflict_note,
+            ask_clarifying_question=ask_clarifying_question,
+            backend=backend,
+        )
+
+    return MemoryFocusResult(
+        primary_anchor_kind="conversation_memory",
+        memory_id=best_memory.id,
+        topic_frame=best_memory.topic,
+        reason=f'The best bounded continuity anchor for this turn is "{best_memory.topic}".',
+        confidence=confidence,
+        conflict_note=conflict_note,
+        ask_clarifying_question=ask_clarifying_question,
         backend=backend,
     )
 
@@ -1213,12 +1632,12 @@ def _memory_summary(request: ConversationMemoryRequest) -> str | None:
             180,
         )
     if request.evidence_packet and request.evidence_packet.summary.strip():
-        return _trim_memory_text(request.evidence_packet.summary.strip(), 180)
+        return _trim_memory_text(request.evidence_packet.summary.strip(), 220)
     if request.workspace_summary_text:
         cleaned_workspace = request.workspace_summary_text.strip().split("\n\n")[0]
-        return _trim_memory_text(cleaned_workspace, 180)
-    cleaned = " ".join(request.assistant_text.split())
-    return _trim_memory_text(cleaned, 180) if cleaned else None
+        return _trim_memory_text(cleaned_workspace, 220)
+    cleaned = _normalized_stored_memory_summary(request.assistant_text)
+    return _trim_memory_text(cleaned, 260) if cleaned else None
 
 
 def _memory_keywords(
@@ -1359,6 +1778,19 @@ def _assistant_output_memory_excerpt(text: str) -> str | None:
     return None
 
 
+def _normalized_stored_memory_summary(text: str) -> str:
+    cleaned = " ".join(text.split())
+    patterns = (
+        r"^Here is a practical way to (?:approach )?[^:]+:\s*",
+        r"^Yes\. Earlier we were talking about [^.]+\.\s*The main point was:\s*",
+        r"^Yes\. The main point there was:\s*",
+        r"^The main point was:\s*",
+    )
+    for pattern in patterns:
+        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
+
+
 def _trim_memory_text(text: str, limit: int) -> str:
     cleaned = " ".join(text.split())
     if len(cleaned) <= limit:
@@ -1383,6 +1815,28 @@ def _is_generic_memory_follow_up(lowered: str) -> bool:
             "remind me what we were saying",
             "actually just talk normally",
             "talk normally again",
+        }
+    )
+
+
+def _looks_like_teaching_follow_up_request(lowered: str) -> bool:
+    return any(
+        phrase in lowered
+        for phrase in {
+            "one sentence",
+            "say that plainly",
+            "say that simply",
+            "put it plainly",
+            "what should make me stop",
+            "what should make you stop",
+            "what should make us stop",
+            "what should i watch for",
+            "what would make me stop",
+            "what would make me escalate",
+            "what should make me escalate",
+            "what's the first action again",
+            "what is the first action again",
+            "first action again",
         }
     )
 
@@ -1436,5 +1890,53 @@ def _parse_memory_ranking_json(
     remaining = [memory.id for memory in memories if memory.id not in ordered_ids]
     return ConversationMemoryRankingResult(
         ordered_ids=ordered_ids + remaining,
+        backend="mlx",
+    )
+
+
+def _parse_memory_focus_json(
+    text: str,
+    memories: list[ConversationMemoryEntry],
+) -> MemoryFocusResult | None:
+    match = re.search(r"\{.*\}", text, flags=re.S)
+    if not match:
+        return None
+    try:
+        import json
+
+        payload = json.loads(match.group(0))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    memory_ids = {memory.id for memory in memories}
+    anchor_kind = str(payload.get("primary_anchor_kind") or "").strip().lower()
+    if anchor_kind not in {"conversation_memory", "topic", "none", "referent", "grounded_evidence"}:
+        return None
+    memory_id = str(payload.get("memory_id") or "").strip() or None
+    if memory_id is not None and memory_id not in memory_ids:
+        return None
+    topic_frame = _trim_memory_text(str(payload.get("topic_frame") or "").strip(), 96) or None
+    reason = _trim_memory_text(str(payload.get("reason") or "").strip(), 180)
+    if not reason:
+        return None
+    try:
+        confidence = float(payload.get("confidence"))
+    except Exception:
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
+    conflict_note = _trim_memory_text(str(payload.get("conflict_note") or "").strip(), 180) or None
+    ask_clarifying_question = (
+        _trim_memory_text(str(payload.get("ask_clarifying_question") or "").strip(), 140)
+        or None
+    )
+    return MemoryFocusResult(
+        primary_anchor_kind=anchor_kind,
+        memory_id=memory_id,
+        topic_frame=topic_frame,
+        reason=reason,
+        confidence=confidence,
+        conflict_note=conflict_note,
+        ask_clarifying_question=ask_clarifying_question,
         backend="mlx",
     )

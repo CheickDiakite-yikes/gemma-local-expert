@@ -241,6 +241,61 @@ def test_follow_up_can_use_selected_conversation_memory_after_topic_pivot(
     assert "grounded specialist routes" in response.text.lower()
 
 
+def test_teaching_follow_ups_keep_using_grounded_base_memory_after_short_paraphrase_turns(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(database_path=str(tmp_path / "test-teaching-followups.db"))
+    app = create_app(settings)
+    client = TestClient(app)
+    conversation = client.post(
+        "/v1/conversations",
+        json={"title": "Teaching follow ups", "mode": "research"},
+    ).json()
+
+    turns = [
+        "Teach me how to prepare oral rehydration solution in the field.",
+        "What should I emphasize first to a volunteer with no medical training?",
+        "Separate tangent about lunch and coffee for a second.",
+        "Can we go back to that oral rehydration point again?",
+        "If I had to say that in one sentence, how would you put it?",
+        "What should make me stop and escalate?",
+    ]
+
+    completed_texts: list[str] = []
+    for text in turns:
+        response = client.post(
+            f"/v1/conversations/{conversation['id']}/turns",
+            json={
+                "conversation_id": conversation["id"],
+                "mode": "research",
+                "text": text,
+                "asset_ids": [],
+                "enabled_knowledge_pack_ids": [],
+                "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+            },
+        )
+        assert response.status_code == 200
+        completed = next(
+            json.loads(line)
+            for line in response.text.splitlines()
+            if '"type":"assistant.message.completed"' in line
+        )
+        completed_texts.append(completed["payload"]["text"])
+
+    assert "earlier we were talking about how to prepare oral rehydration solution in the field" in completed_texts[3].lower()
+    assert completed_texts[4].lower().startswith("in one sentence:")
+    assert "grounded in [ors guidance]" in completed_texts[4].lower()
+    assert (
+        "stop and escalate if you see worsening weakness, confusion, or inability to drink"
+        in completed_texts[5].lower()
+    )
+
+    memories = app.state.container.store.list_conversation_memories(conversation["id"])
+    memory_summaries = [memory.summary.lower() for memory in memories]
+    assert not any(summary.startswith("in one sentence:") for summary in memory_summaries)
+    assert not any("stop and escalate if you see" in summary for summary in memory_summaries)
+
+
 def test_approval_executes_checklist_tool_and_persists_note(tmp_path: Path) -> None:
     settings = Settings(database_path=str(tmp_path / "test-approval.db"))
     client = TestClient(create_app(settings))
@@ -1609,6 +1664,82 @@ def test_saved_export_title_follow_up_answers_directly(tmp_path: Path) -> None:
     assert "Field Assistant Architecture Briefing" in text
     assert "next step practical" not in text.lower()
     assert "talk normally" not in text.lower()
+
+
+def test_saved_export_topic_reentry_answers_from_saved_export_content(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    (workspace_root / "field-assistant-architecture.md").write_text(
+        "Field Assistant architecture overview\n"
+        "Local-first assistant built on Gemma.\n"
+        "Uses bounded routing, retrieval, vision, and approvals.\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings(
+        database_path=str(tmp_path / "test-saved-export-topic-reentry.db"),
+        workspace_root=str(workspace_root),
+    )
+    client = TestClient(create_app(settings))
+    conversation = client.post(
+        "/v1/conversations",
+        json={"title": "Saved export recall", "mode": "research"},
+    ).json()
+
+    export = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Prepare a short workspace briefing about the current field assistant architecture and export it as markdown.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+        },
+    )
+    export_lines = [json.loads(line) for line in export.text.splitlines() if line.strip()]
+    export_approval = next(line for line in export_lines if line["type"] == "approval.required")
+    client.post(
+        f"/v1/approvals/{export_approval['payload']['id']}/decisions",
+        json={"action": "approve", "edited_payload": {"title": "Field Assistant Architecture Brief"}},
+    )
+
+    title_turn = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "What's the export title now?",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+        },
+    )
+    assert title_turn.status_code == 200
+
+    follow_up = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Go back to that architecture point again.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+        },
+    )
+
+    assert follow_up.status_code == 200
+    completed = next(
+        json.loads(line)
+        for line in follow_up.text.splitlines()
+        if '"type":"assistant.message.completed"' in line
+    )
+    text = completed["payload"]["text"].lower()
+    assert "field assistant architecture brief" in text
+    assert "local-first assistant built on gemma" in text
+    assert "bounded routing" in text
+    assert "we can stay with what we were just discussing" not in text
 
 
 def test_multimodal_conversation_handles_topic_pivots_follow_ups_and_workspace_output(

@@ -284,6 +284,136 @@ def test_context_service_selects_recent_conversation_memory_without_stronger_ref
     assert "one orchestrator" in snapshot.selected_memory_summary.lower()
 
 
+def test_context_service_selects_teaching_memory_for_short_follow_up() -> None:
+    service = ConversationContextService()
+
+    snapshot = service.build(
+        turn_text="If I had to say that in one sentence, how would you put it?",
+        transcript=[
+            TranscriptMessage(
+                id="msg1",
+                role="user",
+                content="Teach me how to prepare oral rehydration solution in the field.",
+            ),
+            TranscriptMessage(
+                id="msg2",
+                role="assistant",
+                content=(
+                    "Here is a practical way to prepare oral rehydration solution in the field: "
+                    "start with the core action from [ORS Guidance] Oral rehydration guidance: "
+                    "mix the packet with safe water and continue small frequent sips."
+                ),
+            ),
+        ],
+        attached_assets=[],
+        recent_memories=[
+            ConversationMemoryEntry(
+                id="memory_teaching",
+                conversation_id="conv_1",
+                turn_id="turn_1",
+                kind=ConversationMemoryKind.TEACHING,
+                topic="prepare oral rehydration solution in the field",
+                summary=(
+                    "start with the core action from [ORS Guidance] Oral rehydration guidance: "
+                    "mix the packet with safe water, continue small frequent sips, and monitor dehydration signs. "
+                    "Watch for worsening weakness, confusion, or inability to drink."
+                ),
+                keywords=["oral", "rehydration", "guidance"],
+                source_domain=SourceDomain.CONVERSATION,
+            )
+        ],
+    )
+
+    assert snapshot.selected_memory_topic == "prepare oral rehydration solution in the field"
+    assert snapshot.selected_memory_summary is not None
+    assert "watch for worsening weakness" in snapshot.selected_memory_summary.lower()
+
+
+def test_context_service_keeps_prior_topic_for_short_teaching_follow_up() -> None:
+    service = ConversationContextService()
+
+    snapshot = service.build(
+        turn_text="What should make me stop and escalate?",
+        transcript=[
+            TranscriptMessage(
+                id="msg1",
+                role="user",
+                content="Teach me how to prepare oral rehydration solution in the field.",
+            ),
+            TranscriptMessage(
+                id="msg2",
+                role="assistant",
+                content=(
+                    "Here is a practical way to prepare oral rehydration solution in the field: "
+                    "start with the core action from [ORS Guidance] Oral rehydration guidance: "
+                    "mix the packet with safe water and continue small frequent sips."
+                ),
+            ),
+            TranscriptMessage(
+                id="msg3",
+                role="user",
+                content="Can we go back to that oral rehydration point again?",
+            ),
+            TranscriptMessage(
+                id="msg4",
+                role="assistant",
+                content=(
+                    "Yes. Earlier we were talking about how to prepare oral rehydration solution in the field. "
+                    "The main point was: start with the core action from [ORS Guidance]."
+                ),
+            ),
+            TranscriptMessage(
+                id="msg5",
+                role="user",
+                content="If I had to say that in one sentence, how would you put it?",
+            ),
+            TranscriptMessage(
+                id="msg6",
+                role="assistant",
+                content=(
+                    "In one sentence: mix the packet with safe water, continue small frequent sips, "
+                    "and monitor dehydration signs. Grounded in [ORS Guidance]."
+                ),
+            ),
+        ],
+        attached_assets=[],
+        recent_memories=[
+            ConversationMemoryEntry(
+                id="memory_teaching",
+                conversation_id="conv_1",
+                turn_id="turn_1",
+                kind=ConversationMemoryKind.TEACHING,
+                topic="prepare oral rehydration solution in the field",
+                summary=(
+                    "start with the core action from [ORS Guidance] Oral rehydration guidance: "
+                    "mix the packet with safe water, continue small frequent sips, and monitor dehydration signs. "
+                    "Watch for worsening weakness, confusion, or inability to drink."
+                ),
+                keywords=["oral", "rehydration", "guidance"],
+                source_domain=SourceDomain.CONVERSATION,
+            ),
+            ConversationMemoryEntry(
+                id="memory_other_teaching",
+                conversation_id="conv_1",
+                turn_id="turn_2",
+                kind=ConversationMemoryKind.TEACHING,
+                topic="emphasize the first volunteer teaching point",
+                summary=(
+                    "State the goal in plain language, demonstrate the first action once, "
+                    "and repeat the key safety check."
+                ),
+                keywords=["volunteer", "first", "action"],
+                source_domain=SourceDomain.CONVERSATION,
+            ),
+        ],
+    )
+
+    assert snapshot.active_topic == "Can we go back to that oral rehydration point again?"
+    assert snapshot.selected_memory_topic == "prepare oral rehydration solution in the field"
+    assert snapshot.selected_memory_summary is not None
+    assert "worsening weakness" in snapshot.selected_memory_summary.lower()
+
+
 def test_context_service_suppresses_conversation_memory_when_pending_draft_is_stronger() -> None:
     service = ConversationContextService()
     approval = ApprovalState(

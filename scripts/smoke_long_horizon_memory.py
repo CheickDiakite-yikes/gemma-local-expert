@@ -70,6 +70,8 @@ def main() -> None:
             ("What should I emphasize first to a volunteer with no medical training?", []),
             ("Separate tangent about lunch and coffee for a second.", []),
             ("Can we go back to that oral rehydration point again?", []),
+            ("If I had to say that in one sentence, how would you put it?", []),
+            ("What should make me stop and escalate?", []),
             ("Describe the attached supply image conservatively.", [image_asset["id"]]),
             ("Which two shortages matter most before departure?", []),
             ("Create a checklist from those two shortages for tomorrow morning.", []),
@@ -145,6 +147,12 @@ def main() -> None:
         assert "teach me how" not in completed_texts[4].lower()
         assert "earlier we were talking about how to prepare oral rehydration solution in the field" in completed_texts[4].lower()
         assert "oral rehydration solution in the field" in completed_texts[4].lower()
+        assert completed_texts[5].lower().startswith("in one sentence:")
+        assert "grounded in [ors guidance]" in completed_texts[5].lower()
+        assert "stop and escalate if you see worsening weakness, confusion, or inability to drink" in completed_texts[6].lower()
+        assert "field assistant architecture brief" in completed_texts[18].lower()
+        assert "local-first assistant built on gemma" in completed_texts[18].lower()
+        assert "bounded routing" in completed_texts[18].lower()
 
         memory_summaries = [memory.summary.lower() for memory in memories]
         assert any(
@@ -155,6 +163,11 @@ def main() -> None:
             "markdown export" in summary
             and "i reviewed" not in summary
             and "files reviewed" not in summary
+            for summary in memory_summaries
+        )
+        assert any(
+            "start with the core action from [ors guidance]" in summary
+            and "here is a practical way" not in summary
             for summary in memory_summaries
         )
 

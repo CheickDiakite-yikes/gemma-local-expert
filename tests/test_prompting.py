@@ -154,6 +154,48 @@ def test_prompt_builder_includes_continuity_snapshot_when_available() -> None:
     assert "Likely referent preview:" in user_prompt
 
 
+def test_prompt_builder_includes_memory_focus_guidance_when_available() -> None:
+    builder = PromptBuilder()
+    context = builder.build(
+        turn=ConversationTurnRequest(
+            conversation_id="conv_focus",
+            mode=AssistantMode.GENERAL,
+            text="Go back to that architecture point again.",
+        ),
+        history=[],
+        assets=[],
+        context_assets=[],
+        conversation_context=ConversationContextSnapshot(
+            active_topic="Field Assistant Architecture Briefing",
+            selected_memory_topic="Field Assistant Architecture Briefing",
+            selected_memory_summary=(
+                'Markdown Export "Field Assistant Architecture Briefing" centers on: '
+                "Uses bounded routing and approvals with a local-first assistant built on Gemma."
+            ),
+            memory_focus_kind="conversation_memory",
+            memory_focus_reason="The best bounded continuity anchor for this turn is the architecture export memory.",
+            memory_focus_confidence=0.88,
+            memory_focus_topic_frame="Field Assistant Architecture Briefing",
+        ),
+        specialist_analysis=None,
+        workspace_summary=None,
+        route=RouteDecision(interaction_kind="conversation", is_follow_up=True),
+        policy=PolicyDecision(),
+        model_selection=ModelRouteSelection(
+            assistant_model="gemma-4-e2b-it-4bit",
+            embedding_model="embeddinggemma-300m",
+        ),
+        results=[],
+        tool_result=None,
+    )
+
+    system_prompt = context.messages[0]["content"]
+    user_prompt = context.messages[-1]["content"]
+    assert "memory focus block" in system_prompt.lower()
+    assert "Memory focus: kind=conversation_memory" in user_prompt
+    assert "Memory focus topic: Field Assistant Architecture Briefing" in user_prompt
+
+
 def test_prompt_builder_adds_draft_follow_up_guidance() -> None:
     builder = PromptBuilder()
     context = builder.build(
