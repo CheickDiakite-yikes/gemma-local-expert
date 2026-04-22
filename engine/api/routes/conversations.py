@@ -7,7 +7,10 @@ from engine.api.dependencies import ServiceContainer, get_container
 from engine.contracts.api import (
     Conversation,
     ConversationCreateRequest,
+    ConversationForkRequest,
+    ConversationItem,
     ConversationSummary,
+    ConversationTurnRecord,
     ConversationTurnRequest,
     TranscriptMessage,
 )
@@ -26,9 +29,24 @@ async def create_conversation(
 @router.get("", response_model=list[ConversationSummary])
 async def list_conversations(
     limit: int = Query(default=50, ge=1, le=200),
+    include_archived: bool = Query(default=False),
     container: ServiceContainer = Depends(get_container),
-) -> list[ConversationSummary]:
-    return container.store.list_conversations(limit=limit)
+    ) -> list[ConversationSummary]:
+    return container.store.list_conversations(
+        limit=limit,
+        include_archived=include_archived,
+    )
+
+
+@router.get("/{conversation_id}", response_model=Conversation)
+async def get_conversation(
+    conversation_id: str,
+    container: ServiceContainer = Depends(get_container),
+) -> Conversation:
+    conversation = container.store.get_conversation(conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return conversation
 
 
 @router.get("/{conversation_id}/messages", response_model=list[TranscriptMessage])
@@ -42,6 +60,29 @@ async def list_conversation_messages(
     return container.store.list_transcript(conversation_id, limit=limit)
 
 
+@router.get("/{conversation_id}/turns", response_model=list[ConversationTurnRecord])
+async def list_conversation_turns(
+    conversation_id: str,
+    limit: int = Query(default=100, ge=1, le=500),
+    container: ServiceContainer = Depends(get_container),
+) -> list[ConversationTurnRecord]:
+    if container.store.get_conversation(conversation_id) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return container.store.list_turn_records(conversation_id, limit=limit)
+
+
+@router.get("/{conversation_id}/items", response_model=list[ConversationItem])
+async def list_conversation_items(
+    conversation_id: str,
+    turn_id: str | None = Query(default=None),
+    limit: int = Query(default=500, ge=1, le=2000),
+    container: ServiceContainer = Depends(get_container),
+) -> list[ConversationItem]:
+    if container.store.get_conversation(conversation_id) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return container.store.list_items(conversation_id, turn_id=turn_id, limit=limit)
+
+
 @router.delete("/{conversation_id}", status_code=204)
 async def delete_conversation(
     conversation_id: str,
@@ -51,6 +92,32 @@ async def delete_conversation(
     if not deleted:
         raise HTTPException(status_code=404, detail="Conversation not found.")
     return Response(status_code=204)
+
+
+@router.post("/{conversation_id}/archive", response_model=Conversation)
+async def archive_conversation(
+    conversation_id: str,
+    container: ServiceContainer = Depends(get_container),
+) -> Conversation:
+    archived = container.store.archive_conversation(conversation_id)
+    if archived is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return archived
+
+
+@router.post("/{conversation_id}/fork", response_model=Conversation)
+async def fork_conversation(
+    conversation_id: str,
+    request: ConversationForkRequest,
+    container: ServiceContainer = Depends(get_container),
+) -> Conversation:
+    try:
+        forked = container.store.fork_conversation(conversation_id, request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if forked is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return forked
 
 
 @router.post("/{conversation_id}/turns")

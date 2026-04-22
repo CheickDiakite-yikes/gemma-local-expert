@@ -122,6 +122,160 @@ def test_durable_turn_persists_approval_item_and_workspace_write_policy(tmp_path
     assert ConversationItemKind.APPROVAL in kinds
 
 
+def test_turn_and_item_endpoints_expose_internal_thread_state(tmp_path: Path) -> None:
+    settings = Settings(database_path=str(tmp_path / "test-thread-state-endpoints.db"))
+    app = create_app(settings)
+    client = TestClient(app)
+    conversation = client.post("/v1/conversations", json={"title": "State", "mode": "general"}).json()
+
+    response = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "general",
+            "text": "Create a report summarizing the current field assistant architecture.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+    assert response.status_code == 200
+
+    turns_response = client.get(f"/v1/conversations/{conversation['id']}/turns")
+    items_response = client.get(f"/v1/conversations/{conversation['id']}/items")
+
+    assert turns_response.status_code == 200
+    assert items_response.status_code == 200
+
+    turns = turns_response.json()
+    items = items_response.json()
+
+    assert len(turns) == 1
+    assert turns[0]["route_kind"]
+    assert turns[0]["policy"]["sandbox_mode"] == "workspace_write"
+    assert turns[0]["policy"]["approval_mode"] == "durable_write"
+    assert any(item["kind"] == "approval" for item in items)
+
+
+def test_archive_endpoint_hides_conversation_from_default_list_but_keeps_transcript(tmp_path: Path) -> None:
+    settings = Settings(database_path=str(tmp_path / "test-archive-endpoint.db"))
+    app = create_app(settings)
+    client = TestClient(app)
+    conversation = client.post("/v1/conversations", json={"title": "Archive", "mode": "general"}).json()
+
+    turn_response = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "general",
+            "text": "Say hello normally.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+    assert turn_response.status_code == 200
+
+    archive_response = client.post(f"/v1/conversations/{conversation['id']}/archive")
+    assert archive_response.status_code == 200
+    assert archive_response.json()["archived_at"] is not None
+
+    default_list = client.get("/v1/conversations").json()
+    archived_list = client.get("/v1/conversations?include_archived=true").json()
+    transcript = client.get(f"/v1/conversations/{conversation['id']}/messages").json()
+
+    assert all(item["id"] != conversation["id"] for item in default_list)
+    assert any(item["id"] == conversation["id"] for item in archived_list)
+    assert [message["role"] for message in transcript] == ["user", "assistant"]
+
+
+def test_conversation_detail_and_fork_endpoints_expose_lineage_and_workspace_binding(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(database_path=str(tmp_path / "test-fork-endpoint.db"))
+    app = create_app(settings)
+    client = TestClient(app)
+    conversation = client.post("/v1/conversations", json={"title": "Fork source", "mode": "research"}).json()
+
+    turn_response = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Create a report summarizing the current field assistant architecture.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+    assert turn_response.status_code == 200
+
+    conversation_detail = client.get(f"/v1/conversations/{conversation['id']}")
+    assert conversation_detail.status_code == 200
+    assert conversation_detail.json()["workspace_binding"]["root"] == settings.workspace_root
+
+    source_turns = client.get(f"/v1/conversations/{conversation['id']}/turns").json()
+    fork_response = client.post(
+        f"/v1/conversations/{conversation['id']}/fork",
+        json={"up_to_turn_id": source_turns[0]["id"]},
+    )
+
+    assert fork_response.status_code == 200
+    forked = fork_response.json()
+    assert forked["parent_conversation_id"] == conversation["id"]
+    assert forked["forked_from_turn_id"] == source_turns[0]["id"]
+    assert forked["workspace_binding"]["isolation"] == "forked"
+
+    forked_transcript = client.get(f"/v1/conversations/{forked['id']}/messages").json()
+    assert [message["role"] for message in forked_transcript] == ["user", "assistant"]
+    assert forked_transcript[-1]["approval"] is not None
+
+
+def test_fork_endpoint_can_branch_from_earlier_turn_only(tmp_path: Path) -> None:
+    settings = Settings(database_path=str(tmp_path / "test-fork-partial.db"))
+    app = create_app(settings)
+    client = TestClient(app)
+    conversation = client.post("/v1/conversations", json={"title": "Fork partial", "mode": "research"}).json()
+
+    prompts = [
+        "Say hello normally.",
+        "Create a report summarizing the current field assistant architecture.",
+    ]
+    for prompt in prompts:
+        response = client.post(
+            f"/v1/conversations/{conversation['id']}/turns",
+            json={
+                "conversation_id": conversation["id"],
+                "mode": "research",
+                "text": prompt,
+                "asset_ids": [],
+                "enabled_knowledge_pack_ids": [],
+                "response_preferences": {
+                    "style": "concise",
+                    "citations": True,
+                    "audio_reply": False,
+                },
+            },
+        )
+        assert response.status_code == 200
+
+    source_turns = client.get(f"/v1/conversations/{conversation['id']}/turns").json()
+    fork_response = client.post(
+        f"/v1/conversations/{conversation['id']}/fork",
+        json={"title": "Branch earlier", "up_to_turn_id": source_turns[0]["id"]},
+    )
+    assert fork_response.status_code == 200
+
+    forked = fork_response.json()
+    forked_turns = client.get(f"/v1/conversations/{forked['id']}/turns").json()
+    forked_transcript = client.get(f"/v1/conversations/{forked['id']}/messages").json()
+
+    assert len(forked_turns) == 1
+    assert forked["title"] == "Branch earlier"
+    assert [message["role"] for message in forked_transcript] == ["user", "assistant"]
+    assert forked_transcript[-1]["approval"] is None
+
+
 def test_conversation_listing_and_transcript_endpoints(tmp_path: Path) -> None:
     settings = Settings(database_path=str(tmp_path / "test-listing.db"))
     client = TestClient(create_app(settings))

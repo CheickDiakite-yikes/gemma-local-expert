@@ -30,6 +30,7 @@ from engine.contracts.api import (
     TranscriptMessage,
     TurnExecutionPolicy,
     ConversationTurnRecord,
+    WorkspaceBinding,
 )
 from engine.contracts.api import ConversationStreamEvent, ConversationTurnRequest, StreamEventType, new_id
 from engine.models.document import DocumentAnalysisRequest, DocumentAsset, DocumentRuntime
@@ -91,7 +92,20 @@ class OrchestratorService:
     async def stream_turn(
         self, turn: ConversationTurnRequest
     ) -> AsyncIterator[ConversationStreamEvent]:
-        self.store.ensure_conversation(turn.conversation_id, turn.mode)
+        workspace_binding = WorkspaceBinding(
+            root=self.settings.workspace_root,
+            cwd=self.settings.workspace_root,
+        )
+        conversation = self.store.ensure_conversation(
+            turn.conversation_id,
+            turn.mode,
+            workspace_binding=workspace_binding,
+        )
+        if conversation.workspace_binding is None:
+            self.store.update_conversation_workspace_binding(
+                turn.conversation_id,
+                workspace_binding,
+            )
         turn_id = new_id("turn")
         self.store.create_turn_record(
             ConversationTurnRecord(

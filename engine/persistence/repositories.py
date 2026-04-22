@@ -6,6 +6,7 @@ import re
 import sqlite3
 import threading
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -29,6 +30,7 @@ from engine.contracts.api import (
     ConversationMemoryEntry,
     ConversationSummary,
     ConversationCreateRequest,
+    ConversationForkRequest,
     ConversationTurnRecord,
     EvidencePacket,
     ExportRequest,
@@ -43,6 +45,8 @@ from engine.contracts.api import (
     Task,
     TranscriptMessage,
     TurnExecutionPolicy,
+    WorkspaceBinding,
+    WorkspaceIsolationMode,
     new_id,
     utc_now,
 )
@@ -69,12 +73,28 @@ class PersistenceStore(Protocol):
 
     def get_conversation(self, conversation_id: str) -> Conversation | None: ...
 
-    def list_conversations(self, limit: int = 50) -> list[ConversationSummary]: ...
+    def update_conversation_workspace_binding(
+        self, conversation_id: str, workspace_binding: WorkspaceBinding
+    ) -> Conversation | None: ...
+
+    def list_conversations(
+        self, limit: int = 50, *, include_archived: bool = False
+    ) -> list[ConversationSummary]: ...
 
     def delete_conversation(self, conversation_id: str) -> bool: ...
 
+    def archive_conversation(self, conversation_id: str) -> Conversation | None: ...
+
+    def fork_conversation(
+        self, conversation_id: str, request: ConversationForkRequest
+    ) -> Conversation | None: ...
+
     def ensure_conversation(
-        self, conversation_id: str, mode: AssistantMode = AssistantMode.GENERAL
+        self,
+        conversation_id: str,
+        mode: AssistantMode = AssistantMode.GENERAL,
+        *,
+        workspace_binding: WorkspaceBinding | None = None,
     ) -> Conversation: ...
 
     def append_transcript(
@@ -337,18 +357,40 @@ class SQLiteStore:
         )
 
     def create_conversation(self, request: ConversationCreateRequest) -> Conversation:
-        conversation = Conversation(id=new_id("conv"), title=request.title, mode=request.mode)
+        conversation = Conversation(
+            id=new_id("conv"),
+            title=request.title,
+            mode=request.mode,
+            workspace_binding=request.workspace_binding,
+        )
         with self._lock:
             self._connection.execute(
                 """
-                INSERT INTO conversations (id, title, mode, created_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO conversations (
+                    id,
+                    title,
+                    mode,
+                    created_at,
+                    archived_at,
+                    workspace_binding_json,
+                    parent_conversation_id,
+                    forked_from_turn_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     conversation.id,
                     conversation.title,
                     conversation.mode.value,
                     conversation.created_at.isoformat(),
+                    conversation.archived_at,
+                    (
+                        conversation.workspace_binding.model_dump_json()
+                        if conversation.workspace_binding
+                        else None
+                    ),
+                    conversation.parent_conversation_id,
+                    conversation.forked_from_turn_id,
                 ),
             )
             self._connection.commit()
@@ -356,19 +398,52 @@ class SQLiteStore:
 
     def get_conversation(self, conversation_id: str) -> Conversation | None:
         row = self._fetchone(
-            "SELECT id, title, mode, created_at FROM conversations WHERE id = ?",
+            """
+            SELECT
+                id,
+                title,
+                mode,
+                created_at,
+                archived_at,
+                workspace_binding_json,
+                parent_conversation_id,
+                forked_from_turn_id
+            FROM conversations
+            WHERE id = ?
+            """,
             (conversation_id,),
         )
         return self._row_to_conversation(row) if row else None
 
-    def list_conversations(self, limit: int = 50) -> list[ConversationSummary]:
+    def update_conversation_workspace_binding(
+        self, conversation_id: str, workspace_binding: WorkspaceBinding
+    ) -> Conversation | None:
+        conversation = self.get_conversation(conversation_id)
+        if conversation is None:
+            return None
+        with self._lock:
+            self._connection.execute(
+                "UPDATE conversations SET workspace_binding_json = ? WHERE id = ?",
+                (workspace_binding.model_dump_json(), conversation_id),
+            )
+            self._connection.commit()
+        return conversation.model_copy(update={"workspace_binding": workspace_binding})
+
+    def list_conversations(
+        self, limit: int = 50, *, include_archived: bool = False
+    ) -> list[ConversationSummary]:
+        archived_clause = "" if include_archived else "WHERE c.archived_at IS NULL"
         rows = self._fetchall(
-            """
+            f"""
             SELECT
                 c.id,
                 c.title,
                 c.mode,
                 c.created_at,
+                c.archived_at,
+                c.workspace_binding_json,
+                c.parent_conversation_id,
+                c.forked_from_turn_id,
                 COALESCE(MAX(cm.created_at), c.created_at) AS last_activity_at,
                 (
                     SELECT content
@@ -379,7 +454,16 @@ class SQLiteStore:
                 ) AS last_message_preview
             FROM conversations c
             LEFT JOIN conversation_messages cm ON cm.conversation_id = c.id
-            GROUP BY c.id, c.title, c.mode, c.created_at
+            {archived_clause}
+            GROUP BY
+                c.id,
+                c.title,
+                c.mode,
+                c.created_at,
+                c.archived_at,
+                c.workspace_binding_json,
+                c.parent_conversation_id,
+                c.forked_from_turn_id
             ORDER BY last_activity_at DESC
             LIMIT ?
             """,
@@ -393,6 +477,14 @@ class SQLiteStore:
                 created_at=row["created_at"],
                 last_activity_at=row["last_activity_at"],
                 last_message_preview=row["last_message_preview"],
+                archived_at=row["archived_at"] if "archived_at" in row.keys() else None,
+                workspace_binding=(
+                    WorkspaceBinding.model_validate_json(row["workspace_binding_json"])
+                    if row["workspace_binding_json"]
+                    else None
+                ),
+                parent_conversation_id=row["parent_conversation_id"],
+                forked_from_turn_id=row["forked_from_turn_id"],
             )
             for row in rows
         ]
@@ -406,25 +498,530 @@ class SQLiteStore:
             self._connection.commit()
         return cursor.rowcount > 0
 
+    def archive_conversation(self, conversation_id: str) -> Conversation | None:
+        conversation = self.get_conversation(conversation_id)
+        if conversation is None:
+            return None
+        archived_at = utc_now()
+        with self._lock:
+            self._connection.execute(
+                "UPDATE conversations SET archived_at = ? WHERE id = ?",
+                (archived_at.isoformat(), conversation_id),
+            )
+            self._connection.commit()
+        return conversation.model_copy(update={"archived_at": archived_at})
+
+    def fork_conversation(
+        self, conversation_id: str, request: ConversationForkRequest
+    ) -> Conversation | None:
+        source = self.get_conversation(conversation_id)
+        if source is None:
+            return None
+
+        source_turns = self._fetchall(
+            """
+            SELECT
+                id,
+                conversation_id,
+                mode,
+                user_text,
+                workspace_root,
+                cwd,
+                policy_json,
+                route_kind,
+                user_message_id,
+                assistant_message_id,
+                created_at,
+                updated_at
+            FROM conversation_turns
+            WHERE conversation_id = ?
+            ORDER BY created_at ASC
+            """,
+            (conversation_id,),
+        )
+        turn_rows = [self._row_to_turn_record(row) for row in source_turns]
+        selected_turn_rows = turn_rows
+        selected_source_turn_id = request.up_to_turn_id
+        if request.up_to_turn_id is not None:
+            matching_index = next(
+                (index for index, row in enumerate(turn_rows) if row.id == request.up_to_turn_id),
+                None,
+            )
+            if matching_index is None:
+                raise ValueError("Turn not found in source conversation.")
+            selected_turn_rows = turn_rows[: matching_index + 1]
+        elif turn_rows:
+            selected_source_turn_id = turn_rows[-1].id
+
+        source_binding = source.workspace_binding
+        if source_binding is None and selected_turn_rows:
+            source_binding = WorkspaceBinding(
+                root=selected_turn_rows[-1].workspace_root,
+                cwd=selected_turn_rows[-1].cwd,
+                isolation=WorkspaceIsolationMode.SHARED,
+            )
+        fork_binding = (
+            source_binding.model_copy(update={"isolation": WorkspaceIsolationMode.FORKED})
+            if source_binding is not None
+            else None
+        )
+        forked = Conversation(
+            id=new_id("conv"),
+            title=request.title or self._default_fork_title(source.title),
+            mode=request.mode or source.mode,
+            workspace_binding=fork_binding,
+            parent_conversation_id=source.id,
+            forked_from_turn_id=selected_source_turn_id,
+        )
+
+        copied_turn_ids = {row.id for row in selected_turn_rows}
+        cutoff_created_at = (
+            selected_turn_rows[-1].created_at if selected_turn_rows else None
+        )
+        message_rows = self._fetchall(
+            """
+            SELECT
+                id,
+                conversation_id,
+                role,
+                content,
+                created_at,
+                turn_id,
+                evidence_packet_json
+            FROM conversation_messages
+            WHERE conversation_id = ?
+            ORDER BY created_at ASC
+            """,
+            (conversation_id,),
+        )
+        copied_message_rows = [
+            row
+            for row in message_rows
+            if (
+                row["turn_id"] in copied_turn_ids
+                or (
+                    row["turn_id"] is None
+                    and (
+                        cutoff_created_at is None
+                        or row["created_at"] <= cutoff_created_at.isoformat()
+                    )
+                )
+            )
+        ]
+        message_asset_rows = self._fetchall(
+            """
+            SELECT message_id, asset_id
+            FROM conversation_message_assets
+            WHERE message_id IN (
+                SELECT id FROM conversation_messages WHERE conversation_id = ?
+            )
+            """,
+            (conversation_id,),
+        )
+        asset_ids_by_message: dict[str, list[str]] = {}
+        for row in message_asset_rows:
+            asset_ids_by_message.setdefault(row["message_id"], []).append(row["asset_id"])
+
+        approval_rows = (
+            self._fetchall(
+                """
+                SELECT
+                    id,
+                    conversation_id,
+                    turn_id,
+                    run_id,
+                    tool_name,
+                    reason,
+                    status,
+                    payload_json,
+                    result_json
+                FROM approvals
+                WHERE conversation_id = ?
+                ORDER BY created_at ASC
+                """,
+                (conversation_id,),
+            )
+            if request.copy_approvals
+            else []
+        )
+        copied_approval_rows = [row for row in approval_rows if row["turn_id"] in copied_turn_ids]
+
+        agent_run_rows = (
+            self._fetchall(
+                """
+                SELECT
+                    id,
+                    conversation_id,
+                    turn_id,
+                    goal,
+                    scope_root,
+                    status,
+                    plan_steps_json,
+                    executed_steps_json,
+                    result_summary,
+                    artifact_ids_json,
+                    approval_id,
+                    created_at,
+                    updated_at
+                FROM agent_runs
+                WHERE conversation_id = ?
+                ORDER BY created_at ASC
+                """,
+                (conversation_id,),
+            )
+            if request.copy_agent_runs
+            else []
+        )
+        copied_run_rows = [row for row in agent_run_rows if row["turn_id"] in copied_turn_ids]
+
+        item_rows = self._fetchall(
+            """
+            SELECT
+                id,
+                conversation_id,
+                turn_id,
+                item_kind,
+                summary,
+                payload_json,
+                created_at
+            FROM conversation_items
+            WHERE conversation_id = ?
+            ORDER BY created_at ASC
+            """,
+            (conversation_id,),
+        )
+        copied_item_rows = [row for row in item_rows if row["turn_id"] in copied_turn_ids]
+
+        memory_rows = (
+            self._fetchall(
+                """
+                SELECT
+                    id,
+                    conversation_id,
+                    turn_id,
+                    kind,
+                    topic,
+                    summary,
+                    keywords_json,
+                    source_domain,
+                    asset_ids_json,
+                    tool_name,
+                    referent_title,
+                    created_at
+                FROM conversation_memories
+                WHERE conversation_id = ?
+                ORDER BY created_at ASC
+                """,
+                (conversation_id,),
+            )
+            if request.copy_memories
+            else []
+        )
+        copied_memory_rows = [row for row in memory_rows if row["turn_id"] in copied_turn_ids]
+
+        next_timestamp = self._copy_timestamp_factory(forked.created_at)
+        turn_id_map = {row.id: new_id("turn") for row in selected_turn_rows}
+        message_id_map = {row["id"]: new_id("msg") for row in copied_message_rows}
+        approval_id_map = {row["id"]: new_id("approval") for row in copied_approval_rows}
+        run_id_map = {row["id"]: new_id("run") for row in copied_run_rows}
+
+        with self._lock:
+            self._connection.execute(
+                """
+                INSERT INTO conversations (
+                    id,
+                    title,
+                    mode,
+                    created_at,
+                    archived_at,
+                    workspace_binding_json,
+                    parent_conversation_id,
+                    forked_from_turn_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    forked.id,
+                    forked.title,
+                    forked.mode.value,
+                    forked.created_at.isoformat(),
+                    None,
+                    forked.workspace_binding.model_dump_json()
+                    if forked.workspace_binding
+                    else None,
+                    forked.parent_conversation_id,
+                    forked.forked_from_turn_id,
+                ),
+            )
+
+            for row in selected_turn_rows:
+                copied_created_at = next_timestamp()
+                copied_updated_at = next_timestamp()
+                self._connection.execute(
+                    """
+                    INSERT INTO conversation_turns (
+                        id,
+                        conversation_id,
+                        mode,
+                        user_text,
+                        workspace_root,
+                        cwd,
+                        policy_json,
+                        route_kind,
+                        user_message_id,
+                        assistant_message_id,
+                        created_at,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        turn_id_map[row.id],
+                        forked.id,
+                        row.mode.value,
+                        row.user_text,
+                        row.workspace_root,
+                        row.cwd,
+                        row.policy.model_dump_json(),
+                        row.route_kind,
+                        None,
+                        None,
+                        copied_created_at.isoformat(),
+                        copied_updated_at.isoformat(),
+                    ),
+                )
+
+            for row in copied_message_rows:
+                copied_created_at = next_timestamp()
+                self._connection.execute(
+                    """
+                    INSERT INTO conversation_messages (
+                        id,
+                        conversation_id,
+                        role,
+                        content,
+                        created_at,
+                        turn_id,
+                        evidence_packet_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        message_id_map[row["id"]],
+                        forked.id,
+                        row["role"],
+                        row["content"],
+                        copied_created_at.isoformat(),
+                        turn_id_map.get(row["turn_id"]),
+                        row["evidence_packet_json"],
+                    ),
+                )
+                for asset_id in asset_ids_by_message.get(row["id"], []):
+                    self._connection.execute(
+                        """
+                        INSERT INTO conversation_message_assets (message_id, asset_id)
+                        VALUES (?, ?)
+                        """,
+                        (message_id_map[row["id"]], asset_id),
+                    )
+
+            for row in selected_turn_rows:
+                self._connection.execute(
+                    """
+                    UPDATE conversation_turns
+                    SET user_message_id = ?, assistant_message_id = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        message_id_map.get(row.user_message_id),
+                        message_id_map.get(row.assistant_message_id),
+                        turn_id_map[row.id],
+                    ),
+                )
+
+            for row in copied_run_rows:
+                copied_created_at = next_timestamp()
+                copied_updated_at = next_timestamp()
+                self._connection.execute(
+                    """
+                    INSERT INTO agent_runs (
+                        id,
+                        conversation_id,
+                        turn_id,
+                        goal,
+                        scope_root,
+                        status,
+                        plan_steps_json,
+                        executed_steps_json,
+                        result_summary,
+                        artifact_ids_json,
+                        approval_id,
+                        created_at,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id_map[row["id"]],
+                        forked.id,
+                        turn_id_map[row["turn_id"]],
+                        row["goal"],
+                        row["scope_root"],
+                        row["status"],
+                        row["plan_steps_json"],
+                        row["executed_steps_json"],
+                        row["result_summary"],
+                        row["artifact_ids_json"],
+                        (
+                            approval_id_map.get(row["approval_id"])
+                            if row["approval_id"] is not None
+                            else None
+                        ),
+                        copied_created_at.isoformat(),
+                        copied_updated_at.isoformat(),
+                    ),
+                )
+
+            for row in copied_approval_rows:
+                copied_created_at = next_timestamp()
+                self._connection.execute(
+                    """
+                    INSERT INTO approvals (
+                        id,
+                        conversation_id,
+                        turn_id,
+                        run_id,
+                        tool_name,
+                        reason,
+                        status,
+                        payload_json,
+                        result_json,
+                        created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        approval_id_map[row["id"]],
+                        forked.id,
+                        turn_id_map[row["turn_id"]],
+                        run_id_map.get(row["run_id"]) if row["run_id"] is not None else None,
+                        row["tool_name"],
+                        row["reason"],
+                        row["status"],
+                        row["payload_json"],
+                        row["result_json"],
+                        copied_created_at.isoformat(),
+                    ),
+                )
+
+            for row in copied_item_rows:
+                payload = self._remap_item_payload(
+                    json.loads(row["payload_json"] or "{}"),
+                    turn_id_map=turn_id_map,
+                    message_id_map=message_id_map,
+                    approval_id_map=approval_id_map,
+                    run_id_map=run_id_map,
+                )
+                self._connection.execute(
+                    """
+                    INSERT INTO conversation_items (
+                        id,
+                        conversation_id,
+                        turn_id,
+                        item_kind,
+                        summary,
+                        payload_json,
+                        created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        new_id("item"),
+                        forked.id,
+                        turn_id_map[row["turn_id"]],
+                        row["item_kind"],
+                        row["summary"],
+                        json.dumps(payload),
+                        next_timestamp().isoformat(),
+                    ),
+                )
+
+            for row in copied_memory_rows:
+                self._connection.execute(
+                    """
+                    INSERT INTO conversation_memories (
+                        id,
+                        conversation_id,
+                        turn_id,
+                        kind,
+                        topic,
+                        summary,
+                        keywords_json,
+                        source_domain,
+                        asset_ids_json,
+                        tool_name,
+                        referent_title,
+                        created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        new_id("memory"),
+                        forked.id,
+                        turn_id_map[row["turn_id"]],
+                        row["kind"],
+                        row["topic"],
+                        row["summary"],
+                        row["keywords_json"],
+                        row["source_domain"],
+                        row["asset_ids_json"],
+                        row["tool_name"],
+                        row["referent_title"],
+                        next_timestamp().isoformat(),
+                    ),
+                )
+
+            self._connection.commit()
+
+        return forked
+
     def ensure_conversation(
-        self, conversation_id: str, mode: AssistantMode = AssistantMode.GENERAL
+        self,
+        conversation_id: str,
+        mode: AssistantMode = AssistantMode.GENERAL,
+        *,
+        workspace_binding: WorkspaceBinding | None = None,
     ) -> Conversation:
         existing = self.get_conversation(conversation_id)
         if existing:
             return existing
 
-        conversation = Conversation(id=conversation_id, mode=mode)
+        conversation = Conversation(
+            id=conversation_id,
+            mode=mode,
+            workspace_binding=workspace_binding,
+        )
         with self._lock:
             self._connection.execute(
                 """
-                INSERT INTO conversations (id, title, mode, created_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO conversations (
+                    id,
+                    title,
+                    mode,
+                    created_at,
+                    archived_at,
+                    workspace_binding_json,
+                    parent_conversation_id,
+                    forked_from_turn_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     conversation.id,
                     conversation.title,
                     conversation.mode.value,
                     conversation.created_at.isoformat(),
+                    conversation.archived_at,
+                    (
+                        conversation.workspace_binding.model_dump_json()
+                        if conversation.workspace_binding
+                        else None
+                    ),
+                    conversation.parent_conversation_id,
+                    conversation.forked_from_turn_id,
                 ),
             )
             self._connection.commit()
@@ -1880,6 +2477,20 @@ class SQLiteStore:
             title=row["title"],
             mode=AssistantMode(row["mode"]),
             created_at=row["created_at"],
+            archived_at=row["archived_at"] if "archived_at" in row.keys() else None,
+            workspace_binding=(
+                WorkspaceBinding.model_validate_json(row["workspace_binding_json"])
+                if "workspace_binding_json" in row.keys() and row["workspace_binding_json"]
+                else None
+            ),
+            parent_conversation_id=(
+                row["parent_conversation_id"]
+                if "parent_conversation_id" in row.keys()
+                else None
+            ),
+            forked_from_turn_id=(
+                row["forked_from_turn_id"] if "forked_from_turn_id" in row.keys() else None
+            ),
         )
 
     def _row_to_turn_record(self, row: sqlite3.Row) -> ConversationTurnRecord:
@@ -1973,6 +2584,44 @@ class SQLiteStore:
             preview_url=preview_url,
             created_at=row["created_at"],
         )
+
+    def _default_fork_title(self, title: str | None) -> str:
+        if title and title.strip():
+            return f"{title.strip()} (fork)"
+        return "Forked conversation"
+
+    def _copy_timestamp_factory(self, start: Any):
+        current = start
+
+        def _next():
+            nonlocal current
+            current = current + timedelta(microseconds=1)
+            return current
+
+        return _next
+
+    def _remap_item_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        turn_id_map: dict[str, str],
+        message_id_map: dict[str, str],
+        approval_id_map: dict[str, str],
+        run_id_map: dict[str, str],
+    ) -> dict[str, Any]:
+        remapped = dict(payload)
+        scalar_mappings = {
+            "turn_id": turn_id_map,
+            "previous_turn_id": turn_id_map,
+            "message_id": message_id_map,
+            "approval_id": approval_id_map,
+            "run_id": run_id_map,
+        }
+        for key, mapping in scalar_mappings.items():
+            value = remapped.get(key)
+            if isinstance(value, str) and value in mapping:
+                remapped[key] = mapping[value]
+        return remapped
 
     def _list_assets_for_messages(
         self, message_ids: list[str]

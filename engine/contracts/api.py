@@ -89,6 +89,12 @@ class ApprovalMode(str, Enum):
     MEDICAL_STRICT = "medical_strict"
 
 
+class WorkspaceIsolationMode(str, Enum):
+    SHARED = "shared"
+    FORKED = "forked"
+    ISOLATED = "isolated"
+
+
 class ConversationMemoryKind(str, Enum):
     GENERAL = "general"
     TEACHING = "teaching"
@@ -147,11 +153,21 @@ class ResponsePreferences(StrictModel):
     audio_reply: bool = False
 
 
+class WorkspaceBinding(StrictModel):
+    root: str
+    cwd: str
+    isolation: WorkspaceIsolationMode = WorkspaceIsolationMode.SHARED
+
+
 class Conversation(StrictModel):
     id: str
     title: str | None = None
     mode: AssistantMode = AssistantMode.GENERAL
     created_at: datetime = Field(default_factory=utc_now)
+    archived_at: datetime | None = None
+    workspace_binding: WorkspaceBinding | None = None
+    parent_conversation_id: str | None = None
+    forked_from_turn_id: str | None = None
 
 
 class ConversationSummary(StrictModel):
@@ -161,6 +177,10 @@ class ConversationSummary(StrictModel):
     created_at: datetime = Field(default_factory=utc_now)
     last_activity_at: datetime = Field(default_factory=utc_now)
     last_message_preview: str | None = None
+    archived_at: datetime | None = None
+    workspace_binding: WorkspaceBinding | None = None
+    parent_conversation_id: str | None = None
+    forked_from_turn_id: str | None = None
 
 
 class ConversationMessage(StrictModel):
@@ -246,6 +266,16 @@ class ConversationItem(StrictModel):
 class ConversationCreateRequest(StrictModel):
     title: str | None = None
     mode: AssistantMode = AssistantMode.GENERAL
+    workspace_binding: WorkspaceBinding | None = None
+
+
+class ConversationForkRequest(StrictModel):
+    title: str | None = None
+    mode: AssistantMode | None = None
+    up_to_turn_id: str | None = None
+    copy_memories: bool = True
+    copy_approvals: bool = True
+    copy_agent_runs: bool = True
 
 
 class ConversationTurnRequest(StrictModel):

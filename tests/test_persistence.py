@@ -7,11 +7,14 @@ from engine.contracts.api import (
     ApprovalMode,
     AssistantMode,
     ConversationCreateRequest,
+    ConversationForkRequest,
     ConversationItemKind,
     ConversationTurnRecord,
     RuntimeProfile,
     SandboxMode,
     TurnExecutionPolicy,
+    WorkspaceBinding,
+    WorkspaceIsolationMode,
     new_id,
 )
 
@@ -117,3 +120,96 @@ def test_turn_record_and_item_ledger_persist_across_container_rebuilds(tmp_path:
         ConversationItemKind.USER_MESSAGE,
         ConversationItemKind.ASSISTANT_MESSAGE,
     ]
+
+
+def test_archive_conversation_hides_default_listing_but_preserves_record(tmp_path: Path) -> None:
+    settings = Settings(database_path=str(tmp_path / "archive-persist.db"))
+
+    container = build_container(settings)
+    created = container.store.create_conversation(
+        ConversationCreateRequest(title="Archive me", mode=AssistantMode.GENERAL)
+    )
+    archived = container.store.archive_conversation(created.id)
+
+    assert archived is not None
+    assert archived.archived_at is not None
+
+    default_list = container.store.list_conversations()
+    archived_list = container.store.list_conversations(include_archived=True)
+    restored = container.store.get_conversation(created.id)
+    container.store.close()
+
+    assert all(item.id != created.id for item in default_list)
+    assert any(item.id == created.id for item in archived_list)
+    assert restored is not None
+    assert restored.archived_at is not None
+
+
+def test_fork_conversation_copies_lineage_and_visible_thread_state(tmp_path: Path) -> None:
+    settings = Settings(database_path=str(tmp_path / "fork-persist.db"))
+    container = build_container(settings)
+
+    created = container.store.create_conversation(
+        ConversationCreateRequest(
+            title="Original",
+            mode=AssistantMode.RESEARCH,
+            workspace_binding=WorkspaceBinding(
+                root=settings.workspace_root,
+                cwd=settings.workspace_root,
+            ),
+        )
+    )
+    turn = container.store.create_turn_record(
+        ConversationTurnRecord(
+            id=new_id("turn"),
+            conversation_id=created.id,
+            mode=AssistantMode.RESEARCH,
+            user_text="Create a report.",
+            workspace_root=settings.workspace_root,
+            cwd=settings.workspace_root,
+            policy=TurnExecutionPolicy(
+                workspace_root=settings.workspace_root,
+                cwd=settings.workspace_root,
+                sandbox_mode=SandboxMode.WORKSPACE_WRITE,
+                network_access=False,
+                approval_mode=ApprovalMode.DURABLE_WRITE,
+                active_profile=RuntimeProfile.FULL_LOCAL,
+            ),
+            route_kind="task",
+        )
+    )
+    container.store.append_transcript(created.id, "user", "Create a report.", turn_id=turn.id)
+    container.store.append_transcript(
+        created.id,
+        "assistant",
+        "I drafted a report here.",
+        turn_id=turn.id,
+    )
+    container.store.create_approval(
+        created.id,
+        turn.id,
+        "create_report",
+        "Save a report locally.",
+        payload={"title": "Original Report", "content": "Summary"},
+    )
+
+    forked = container.store.fork_conversation(created.id, ConversationForkRequest())
+
+    assert forked is not None
+    assert forked.parent_conversation_id == created.id
+    assert forked.forked_from_turn_id == turn.id
+    assert forked.workspace_binding is not None
+    assert forked.workspace_binding.isolation == WorkspaceIsolationMode.FORKED
+
+    forked_turns = container.store.list_turn_records(forked.id)
+    forked_transcript = container.store.list_transcript(forked.id)
+    forked_items = container.store.list_items(forked.id)
+    container.store.close()
+
+    assert len(forked_turns) == 1
+    assert forked_turns[0].id != turn.id
+    assert forked_turns[0].route_kind == "task"
+    assert [message.role for message in forked_transcript] == ["user", "assistant"]
+    assert forked_transcript[-1].approval is not None
+    assert forked_transcript[-1].approval.tool_name == "create_report"
+    assert any(item.kind == ConversationItemKind.APPROVAL for item in forked_items)

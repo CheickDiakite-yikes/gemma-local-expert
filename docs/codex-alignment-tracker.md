@@ -39,15 +39,15 @@ For each area, try to keep all three forms of evidence:
 
 | Area | Status | What exists now | Biggest gap |
 | --- | --- | --- | --- |
-| Thread / turn / item state | partial | turn ids everywhere; internal turn record + item ledger now exist | not yet the canonical public state contract |
-| Workspace binding | partial | workspace root exists; bounded workspace runs exist; turn policy now carries workspace binding | no isolated background worktree model yet |
-| Turn policy | partial | explicit internal turn policy now exists with sandbox/approval/profile/workspace fields | not yet exposed as a first-class API/runtime contract |
+| Thread / turn / item state | partial | turn ids everywhere; internal turn record + item ledger exist and are now inspectable through API read paths | not yet the canonical public state contract for clients |
+| Workspace binding | partial | workspace root exists; bounded workspace runs exist; turn policy now carries workspace binding; conversation state now persists thread-level workspace binding and fork lineage | no isolated background worktree model yet |
+| Turn policy | partial | explicit turn policy now exists and is inspectable through turn state | still minimal and not yet the single source of truth for all permission decisions |
 | Memory layering | partial | `AGENTS.md`, continuity snapshot, derived conversation memory, evidence memory, memory focus | no formal idle-thread memory lifecycle or eligibility rules |
 | Permissions system | partial | engine policy + approval gating + bounded workspace root | not yet a full typed permission model comparable to Codex execpolicy + approval categories |
 | Document/canvas UX | partial | inline canvas is replacing preview-plus-hidden-editor patterns | still not a true document-first surface with selection-aware edits |
-| App-server style client seam | missing | current local API is real and usable | still too web-chat shaped |
+| App-server style client seam | partial | current local API now exposes transcript, turns, items, approvals, and runs as explicit state surfaces | still too web-chat shaped and not yet item/event-first |
 | Worktree-backed background work | missing | bounded workspace agent exists | no true isolated worktree/local clone system |
-| Thread ops: fork/archive/rollback/compact | missing | delete exists; continuity and memory focus exist | no real thread operation model yet |
+| Thread ops: fork/archive/rollback/compact | partial | delete, archive, conversation detail, and fork now exist | no rollback, compact, or steer model yet |
 
 ## Domain Checklists
 
@@ -109,13 +109,15 @@ Make workspace identity explicit runtime state, not just a setting.
 - configured `workspace_root`
 - bounded workspace agent runs scoped to workspace root
 - explicit workspace binding in internal turn policy
+- conversation state now persists thread-level workspace binding
+- forked threads now retain workspace lineage
 
 ### Missing
 
 - multiple named workspaces
 - background isolated workspaces
 - worktree-backed thread execution
-- explicit per-thread workspace switching/forking model
+- explicit per-thread workspace switching model
 
 ### Acceptance criteria for `done`
 
@@ -141,6 +143,7 @@ Make execution policy a typed runtime object per turn.
 ### Implemented
 
 - internal `TurnExecutionPolicy`
+- turn policy is now visible through the turns API
 - current fields:
   - workspace root
   - cwd
@@ -151,9 +154,9 @@ Make execution policy a typed runtime object per turn.
 
 ### Missing
 
-- policy is not yet part of public turn/state inspection
 - network policy is currently static
 - approval policy is still much simpler than Codex category-based approval controls
+- some runtime decisions still depend on legacy route/tool heuristics instead of policy as the single source of truth
 
 ### Acceptance criteria for `done`
 
@@ -286,6 +289,9 @@ Stop letting the web chat surface define the state model.
 
 - local HTTP API
 - streaming events for turn progress
+- turns API
+- items API
+- archive API
 
 ### Missing
 
@@ -310,12 +316,16 @@ Support stronger thread lifecycle than create/delete/list.
 
 ### Current status
 
-`missing`
+`partial`
+
+### Implemented
+
+- archive
+- fork
+- conversation detail/read path for thread lineage and workspace binding
 
 ### Missing
 
-- fork
-- archive
 - rollback
 - compact
 - steer
@@ -329,8 +339,8 @@ single long thread.
 
 ### Next slice
 
-- start with `archive` and `fork`
 - define what `turn steer` should mean in this product before building it
+- add rollback/compact semantics on top of the new fork lineage
 
 ## 9. Evaluation Discipline
 
@@ -363,11 +373,11 @@ For any important architecture or UX slice, try to maintain:
 ## Known High-Priority Gaps Right Now
 
 - inline canvas is much better than the old approval card, but still not truly document-first
-- workspace identity is now explicit per turn internally, but not yet a first-class thread/workspace model
-- turn policy exists, but it is still internal and minimal
-- item ledger exists, but the client still mostly reconstructs state through older transcript conventions
+- workspace identity is now explicit per turn and persisted on the thread, but it is still not a full named-workspace/worktree model
+- turn policy exists and is inspectable, but it is still minimal
+- item ledger exists and is inspectable, but the client still mostly reconstructs state through older transcript conventions
 - we still do not have isolated background workspaces/worktrees
-- we still do not have richer thread operations like fork/archive/rollback/compact
+- we still do not have richer thread operations like rollback/compact/steer
 
 ## Completed In This Slice
 
@@ -377,6 +387,9 @@ For any important architecture or UX slice, try to maintain:
 - added internal conversation item ledger
 - added explicit internal turn policy with workspace binding
 - started treating turn policy and item state as architecture, not just implementation detail
+- exposed turn and item inspection through the conversation API
+- added thread archiving as the first real thread lifecycle operation
+- added conversation detail and fork operations with thread lineage + workspace binding
 
 ## Operating Rule Going Forward
 
