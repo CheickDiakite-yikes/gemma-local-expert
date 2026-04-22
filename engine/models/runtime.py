@@ -995,16 +995,16 @@ class MockAssistantRuntime:
 
     def _drafted_work_product_reply(self, tool_name: str) -> str:
         mapping = {
-            "create_note": "I drafted a note below.",
-            "create_report": "I drafted a report below.",
-            "create_message_draft": "I drafted a message below.",
-            "create_checklist": "I drafted a checklist below.",
-            "create_task": "I drafted a task below.",
-            "log_observation": "I drafted an observation below.",
-            "export_brief": "I drafted an export below.",
-            "generate_heatmap_overlay": "I prepared a heatmap overlay draft below.",
+            "create_note": "I drafted a note here.",
+            "create_report": "I drafted a report here.",
+            "create_message_draft": "I drafted a message here.",
+            "create_checklist": "I drafted a checklist here.",
+            "create_task": "I drafted a task here.",
+            "log_observation": "I drafted an observation here.",
+            "export_brief": "I drafted an export here.",
+            "generate_heatmap_overlay": "I prepared a heatmap overlay draft here.",
         }
-        return mapping.get(tool_name, f"I drafted a {self._tool_label(tool_name)} below.")
+        return mapping.get(tool_name, f"I drafted a {self._tool_label(tool_name)} here.")
 
     def _saved_output_label(self, tool_name: str) -> str:
         mapping = {

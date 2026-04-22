@@ -441,7 +441,7 @@ def test_report_turn_requires_approval_and_persists_report_kind(tmp_path: Path) 
     assert approval_payload["payload"]["payload"]["title"] == "Field Assistant Architecture Report"
     completed_event = next(line for line in lines if '"type":"assistant.message.completed"' in line)
     completed_payload = json.loads(completed_event)
-    assert completed_payload["payload"]["text"] == "I drafted a report below."
+    assert completed_payload["payload"]["text"] == "I drafted a report here."
     approval_id = approval_payload["payload"]["id"]
 
     decision = client.post(
@@ -502,6 +502,27 @@ def test_pending_report_follow_up_can_update_same_report_before_save(tmp_path: P
     assert "## Summary" not in str(payload["content"])
     assert "Key points:" in str(payload["content"])
     assert "tighten or retitle the draft" not in str(payload["content"]).lower()
+
+    transcript = client.get(f"/v1/conversations/{conversation['id']}/messages").json()
+    original_assistant = next(
+        message
+        for message in transcript
+        if message["role"] == "assistant" and message["content"] == "I drafted a report here."
+    )
+    latest_assistant = next(
+        message
+        for message in transcript
+        if message["role"] == "assistant"
+        and 'I updated the report "Field Assistant Architecture Report" here.' in message["content"]
+    )
+
+    assert original_assistant.get("approval") is None
+    assert latest_assistant.get("approval") is not None
+    assert latest_assistant["approval"]["id"] == approval_event["payload"]["id"]
+    assert (
+        latest_assistant["approval"]["payload"]["content"]
+        == approval_event["payload"]["payload"]["content"]
+    )
 
 
 def test_message_draft_turn_after_image_blocks_when_current_grounding_is_unavailable(

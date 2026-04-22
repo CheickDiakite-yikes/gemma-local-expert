@@ -343,6 +343,6 @@ def test_mock_runtime_tool_proposal_does_not_prepend_generic_chat_filler() -> No
         )
     )
 
-    assert "i drafted a checklist below." in result.text.lower()
+    assert "i drafted a checklist here." in result.text.lower()
     assert "ready for your approval" not in result.text.lower()
     assert "talk normally" not in result.text.lower()

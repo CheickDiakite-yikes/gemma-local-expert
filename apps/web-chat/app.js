@@ -37,7 +37,7 @@ const state = {
 
 const STORAGE_KEYS = {
   approvalDrafts: "field-assistant.approval-drafts.v1",
-  approvalPanels: "field-assistant.approval-panels.v1",
+  approvalPanels: "field-assistant.approval-panels.v2",
   messagePanels: "field-assistant.message-panels.v1",
   runPanels: "field-assistant.run-panels.v2",
   activeConversation: "field-assistant.active-conversation.v1",
@@ -398,6 +398,17 @@ function approvalDraftStateText({ dirty = false, invalid = false } = {}) {
   return dirty ? "Local edits" : "Original";
 }
 
+function approvalCanvasStateText({ dirty = false } = {}) {
+  return dirty ? "Edited" : "Unsaved";
+}
+
+function approvalStateLabelText(approval, { dirty = false, invalid = false } = {}) {
+  if (approvalUsesInlineCanvas(approval)) {
+    return invalid ? "Needs attention" : approvalCanvasStateText({ dirty });
+  }
+  return approvalDraftStateText({ dirty, invalid });
+}
+
 function approvalPanelKey(approvalId, section) {
   return `${approvalId}:${section}`;
 }
@@ -407,18 +418,24 @@ function approvalPanelPreference(approvalId, section) {
 }
 
 function isApprovalSectionExpanded(approval, section) {
+  if (section === "preview") {
+    return true;
+  }
+  if (section === "editor" && (approvalErrorFor(approval.id) || approvalHasDraftChanges(approval))) {
+    return true;
+  }
   const saved = approvalPanelPreference(approval.id, section);
   if (typeof saved === "boolean") {
     return saved;
-  }
-  if (section === "preview") {
-    return true;
   }
   return false;
 }
 
 function setApprovalSectionExpanded(approvalId, section, expanded) {
   state.approvalPanels.set(approvalPanelKey(approvalId, section), Boolean(expanded));
+  if (section === "editor") {
+    return;
+  }
   persistApprovalPanels();
 }
 
@@ -499,46 +516,46 @@ function approvalReasonCopy(approval) {
     return "";
   }
   if (approval.status === "executed") {
-    return "The local write completed and the result is now saved in this workspace.";
+    return "Saved in this workspace.";
   }
   if (approval.status === "rejected") {
-    return "The draft was reviewed but not saved locally.";
+    return "Not saved locally.";
   }
   if (approval.status === "failed") {
-    return "The local write did not finish cleanly.";
+    return "The local save did not finish cleanly.";
   }
   const sourceDomain = String(approval.source_domain || "").toLowerCase();
   switch (approval.tool_name) {
     case "create_checklist":
       return sourceDomain === "image" || sourceDomain === "video"
-        ? "Drafted from the attached media findings. Review it, refine it, or save it."
-        : "Drafted from the current conversation. Review it, refine it, or save it.";
+        ? "From the attached media findings."
+        : "From this conversation.";
     case "create_task":
-      return "Drafted from the current conversation. Review it, refine it, or save it.";
+      return "From this conversation.";
     case "create_report":
       return sourceDomain === "workspace"
-        ? "Drafted from the local workspace review. Review it, refine it, or save it."
+        ? "From the local workspace review."
         : sourceDomain === "document"
-          ? "Drafted from the document findings. Review it, refine it, or save it."
-          : "Drafted from the current conversation. Review it, refine it, or save it.";
+          ? "From the document findings."
+          : "From this conversation.";
     case "create_message_draft":
       return sourceDomain === "image" || sourceDomain === "video"
-        ? "Drafted from the attached media findings. Review it, refine it, or save it."
-        : "Drafted from the current conversation. Review it, refine it, or save it.";
+        ? "From the attached media findings."
+        : "From this conversation.";
     case "export_brief":
       return sourceDomain === "workspace"
-        ? "Drafted from the local workspace review. Review it, refine it, or export it."
-        : "Drafted from the current conversation. Review it, refine it, or export it.";
+        ? "From the local workspace review."
+        : "From this conversation.";
     case "log_observation":
-      return "Drafted from the current conversation. Review it, refine it, or save it.";
+      return "From this conversation.";
     case "create_note":
       return sourceDomain === "workspace"
-        ? "Drafted from the local workspace review. Review it, refine it, or save it."
+        ? "From the local workspace review."
         : sourceDomain === "document"
-          ? "Drafted from the document findings. Review it, refine it, or save it."
-          : "Drafted from the current conversation. Review it, refine it, or save it.";
+          ? "From the document findings."
+          : "From this conversation.";
     default:
-      return "Drafted locally. Review it, refine it, or save it.";
+      return "Drafted locally.";
   }
 }
 
@@ -658,27 +675,107 @@ function approvalPayloadExcerpt(approval, payload) {
   return `Contains ${keys.length} saved field${keys.length === 1 ? "" : "s"} for this ${approvalSurfaceNoun(approval.tool_name)}.`;
 }
 
+function approvalPayloadUsesTitleHeading(payload) {
+  if (!payload?.content || !payload?.title) {
+    return false;
+  }
+  const normalizedTitle = stripMarkdownToText(payload.title).trim().toLowerCase();
+  if (!normalizedTitle) {
+    return false;
+  }
+  const lines = String(payload.content)
+    .replace(/\r\n?/g, "\n")
+    .split("\n");
+  const firstMeaningfulIndex = lines.findIndex((line) => stripMarkdownToText(line).trim());
+  if (firstMeaningfulIndex === -1) {
+    return false;
+  }
+  const firstRaw = lines[firstMeaningfulIndex].trim();
+  const firstMeaningful = stripMarkdownToText(firstRaw).trim().toLowerCase();
+  return /^#{1,6}\s+/.test(firstRaw) && firstMeaningful === normalizedTitle;
+}
+
+function approvalPreviewContent(approval, payload) {
+  if (!payload) {
+    return "";
+  }
+  const source = payload.content || payload.details || "";
+  let content = String(source || "").trim();
+  if (!content) {
+    return "";
+  }
+
+  const normalizedTitle = stripMarkdownToText(payload.title || "").trim().toLowerCase();
+  if (!normalizedTitle) {
+    return content;
+  }
+
+  const lines = content.replace(/\r\n?/g, "\n").split("\n");
+  const firstMeaningfulIndex = lines.findIndex((line) => stripMarkdownToText(line).trim());
+  if (firstMeaningfulIndex === -1) {
+    return content;
+  }
+
+  const firstMeaningful = stripMarkdownToText(lines[firstMeaningfulIndex]).trim().toLowerCase();
+  if (firstMeaningful !== normalizedTitle) {
+    return content;
+  }
+
+  const trimmedLines = lines.slice(firstMeaningfulIndex + 1);
+  while (trimmedLines.length && !trimmedLines[0].trim()) {
+    trimmedLines.shift();
+  }
+  return trimmedLines.join("\n").trim() || content;
+}
+
+function approvalCanvasContent(approval, payload) {
+  if (!payload?.content) {
+    return "";
+  }
+  if (!approvalPayloadUsesTitleHeading(payload)) {
+    return String(payload.content || "");
+  }
+  return approvalPreviewContent(approval, payload);
+}
+
+function approvalComposeCanvasContent(approval, basePayload, nextTitle, nextContent) {
+  if (!["create_note", "create_report", "export_brief", "log_observation"].includes(approval?.tool_name)) {
+    return nextContent;
+  }
+  if (!approvalPayloadUsesTitleHeading(basePayload || {})) {
+    return nextContent;
+  }
+  const normalizedTitle = String(nextTitle || "").trim();
+  const normalizedContent = String(nextContent || "")
+    .replace(/\r\n?/g, "\n")
+    .trim();
+  if (!normalizedContent || !normalizedTitle) {
+    return nextContent;
+  }
+  const lines = normalizedContent.split("\n");
+  const firstMeaningfulIndex = lines.findIndex((line) => stripMarkdownToText(line).trim());
+  if (firstMeaningfulIndex !== -1) {
+    const firstRaw = lines[firstMeaningfulIndex].trim();
+    const firstMeaningful = stripMarkdownToText(firstRaw).trim().toLowerCase();
+    if (/^#{1,6}\s+/.test(firstRaw) && firstMeaningful === normalizedTitle.toLowerCase()) {
+      return normalizedContent;
+    }
+  }
+  return `# ${normalizedTitle}\n\n${normalizedContent}`;
+}
+
 function approvalPayloadMeta(approval, payload) {
   const bits = [];
   if (approval?.tool_name === "create_task" && payload?.status) {
     bits.push(`Status: ${humanizeRunStatus(payload.status)}`);
   }
-  if (payload?.content) {
-    const lineCount = String(payload.content)
+  if (payload?.content && approval?.tool_name === "create_checklist") {
+    const itemCount = String(payload.content)
       .split(/\r?\n/)
       .map((line) => line.trim())
-      .filter(Boolean).length;
-    if (lineCount > 1) {
-      bits.push(`${lineCount} lines`);
-    }
-    if (approval?.tool_name === "create_checklist") {
-      const itemCount = String(payload.content)
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter((line) => /^[-*+]\s+/.test(line) || /^\d+\.\s+/.test(line)).length;
-      if (itemCount) {
-        bits.push(`${itemCount} items`);
-      }
+      .filter((line) => /^[-*+]\s+/.test(line) || /^\d+\.\s+/.test(line)).length;
+    if (itemCount) {
+      bits.push(`${itemCount} items`);
     }
   }
   return bits;
@@ -1416,6 +1513,7 @@ function renderApprovalPreview(approval, overridePayload = undefined) {
   if (!payload || !Object.keys(payload).length) {
     return "";
   }
+  const previewContent = approvalPreviewContent(approval, payload);
   const previewSummary = approvalPayloadExcerpt(approval, payload);
   const meta = approvalPayloadMeta(approval, payload)
     .map((bit) => `<span>${escapeHtml(bit)}</span>`)
@@ -1423,7 +1521,13 @@ function renderApprovalPreview(approval, overridePayload = undefined) {
 
   return `
     <section class="approval-preview">
-      ${previewSummary ? `<p class="approval-preview-summary">${escapeHtml(previewSummary)}</p>` : ""}
+      ${
+        previewContent
+          ? `<div class="approval-preview-body rich-text">${renderMarkdownBlocks(previewContent)}</div>`
+          : previewSummary
+            ? `<p class="approval-preview-summary">${escapeHtml(previewSummary)}</p>`
+            : ""
+      }
       ${meta ? `<div class="approval-preview-meta">${meta}</div>` : ""}
     </section>
   `;
@@ -1444,8 +1548,8 @@ function renderApprovalEditor(approval) {
       <section class="approval-editor approval-editor-task" data-approval-editor="${approval.id}">
         <div class="approval-editor-header">
           <div class="approval-editor-copy">
-            <strong>Edit draft</strong>
-            <span>Changes stay local until you approve the write.</span>
+            <strong>Editing locally</strong>
+            <span>Adjust the task before you save it.</span>
           </div>
           <div class="approval-editor-controls">
             <span class="approval-editor-state${isDirty ? " is-dirty" : ""}" data-approval-draft-state>${draftStateText}</span>
@@ -1482,19 +1586,19 @@ function renderApprovalEditor(approval) {
   if (["create_note", "create_report", "create_message_draft", "create_checklist", "log_observation", "export_brief"].includes(approval.tool_name)) {
     const helperCopy =
       approval.tool_name === "create_checklist"
-        ? "Adjust the saved checklist title or items before it is written locally."
+        ? "Adjust the checklist title or items before you save it."
         : approval.tool_name === "create_report"
-          ? "Adjust the report title or content before it is written locally."
+          ? "Adjust the report title or content before you save it."
           : approval.tool_name === "create_message_draft"
-            ? "Adjust the message draft title or content before it is written locally."
+            ? "Adjust the message title or content before you save it."
         : approval.tool_name === "export_brief"
-          ? "Adjust the markdown export title or content before it is written locally."
-        : "Adjust the saved draft before it is written locally.";
+          ? "Adjust the export title or content before you save it."
+        : "Adjust the draft before you save it.";
     return `
       <section class="approval-editor approval-editor-simple" data-approval-editor="${approval.id}">
         <div class="approval-editor-header">
           <div class="approval-editor-copy">
-            <strong>Edit draft</strong>
+            <strong>Editing locally</strong>
             <span>${escapeHtml(helperCopy)}</span>
           </div>
           <div class="approval-editor-controls">
@@ -1532,8 +1636,8 @@ function renderApprovalEditor(approval) {
     <section class="approval-editor approval-editor-advanced" data-approval-editor="${approval.id}">
       <div class="approval-editor-header">
         <div class="approval-editor-copy">
-          <strong>Edit payload</strong>
-          <span>Advanced fields stay local until you approve the write.</span>
+          <strong>Editing locally</strong>
+          <span>Advanced fields stay local until you save them.</span>
         </div>
         <div class="approval-editor-controls">
           <span class="approval-editor-state${isDirty ? " is-dirty" : ""}" data-approval-draft-state>${draftStateText}</span>
@@ -1548,6 +1652,131 @@ function renderApprovalEditor(approval) {
           <textarea data-approval-json name="approval_json" rows="7">${escapeHtml(JSON.stringify(payload, null, 2))}</textarea>
         </label>
       </div>
+    </section>
+  `;
+}
+
+function approvalUsesInlineCanvas(approval) {
+  return (
+    approval?.status === "pending" &&
+    ["create_note", "create_report", "create_message_draft", "create_checklist", "export_brief", "log_observation"].includes(
+      approval.tool_name,
+    )
+  );
+}
+
+function approvalCanvasFieldLabel(approval) {
+  switch (approval?.tool_name) {
+    case "create_checklist":
+      return "Checklist";
+    case "create_report":
+      return "Report";
+    case "create_message_draft":
+      return "Message";
+    case "export_brief":
+      return "Markdown";
+    case "log_observation":
+      return "Observation";
+    default:
+      return "Draft";
+  }
+}
+
+function approvalCanvasPlaceholder(approval) {
+  switch (approval?.tool_name) {
+    case "create_report":
+      return "Draft the report here.";
+    case "create_checklist":
+      return "Draft the checklist here.";
+    case "create_message_draft":
+      return "Draft the message here.";
+    case "create_note":
+      return "Write the note here.";
+    case "log_observation":
+      return "Write the observation here.";
+    case "export_brief":
+      return "Write the markdown here.";
+    default:
+      return "Write here.";
+  }
+}
+
+function approvalCanvasTitleLabel(approval) {
+  switch (approval?.tool_name) {
+    case "create_report":
+      return "Report title";
+    case "create_checklist":
+      return "Checklist title";
+    case "create_message_draft":
+      return "Message title";
+    case "create_note":
+      return "Note title";
+    case "export_brief":
+      return "Export title";
+    case "log_observation":
+      return "Observation title";
+    default:
+      return "Draft title";
+  }
+}
+
+function approvalCanvasOrigin(approval) {
+  const reason = approvalReasonCopy(approval).trim();
+  if (!reason || reason === "From this conversation.") {
+    return "";
+  }
+  return reason;
+}
+
+function renderApprovalCanvas(approval) {
+  const payload = approvalEffectivePayload(approval);
+  const isDirty = approvalHasDraftChanges(approval, payload);
+  const draftStateText = approvalCanvasStateText({ dirty: isDirty });
+  const groundingNotice = approvalGroundingNotice(approval, payload);
+  const errorMessage = approvalErrorFor(approval.id);
+  const canvasContent = approvalCanvasContent(approval, payload);
+  const originCopy = approvalCanvasOrigin(approval);
+
+  return `
+    <section class="approval-canvas approval-canvas-${escapeHtml(approval.tool_name)}">
+      <div class="approval-canvas-header">
+        <div class="approval-canvas-toolbar">
+          <div class="approval-canvas-meta">
+            <span class="approval-canvas-kicker">${escapeHtml(approvalSurfaceNoun(approval.tool_name))} draft</span>
+            ${originCopy ? `<span class="approval-canvas-origin">${escapeHtml(originCopy)}</span>` : ""}
+          </div>
+          <div class="approval-canvas-controls">
+            <span class="approval-editor-state approval-canvas-state${isDirty ? " is-dirty" : ""}" data-approval-draft-state>${draftStateText}</span>
+            <button class="approval-editor-reset" data-approval-reset type="button"${isDirty ? "" : " disabled"}>Revert</button>
+            <button class="approval-action reject" data-approval-action="reject" data-approval-id="${approval.id}" type="button">Dismiss</button>
+            <button class="approval-action approve" data-approval-action="approve" data-approval-id="${approval.id}" type="button">${escapeHtml(approvalPrimaryActionLabel(approval))}</button>
+          </div>
+        </div>
+        <label class="approval-canvas-heading">
+          <span class="visually-hidden">${escapeHtml(approvalCanvasTitleLabel(approval))}</span>
+          <input
+            class="approval-canvas-title-input"
+            data-approval-field="title"
+            aria-label="${escapeHtml(approvalCanvasTitleLabel(approval))}"
+            name="approval_title"
+            type="text"
+            placeholder="Untitled ${escapeHtml(approvalSurfaceNoun(approval.tool_name))}"
+            value="${escapeHtml(payload.title || "")}"
+          />
+        </label>
+      </div>
+      ${groundingNotice ? `<p class="approval-grounding-note">${escapeHtml(groundingNotice)}</p>` : ""}
+      <p class="approval-editor-error"${errorMessage ? "" : " hidden"} data-approval-error>${escapeHtml(errorMessage)}</p>
+      <section class="approval-editor approval-editor-canvas" data-approval-editor="${approval.id}">
+        <textarea
+          class="approval-canvas-textarea"
+          data-approval-field="content"
+          aria-label="${escapeHtml(approvalCanvasFieldLabel(approval))} content"
+          name="approval_content"
+          rows="12"
+          placeholder="${escapeHtml(approvalCanvasPlaceholder(approval))}"
+        >${escapeHtml(canvasContent)}</textarea>
+      </section>
     </section>
   `;
 }
@@ -2034,6 +2263,10 @@ function renderApprovalMarkup(approval) {
     return "";
   }
 
+  if (approvalUsesInlineCanvas(approval)) {
+    return renderApprovalCanvas(approval);
+  }
+
   const payload = approvalEffectivePayload(approval);
   const editorExpanded = approval.status === "pending" ? isApprovalSectionExpanded(approval, "editor") : false;
   const editToggle =
@@ -2045,7 +2278,7 @@ function renderApprovalMarkup(approval) {
           data-approval-id="${approval.id}"
           type="button"
         >
-          ${editorExpanded ? "Close edit" : "Edit draft"}
+          ${editorExpanded ? "Close editor" : "Edit"}
         </button>
       `
       : "";
@@ -2055,7 +2288,7 @@ function renderApprovalMarkup(approval) {
       ? `
         <div class="approval-actions">
           ${editToggle}
-          <button class="approval-action reject" data-approval-action="reject" data-approval-id="${approval.id}" type="button">Discard draft</button>
+          <button class="approval-action reject" data-approval-action="reject" data-approval-id="${approval.id}" type="button">Dismiss</button>
           <button class="approval-action approve" data-approval-action="approve" data-approval-id="${approval.id}" type="button">${escapeHtml(approvalPrimaryActionLabel(approval))}</button>
         </div>
       `
@@ -2128,6 +2361,17 @@ function collectApprovalEdit(container, approval, { silent = false } = {}) {
     }
     editedPayload[name] = field.value;
   }
+  if (Object.prototype.hasOwnProperty.call(editedPayload, "content")) {
+    const basePayload = approvalEffectivePayload(approval);
+    const effectiveTitle =
+      editedPayload.title !== undefined ? editedPayload.title : basePayload.title || approval.payload?.title || "";
+    editedPayload.content = approvalComposeCanvasContent(
+      approval,
+      basePayload,
+      effectiveTitle,
+      editedPayload.content,
+    );
+  }
   return editedPayload;
 }
 
@@ -2152,7 +2396,7 @@ function refreshApprovalCardState(container, approval, collected = undefined) {
   if (currentEdit === null) {
     editor.classList.add("has-invalid-draft");
     if (stateLabel) {
-      stateLabel.textContent = approvalDraftStateText({ invalid: true });
+      stateLabel.textContent = approvalStateLabelText(approval, { invalid: true });
       stateLabel.classList.add("is-invalid");
       stateLabel.classList.remove("is-dirty");
     }
@@ -2175,7 +2419,7 @@ function refreshApprovalCardState(container, approval, collected = undefined) {
     previewSlot.innerHTML = renderApprovalPreview(approval, currentEdit);
   }
   if (stateLabel) {
-    stateLabel.textContent = approvalDraftStateText({ dirty });
+    stateLabel.textContent = approvalStateLabelText(approval, { dirty });
     stateLabel.classList.toggle("is-dirty", dirty);
     stateLabel.classList.remove("is-invalid");
   }
@@ -2189,8 +2433,9 @@ function refreshApprovalCardState(container, approval, collected = undefined) {
 
 function resizeApprovalTextareas(container) {
   for (const textarea of container.querySelectorAll(".approval-editor textarea")) {
-    const minHeight = textarea.dataset.approvalJson !== undefined ? 132 : 96;
-    const maxHeight = window.innerWidth <= 640 ? 220 : 280;
+    const inCanvas = Boolean(textarea.closest(".approval-editor-canvas"));
+    const minHeight = textarea.dataset.approvalJson !== undefined ? 132 : inCanvas ? 320 : 96;
+    const maxHeight = textarea.dataset.approvalJson !== undefined ? 320 : inCanvas ? (window.innerWidth <= 640 ? 520 : 760) : window.innerWidth <= 640 ? 220 : 280;
     textarea.style.height = "auto";
     const nextHeight = Math.min(Math.max(textarea.scrollHeight, minHeight), maxHeight);
     textarea.style.height = `${nextHeight}px`;

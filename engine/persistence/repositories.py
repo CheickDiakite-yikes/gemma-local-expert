@@ -142,7 +142,11 @@ class PersistenceStore(Protocol):
     def get_approval(self, approval_id: str) -> ApprovalState | None: ...
 
     def update_approval_payload(
-        self, approval_id: str, payload: dict[str, Any]
+        self,
+        approval_id: str,
+        payload: dict[str, Any],
+        *,
+        turn_id: str | None = None,
     ) -> ApprovalState: ...
 
     def resolve_approval(
@@ -981,20 +985,25 @@ class SQLiteStore:
         return self._row_to_approval(row) if row else None
 
     def update_approval_payload(
-        self, approval_id: str, payload: dict[str, Any]
+        self,
+        approval_id: str,
+        payload: dict[str, Any],
+        *,
+        turn_id: str | None = None,
     ) -> ApprovalState:
         approval = self.get_approval(approval_id)
         if approval is None:
             raise KeyError(approval_id)
 
+        next_turn_id = turn_id or approval.turn_id
         with self._lock:
             self._connection.execute(
-                "UPDATE approvals SET payload_json = ? WHERE id = ?",
-                (json.dumps(payload), approval_id),
+                "UPDATE approvals SET payload_json = ?, turn_id = ? WHERE id = ?",
+                (json.dumps(payload), next_turn_id, approval_id),
             )
             self._connection.commit()
 
-        return approval.model_copy(update={"payload": payload})
+        return approval.model_copy(update={"payload": payload, "turn_id": next_turn_id})
 
     def resolve_approval(
         self,

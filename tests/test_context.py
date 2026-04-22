@@ -1007,7 +1007,7 @@ def test_context_service_treats_same_report_edit_as_pending_output_reference() -
             TranscriptMessage(
                 id="msg1",
                 role="assistant",
-                content="I drafted a report below.",
+                content="I drafted a report here.",
                 approval=pending_report,
             ),
         ],

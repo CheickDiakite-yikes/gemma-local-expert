@@ -209,6 +209,7 @@ class OrchestratorService:
                 approval=active_pending_approval,
                 instruction=turn.text,
                 conversation_context=conversation_context,
+                turn_id=turn_id,
             )
             if revised_approval:
                 draft_updated = True
@@ -1229,7 +1230,7 @@ class OrchestratorService:
     ) -> str:
         tool_label = self._tool_label(tool_name)
         domain_phrase = self._draft_source_phrase(source_domain)
-        base = f"I drafted a {tool_label}{domain_phrase} below."
+        base = f"I drafted a {tool_label}{domain_phrase} here."
         if not evidence_packet:
             return base
         if evidence_packet.grounding_status == GroundingStatus.PARTIAL:
@@ -1255,7 +1256,7 @@ class OrchestratorService:
                 normalized_source_domain = None
         domain_phrase = self._draft_source_phrase(normalized_source_domain)
         title_phrase = f' "{title}"' if title else ""
-        base = f"I updated the {tool_label}{title_phrase}{domain_phrase} below."
+        base = f"I updated the {tool_label}{title_phrase}{domain_phrase} here."
         if grounding_status == GroundingStatus.PARTIAL.value:
             return f"{base} It still reflects partial local evidence."
         if grounding_status == GroundingStatus.UNAVAILABLE.value:
@@ -1472,6 +1473,7 @@ class OrchestratorService:
         approval,
         instruction: str,
         conversation_context,
+        turn_id: str,
     ):
         revised_payload = self.tool_runtime.revise_pending_payload(
             approval.tool_name,
@@ -1480,7 +1482,11 @@ class OrchestratorService:
         )
         if not revised_payload or revised_payload == approval.payload:
             return None
-        revised_approval = self.store.update_approval_payload(approval.id, revised_payload)
+        revised_approval = self.store.update_approval_payload(
+            approval.id,
+            revised_payload,
+            turn_id=turn_id,
+        )
         summary, excerpt = self.context_service.describe_payload(revised_payload)
         conversation_context.pending_approval_id = revised_approval.id
         conversation_context.pending_approval_tool = revised_approval.tool_name
