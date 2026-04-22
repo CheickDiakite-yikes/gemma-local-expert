@@ -616,6 +616,102 @@ def test_pending_report_survives_casual_interruptions_before_save(tmp_path: Path
     assert assistant_messages[3]["approval"]["id"] == initial_approval_id
 
 
+def test_pending_report_can_shorten_again_after_conversational_detours(tmp_path: Path) -> None:
+    settings = Settings(database_path=str(tmp_path / "test-pending-report-repeat-tighten.db"))
+    client = TestClient(create_app(settings))
+    conversation = client.post(
+        "/v1/conversations", json={"title": "Repeat tighten after detours", "mode": "research"}
+    ).json()
+
+    create_turn = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Create a report summarizing the current field assistant architecture.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+    assert create_turn.status_code == 200
+    create_lines = [json.loads(line) for line in create_turn.text.splitlines() if line.strip()]
+    initial_approval = next(line for line in create_lines if line["type"] == "approval.required")
+    approval_id = initial_approval["payload"]["id"]
+
+    for text in [
+        "Thanks",
+        "Can we just talk normally for a second?",
+        "What do you mean by that?",
+        "What is that report called?",
+        "Okay, go back to that report. What's the main point in one sentence?",
+    ]:
+        response = client.post(
+            f"/v1/conversations/{conversation['id']}/turns",
+            json={
+                "conversation_id": conversation["id"],
+                "mode": "research",
+                "text": text,
+                "asset_ids": [],
+                "enabled_knowledge_pack_ids": [],
+                "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+            },
+        )
+        assert response.status_code == 200
+
+    first_shorten = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Keep the same report, but make it shorter before I save it.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+    assert first_shorten.status_code == 200
+    first_lines = [json.loads(line) for line in first_shorten.text.splitlines() if line.strip()]
+    first_approval = next(line for line in first_lines if line["type"] == "approval.required")
+    first_content = str(first_approval["payload"]["payload"]["content"])
+    assert first_approval["payload"]["id"] == approval_id
+
+    second_shorten = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Keep the same report, but shorten it even more.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+    assert second_shorten.status_code == 200
+    second_lines = [json.loads(line) for line in second_shorten.text.splitlines() if line.strip()]
+    second_completed = next(line for line in second_lines if line["type"] == "assistant.message.completed")
+    second_approval = next(line for line in second_lines if line["type"] == "approval.required")
+    second_text = second_completed["payload"]["text"].lower()
+    second_content = str(second_approval["payload"]["payload"]["content"])
+
+    assert 'i updated the report "field assistant architecture report"' in second_text
+    assert "need to know what aspect you want to prioritize" not in second_text
+    assert "please specify" not in second_text
+    assert second_approval["payload"]["id"] == approval_id
+    assert second_content != first_content
+    assert len(second_content) < len(first_content)
+
+    transcript = client.get(f"/v1/conversations/{conversation['id']}/messages").json()
+    latest_assistant = next(
+        message
+        for message in reversed(transcript)
+        if message["role"] == "assistant"
+    )
+    assert latest_assistant["content"] == second_completed["payload"]["text"]
+    assert latest_assistant["approval"]["id"] == approval_id
+    assert latest_assistant["approval"]["payload"]["content"] == second_content
+
+
 def test_message_draft_turn_after_image_blocks_when_current_grounding_is_unavailable(
     tmp_path: Path,
 ) -> None:

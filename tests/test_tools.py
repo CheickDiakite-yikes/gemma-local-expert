@@ -421,6 +421,34 @@ def test_revise_pending_export_payload_can_tighten_title_and_content() -> None:
     assert "Writes stay behind approval." in revised["content"]
 
 
+def test_revise_pending_report_payload_can_tighten_further_when_already_short() -> None:
+    runtime = ToolRuntime(_UnusedStore())
+    base_payload = {
+        "title": "Field Assistant Architecture Report",
+        "content": (
+            "# Field Assistant Architecture Report\n"
+            "Key points:\n"
+            "- Focus on the main structure, responsibilities, and current constraints around the current field assistant architecture.\n"
+            "- Keep the report practical and easy to review before it is saved locally.\n"
+            "- Confirm the strongest supporting details or examples before finalizing it.\n"
+        ),
+        "kind": "report",
+    }
+
+    revised = runtime.revise_pending_payload(
+        "create_report",
+        base_payload,
+        "Keep the same report, but shorten it even more.",
+    )
+
+    assert revised is not None
+    assert revised["title"] == "Field Assistant Architecture Report"
+    revised_content = str(revised["content"])
+    assert revised_content != base_payload["content"]
+    assert revised_content.count("\n- ") == 2
+    assert "Confirm the strongest supporting details or examples before finalizing it." not in revised_content
+
+
 def test_revise_pending_note_payload_can_rename_title_explicitly() -> None:
     runtime = ToolRuntime(_UnusedStore())
     revised = runtime.revise_pending_payload(

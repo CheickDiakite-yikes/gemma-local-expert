@@ -312,9 +312,14 @@ class ToolRuntime:
                     tighter_title = self._tighten_title(title)
                     if tighter_title and tighter_title != title:
                         edited["title"] = tighter_title
-                tightened = self._tighten_content(str(base_payload.get("content") or ""))
-                if tightened and tightened != str(base_payload.get("content") or ""):
+                original_content = str(base_payload.get("content") or "")
+                tightened = self._tighten_content(original_content)
+                if tightened and tightened.strip() != original_content.strip():
                     edited["content"] = tightened
+                else:
+                    further_tightened = self._tighten_content_further(original_content)
+                    if further_tightened and further_tightened.strip() != original_content.strip():
+                        edited["content"] = further_tightened
 
         if tool_name == "create_task":
             if self._looks_like_tighten_request(lowered):
@@ -322,8 +327,9 @@ class ToolRuntime:
                     tighter_title = self._tighten_title(title)
                     if tighter_title and tighter_title != title:
                         edited["title"] = tighter_title
-                tightened = self._tighten_content(str(base_payload.get("details") or ""))
-                if tightened and tightened != str(base_payload.get("details") or ""):
+                original_details = str(base_payload.get("details") or "")
+                tightened = self._tighten_content(original_details)
+                if tightened and tightened.strip() != original_details.strip():
                     edited["details"] = tightened
 
         if not edited:
@@ -723,6 +729,66 @@ class ToolRuntime:
         output.extend(block for block in clipped if block)
         tightened = "\n\n".join(self._dedupe_preserving_order(output)).strip()
         return tightened or self._clip_sentence_block(normalized, 320)
+
+    def _tighten_content_further(self, content: str) -> str | None:
+        normalized = content.replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not normalized:
+            return None
+
+        lines = [line.rstrip() for line in normalized.split("\n")]
+        meaningful = [line.strip() for line in lines if line.strip()]
+        if not meaningful:
+            return None
+
+        output: list[str] = []
+        heading = meaningful[0]
+        if heading.startswith("#") or (len(heading) <= 88 and not heading.endswith(":")):
+            output.append(heading)
+
+        key_point_index = next(
+            (index for index, line in enumerate(meaningful) if line.lower().startswith("key points:")),
+            None,
+        )
+        if key_point_index is not None:
+            bullets = [
+                line
+                for line in meaningful[key_point_index + 1 :]
+                if re.match(r"^[-*+]\s+|^\d+\.\s+", line)
+            ]
+            if bullets:
+                output.append("Key points:")
+                if len(bullets) >= 2:
+                    output.append(bullets[0])
+                    output.append(bullets[1])
+                else:
+                    output.append(self._clip_bullet_line(bullets[0], 140))
+                tightened = "\n".join(self._dedupe_preserving_order(output)).strip()
+                return tightened if tightened != normalized else None
+
+        bullets = [line for line in meaningful if re.match(r"^[-*+]\s+|^\d+\.\s+", line)]
+        if bullets:
+            output.append(self._clip_bullet_line(bullets[0], 140))
+            tightened = "\n".join(self._dedupe_preserving_order(output)).strip()
+            return tightened if tightened != normalized else None
+
+        paragraphs = [paragraph.strip() for paragraph in re.split(r"\n\s*\n", normalized) if paragraph.strip()]
+        if output and paragraphs:
+            first_paragraph = paragraphs[0].strip()
+            if self._normalize_heading(first_paragraph) == self._normalize_heading(output[0]):
+                paragraphs = paragraphs[1:]
+        if paragraphs:
+            output.append(self._clip_sentence_block(paragraphs[0], 160))
+            tightened = "\n\n".join(self._dedupe_preserving_order(output)).strip()
+            return tightened if tightened != normalized else None
+        return None
+
+    def _clip_bullet_line(self, bullet: str, max_chars: int) -> str:
+        match = re.match(r"^([-*+]\s+|\d+\.\s+)(.*)$", bullet)
+        if not match:
+            return self._clip_sentence_block(bullet, max_chars)
+        prefix, body = match.groups()
+        clipped_body = self._clip_sentence_block(body, max_chars)
+        return f"{prefix}{clipped_body}".rstrip()
 
     def _clip_sentence_block(self, text: str, max_chars: int) -> str:
         cleaned = re.sub(r"\s+", " ", text).strip()
