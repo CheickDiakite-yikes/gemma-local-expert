@@ -346,3 +346,36 @@ def test_mock_runtime_tool_proposal_does_not_prepend_generic_chat_filler() -> No
     assert "i drafted a checklist here." in result.text.lower()
     assert "ready for your approval" not in result.text.lower()
     assert "talk normally" not in result.text.lower()
+
+
+def test_mock_runtime_plain_conversation_request_stays_simple() -> None:
+    runtime = MockAssistantRuntime()
+
+    result = runtime.generate(
+        _request(
+            user_text="Can we just talk normally for a minute?",
+            selected_memory_topic=None,
+            selected_memory_summary=None,
+            active_topic=None,
+        )
+    )
+
+    assert result.text == "Yes. We can just talk this through."
+    assert "local analysis" not in result.text.lower()
+    assert "task execution" not in result.text.lower()
+
+
+def test_mock_runtime_handles_colloquial_greeting_naturally() -> None:
+    runtime = MockAssistantRuntime()
+
+    result = runtime.generate(
+        _request(
+            user_text="yoo",
+            is_follow_up=False,
+            selected_memory_topic=None,
+            selected_memory_summary=None,
+            active_topic=None,
+        )
+    )
+
+    assert result.text == "Hey. What's up?"

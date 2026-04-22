@@ -218,7 +218,6 @@ class MockAssistantRuntime:
         return f"Most relevant source: [{primary.label}] {primary.excerpt}"
 
     def _retrieval_response(self, request: AssistantGenerationRequest) -> str:
-        top_labels = ", ".join(citation.label for citation in request.citations[:2])
         lowered = request.user_text.lower().strip()
         primary = self._preferred_retrieval_primary(request.citations, lowered)
 
@@ -238,9 +237,13 @@ class MockAssistantRuntime:
                     f"[{primary.label}] {primary.excerpt}"
                 )
 
+        if len(request.citations) == 1:
+            return f"The strongest local reference here is [{primary.label}] {primary.excerpt}"
+
+        secondary_labels = ", ".join(citation.label for citation in request.citations[1:3])
         return (
-            f"I found relevant local material in {top_labels}. "
-            f"{self._summary_from_sources(request.citations)}"
+            f"The clearest local point here comes from [{primary.label}] {primary.excerpt} "
+            f"I also checked {secondary_labels}."
         )
 
     def _preferred_retrieval_primary(
@@ -304,7 +307,7 @@ class MockAssistantRuntime:
                     "about unsafe or illegal behavior until the local tracking backend is available."
                 )
             return (
-                "I loaded the video locally and sampled a few frames into a contact sheet for review. "
+                "I pulled a few video frames into a local contact sheet and reviewed them. "
                 "I can help inspect those sampled frames conservatively, but I cannot do full tracking or behavior inference "
                 "from this fallback path alone."
             )
@@ -367,10 +370,11 @@ class MockAssistantRuntime:
                     "I could not run local tracking or sampled-frame review for the video in this profile, "
                     "so I cannot safely make claims about what the clip shows yet."
                 )
-            lines = ["I reviewed the video locally."]
+            lines = ["I took a local look at the video."]
             if packet.execution_mode == ExecutionMode.FALLBACK:
-                lines[0] = "I reviewed sampled video frames locally."
+                lines[0] = "I took a local look at sampled video frames."
             if packet.facts:
+                lines.append("What stands out:")
                 for fact in packet.facts[:3]:
                     refs = ", ".join(ref.ref for ref in fact.refs)
                     suffix = f" ({refs})" if refs else ""
@@ -384,7 +388,7 @@ class MockAssistantRuntime:
         if packet.source_domain == SourceDomain.DOCUMENT:
             if packet.grounding_status == GroundingStatus.UNAVAILABLE:
                 return packet.summary
-            lines = ["I reviewed the document locally."]
+            lines = ["I pulled out what I could from the document locally."]
             if packet.facts:
                 lines.append("Key grounded points:")
                 for fact in packet.facts[:4]:
@@ -401,7 +405,7 @@ class MockAssistantRuntime:
             if packet.grounding_status == GroundingStatus.UNAVAILABLE:
                 return packet.summary
             if packet.facts:
-                return "From the image, the clearest grounded points are:\n" + "\n".join(
+                return "From the image, here is what stands out:\n" + "\n".join(
                     f"- {fact.summary}" for fact in packet.facts[:4]
                 )
             return packet.summary
@@ -413,16 +417,18 @@ class MockAssistantRuntime:
         work_product_reply = self._work_product_follow_up(request, lowered)
         if work_product_reply:
             return work_product_reply
-        if any(token in lowered for token in {"thank you", "thanks"}):
-            return "You're welcome. We can keep talking normally, or turn the next step into a local action if useful."
-        if lowered == "how are you" or re.match(r"^(hi|hello|hey)\b", lowered):
-            return "Hi. We can talk normally here, reason through a question, or switch into local research and tasks when needed."
+        if any(token in lowered for token in {"thank you", "thanks", "appreciate it"}):
+            return "Of course. I'm here when you want to keep going."
         if self._is_supportive_request(lowered):
             return (
                 "Take a breath. You do not need to solve the whole day right this second. "
-                "You care, you have already been thinking it through, and it is okay to slow down for a minute. "
-                "Pick one small next step, then stop there. If you want, tell me what part feels heaviest and we can just handle that one piece."
+                "We can slow this down and handle one piece at a time. "
+                "If you want, tell me what feels heaviest and we will just work that one part."
             )
+        if self._is_plain_conversation_request(lowered):
+            return "Yes. We can just talk this through."
+        if self._is_casual_greeting(lowered):
+            return self._casual_greeting_response(lowered)
         if request.is_follow_up:
             prior_topic = request.memory_focus_topic_frame or request.active_topic or self._recent_topic(
                 request.messages, request.user_text
@@ -477,6 +483,15 @@ class MockAssistantRuntime:
                 and request.selected_memory_summary is None
             ):
                 return request.memory_focus_clarifying_question
+            if "what do you mean by that" in lowered:
+                if recall_summary:
+                    return (
+                        "I mean "
+                        f"{self._plain_summary_sentence(self._memory_summary_for_recall(recall_summary))}"
+                    )
+                return (
+                    "I mean we can keep this conversational and only get more structured if that would actually help."
+                )
             if any(
                 phrase in lowered
                 for phrase in {
@@ -499,30 +514,27 @@ class MockAssistantRuntime:
                     f"Yes. The main point there was: "
                     f"{self._memory_summary_for_recall(request.selected_memory_summary)}"
                 )
-            if "what do you mean by that" in lowered:
-                return (
-                    "I mean we can keep the conversation natural, and only switch into local retrieval, analysis, or saved actions when that actually helps."
-                )
             if any(phrase in lowered for phrase in {"bring that up again", "go back to that", "come back to that"}):
-                if prior_topic:
-                    return "Yes. We can stay with what we were just discussing and go deeper."
-                return "Yes. We can stay with the earlier thread and go deeper."
+                if recall_summary:
+                    return (
+                        "Sure. The main point there was "
+                        f"{self._plain_summary_sentence(self._memory_summary_for_recall(recall_summary))}"
+                    )
+                return "Sure. Let's come back to that."
             if any(phrase in lowered for phrase in {"what should i emphasize first", "what matters first"}):
                 return (
-                    "Start with the most practical first point: state the goal in plain language, demonstrate the first action once, and repeat the key safety check."
+                    "Start with the most practical first point: state the goal plainly, show the first action once, and repeat the safety check."
                 )
             if prior_topic:
-                return "To build on what we were just discussing, I would keep the next step practical and easy to act on."
-            return "To build on the last point, I would keep the next step practical and easy to act on."
+                return "Staying with that, I would keep the next step simple and concrete."
+            return "I would keep the next step simple and concrete."
         if request.interaction_kind == "teaching":
             topic = self._topic_from_request(request.user_text)
             return (
                 f"{self._teaching_intro(topic)} start with the immediate goal, "
                 "break it into a few simple steps, explain the first step plainly, and check understanding before adding detail."
             )
-        return (
-            "Yes. We can talk normally here, and I can also switch into local analysis or task execution when you want."
-        )
+        return "Yes. We can just talk this through."
 
     def _work_product_follow_up(
         self, request: AssistantGenerationRequest, lowered: str
@@ -960,8 +972,8 @@ class MockAssistantRuntime:
             "organize",
             "draft",
         }:
-            return f"Here is a practical way to {topic}:"
-        return f"Here is a practical way to approach {topic}:"
+            return f"A practical way to {topic} is to"
+        return f"A practical way to approach {topic} is to"
 
     def _join_sections(self, sections: list[str]) -> str:
         cleaned = [section.strip() for section in sections if section and section.strip()]
@@ -1099,6 +1111,41 @@ class MockAssistantRuntime:
     def _topic_from_request(self, text: str) -> str:
         cleaned = _normalized_memory_topic_text(text)
         return cleaned or "this"
+
+    def _is_plain_conversation_request(self, lowered: str) -> bool:
+        return any(
+            phrase in lowered
+            for phrase in {
+                "talk normally",
+                "just talk",
+                "just chat",
+                "chat normally",
+                "think out loud",
+                "keep this conversational",
+            }
+        )
+
+    def _is_casual_greeting(self, lowered: str) -> bool:
+        return bool(
+            lowered == "how are you"
+            or re.match(r"^(hi|hello|hey|yo|yoo|sup|what's up|whats up)\b", lowered)
+        )
+
+    def _casual_greeting_response(self, lowered: str) -> str:
+        if lowered == "how are you":
+            return "I'm doing well. What's on your mind?"
+        if lowered.startswith(("yo", "yoo", "sup", "what's up", "whats up")):
+            return "Hey. What's up?"
+        return "Hey. What's on your mind?"
+
+    def _plain_summary_sentence(self, summary: str) -> str:
+        cleaned = " ".join(summary.split()).strip()
+        if not cleaned:
+            return "we can keep this simple."
+        normalized = cleaned[0].lower() + cleaned[1:] if len(cleaned) > 1 else cleaned.lower()
+        if normalized.endswith("."):
+            return normalized
+        return normalized + "."
 
     def _is_supportive_request(self, lowered: str) -> bool:
         return any(
@@ -1650,7 +1697,7 @@ def _memory_summary(request: ConversationMemoryRequest) -> str | None:
         cleaned_workspace = request.workspace_summary_text.strip().split("\n\n")[0]
         return _trim_memory_text(cleaned_workspace, 220)
     cleaned = _normalized_stored_memory_summary(request.assistant_text)
-    return _trim_memory_text(cleaned, 260) if cleaned else None
+    return _trim_memory_text(cleaned, 360) if cleaned else None
 
 
 def _memory_keywords(

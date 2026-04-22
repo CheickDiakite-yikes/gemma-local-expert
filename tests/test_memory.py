@@ -12,8 +12,7 @@ def test_memory_service_skips_generic_talk_normally_reply() -> None:
         turn_id="turn_1",
         user_text="Actually just talk normally with me for a second.",
         assistant_text=(
-            "Yes. We can talk normally here, and I can also switch into local analysis "
-            "or task execution when you want."
+            "Yes. We can just talk this through."
         ),
         interaction_kind="conversation",
         active_topic="Actually just talk normally with me for a second.",

@@ -307,10 +307,19 @@ class ConversationMemoryService:
         low_signal_prefixes = (
             "hi. we can talk normally here",
             "yes. we can talk normally here",
+            "yes. we can just talk this through",
+            "hey. what's on your mind",
+            "hey. what's up",
+            "i'm doing well. what's on your mind",
+            "of course. i'm here when you want to keep going",
+            "i mean we can keep this conversational",
             "to build on what we were just discussing",
             "to build on the last point",
+            "staying with that, i would keep the next step simple and concrete",
+            "i would keep the next step simple and concrete",
             "yes. we can stay with what we were just discussing",
             "yes. we can stay with the earlier thread",
+            "sure. let's come back to that",
         )
         return cleaned.startswith(low_signal_prefixes)
 

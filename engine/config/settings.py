@@ -39,7 +39,7 @@ class Settings(BaseModel):
     assistant_temperature: float = 0.2
     assistant_top_p: float = 0.95
     conversation_history_limit: int = 8
-    continuity_history_limit: int = 32
+    continuity_history_limit: int = 96
     conversation_memory_limit: int = 12
     conversation_memory_ranking_limit: int = 6
     enable_function_gemma: bool = False
@@ -110,7 +110,7 @@ def load_settings() -> Settings:
             os.getenv("FIELD_ASSISTANT_CONVERSATION_HISTORY_LIMIT", "8")
         ),
         continuity_history_limit=int(
-            os.getenv("FIELD_ASSISTANT_CONTINUITY_HISTORY_LIMIT", "32")
+            os.getenv("FIELD_ASSISTANT_CONTINUITY_HISTORY_LIMIT", "96")
         ),
         conversation_memory_limit=int(
             os.getenv("FIELD_ASSISTANT_CONVERSATION_MEMORY_LIMIT", "12")

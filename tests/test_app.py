@@ -525,6 +525,97 @@ def test_pending_report_follow_up_can_update_same_report_before_save(tmp_path: P
     )
 
 
+def test_pending_report_survives_casual_interruptions_before_save(tmp_path: Path) -> None:
+    settings = Settings(database_path=str(tmp_path / "test-pending-report-casual-interruptions.db"))
+    client = TestClient(create_app(settings))
+    conversation = client.post(
+        "/v1/conversations", json={"title": "Report casual interruptions", "mode": "research"}
+    ).json()
+
+    create_turn = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Create a report summarizing the current field assistant architecture.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+    assert create_turn.status_code == 200
+    create_lines = [json.loads(line) for line in create_turn.text.splitlines() if line.strip()]
+    create_completed = next(line for line in create_lines if line["type"] == "assistant.message.completed")
+    create_approval = next(line for line in create_lines if line["type"] == "approval.required")
+    initial_approval_id = create_approval["payload"]["id"]
+
+    thanks_turn = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Thanks",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+        },
+    )
+    assert thanks_turn.status_code == 200
+    thanks_lines = [json.loads(line) for line in thanks_turn.text.splitlines() if line.strip()]
+    thanks_completed = next(line for line in thanks_lines if line["type"] == "assistant.message.completed")
+    assert thanks_completed["payload"]["text"] == "Of course. I'm here when you want to keep going."
+    assert thanks_completed["payload"]["models"]["assistant_backend"] == "deterministic"
+    assert not any(line["type"] == "approval.required" for line in thanks_lines)
+
+    yoo_turn = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "yoo",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+        },
+    )
+    assert yoo_turn.status_code == 200
+    yoo_lines = [json.loads(line) for line in yoo_turn.text.splitlines() if line.strip()]
+    yoo_completed = next(line for line in yoo_lines if line["type"] == "assistant.message.completed")
+    assert yoo_completed["payload"]["text"] == "Hey. What's up?"
+    assert yoo_completed["payload"]["models"]["assistant_backend"] == "deterministic"
+    assert not any(line["type"] == "approval.required" for line in yoo_lines)
+
+    revise_turn = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Keep the same report, but make it shorter before I save it.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+    assert revise_turn.status_code == 200
+    revise_lines = [json.loads(line) for line in revise_turn.text.splitlines() if line.strip()]
+    revise_completed = next(line for line in revise_lines if line["type"] == "assistant.message.completed")
+    revise_approval = next(line for line in revise_lines if line["type"] == "approval.required")
+    assert 'i updated the report "field assistant architecture report"' in revise_completed["payload"]["text"].lower()
+    assert revise_completed["payload"]["models"]["assistant_backend"] == "deterministic"
+    assert revise_approval["payload"]["id"] == initial_approval_id
+
+    transcript = client.get(f"/v1/conversations/{conversation['id']}/messages").json()
+    assistant_messages = [message for message in transcript if message["role"] == "assistant"]
+    assert assistant_messages[0]["content"] == create_completed["payload"]["text"]
+    assert assistant_messages[0].get("approval") is None
+    assert assistant_messages[1]["content"] == "Of course. I'm here when you want to keep going."
+    assert assistant_messages[1].get("approval") is None
+    assert assistant_messages[2]["content"] == "Hey. What's up?"
+    assert assistant_messages[2].get("approval") is None
+    assert assistant_messages[3]["content"] == revise_completed["payload"]["text"]
+    assert assistant_messages[3]["approval"]["id"] == initial_approval_id
+
+
 def test_message_draft_turn_after_image_blocks_when_current_grounding_is_unavailable(
     tmp_path: Path,
 ) -> None:
@@ -942,7 +1033,7 @@ def test_general_conversation_turn_reads_naturally_without_retrieval_disclaimer(
     )
 
     assert response.status_code == 200
-    assert "talk normally" in response.text.lower()
+    assert "just talk this through" in response.text.lower()
     assert "retrieved local sources" not in response.text.lower()
 
 
@@ -1014,7 +1105,7 @@ def test_long_mixed_conversation_handles_general_follow_up_and_workspace_action(
         },
     )
     assert first.status_code == 200
-    assert "talk normally" in first.text.lower()
+    assert "just talk this through" in first.text.lower()
 
     second = client.post(
         f"/v1/conversations/{conversation['id']}/turns",
@@ -1028,7 +1119,7 @@ def test_long_mixed_conversation_handles_general_follow_up_and_workspace_action(
         },
     )
     assert second.status_code == 200
-    assert "keep the conversation natural" in second.text.lower()
+    assert "keep this conversational" in second.text.lower()
 
     third = client.post(
         f"/v1/conversations/{conversation['id']}/turns",
@@ -1943,17 +2034,14 @@ def test_multimodal_conversation_handles_topic_pivots_follow_ups_and_workspace_o
             approval_id = approval_line["payload"]["id"]
             approval_content = approval_line["payload"]["payload"]["content"]
 
-    assert "talk normally" in turn_responses[0].lower()
+    assert "just talk this through" in turn_responses[0].lower()
     assert "ors guidance" in turn_responses[1].lower()
     assert "most practical first point" in turn_responses[2].lower()
     assert "from the image" in turn_responses[3].lower()
     assert "lantern batteries low" in turn_responses[3].lower()
     assert "two clearest shortages" in turn_responses[4].lower()
     assert "translator phone credits" in turn_responses[4].lower()
-    assert any(
-        phrase in turn_responses[5].lower()
-        for phrase in {"talk normally", "normal conversation"}
-    )
+    assert "just talk this through" in turn_responses[5].lower()
     assert "take a breath" in turn_responses[6].lower()
     assert "checklist" not in turn_responses[6].lower()
     assert "workers near excavation equipment" in turn_responses[7].lower()
@@ -2461,6 +2549,179 @@ def test_mixed_conversation_can_revisit_media_and_pending_draft_after_pivot(
     assert "field assistant architecture brief" not in completed_texts[6].lower()
     assert "lantern batteries" in completed_texts[7].lower()
     assert "pit edge" not in completed_texts[7].lower()
+
+
+def test_long_horizon_mixed_conversation_keeps_earlier_image_after_history_cutoff(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    (workspace_root / "field-assistant-architecture.md").write_text(
+        "Field Assistant architecture overview\n"
+        "Local-first assistant built on Gemma.\n"
+        "Uses bounded routing, retrieval, vision, and approvals.\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings(
+        database_path=str(tmp_path / "test-long-horizon-mixed-context.db"),
+        workspace_root=str(workspace_root),
+        asset_storage_dir=str(tmp_path / "uploads"),
+        specialist_backend="mock",
+        tracking_backend="mock",
+        continuity_history_limit=16,
+    )
+    app = create_app(settings)
+
+    class FakeVisionRuntime:
+        backend_name = "fake-vision"
+
+        def analyze(self, request):
+            return VisionAnalysisResult(
+                text=(
+                    "Visible text extracted from the image:\n"
+                    "Lantern batteries low\n"
+                    "Translator phone credits low"
+                ),
+                backend="fake-vision",
+                model_name=request.specialist_model_name,
+                model_source="/tmp/fake-paligemma",
+                available=True,
+            )
+
+    class FakeVideoRuntime:
+        backend_name = "fake-video"
+
+        def analyze(self, request):
+            return VideoAnalysisResult(
+                text=(
+                    "Reviewed the attached mining clip conservatively. "
+                    "I can see workers near excavation equipment and repeated tool handling around the pit edge."
+                ),
+                backend="fake-video",
+                model_name=request.tracking_model_name,
+                model_source="/tmp/fake-sam",
+                available=True,
+            )
+
+    app.state.container.orchestrator.vision_runtime = FakeVisionRuntime()
+    app.state.container.orchestrator.video_runtime = FakeVideoRuntime()
+    client = TestClient(app)
+
+    image_asset = client.post(
+        "/v1/assets/upload",
+        data={"care_context": "general"},
+        files={"file": ("board.png", _tiny_png_bytes(), "image/png")},
+    ).json()["asset"]
+    video_asset = client.post(
+        "/v1/assets/upload",
+        data={"care_context": "general"},
+        files={"file": ("mine.mov", b"fake-video-bytes", "video/quicktime")},
+    ).json()["asset"]
+    conversation = client.post(
+        "/v1/conversations",
+        json={"title": "Long horizon mixed context", "mode": "research"},
+    ).json()
+
+    turns = [
+        ("Hey, can we talk normally while you help me think through field work?", []),
+        ("Teach me how to prepare oral rehydration solution in the field.", []),
+        ("What should I emphasize first to a volunteer with no medical training?", []),
+        ("Separate tangent about lunch and coffee for a second.", []),
+        ("Can we go back to that oral rehydration point again?", []),
+        ("If I had to say that in one sentence, how would you put it?", []),
+        ("What should make me stop and escalate?", []),
+        ("Describe the attached supply image conservatively.", [image_asset["id"]]),
+        ("Which two shortages matter most before departure?", []),
+        ("Create a checklist from those two shortages for tomorrow morning.", []),
+        ("What is that checklist called?", []),
+        ("Thanks", []),
+        ("yoo", []),
+        ("Actually just talk normally with me for a second.", []),
+        ("Review the attached mining video conservatively.", [video_asset["id"]]),
+        ("Summarize what stands out in that video, but keep it cautious.", []),
+        ("Create a short report from that video review.", []),
+        ("What is the report called?", []),
+        ("Prepare a short workspace briefing about the current field assistant architecture and export it as markdown.", []),
+        ("What's the export title now?", []),
+        ("Go back to that architecture point again.", []),
+        ("What was in that checklist again?", []),
+        ("What was in the report again?", []),
+        ("Compare the report title and export title for me.", []),
+        ("Go back to the earlier image for a second. Which shortage mattered most?", []),
+    ]
+
+    completed_texts: list[str] = []
+    pending_tool_names: list[str] = []
+    for text, asset_ids in turns:
+        response = client.post(
+            f"/v1/conversations/{conversation['id']}/turns",
+            json={
+                "conversation_id": conversation["id"],
+                "mode": "research",
+                "text": text,
+                "asset_ids": asset_ids,
+                "enabled_knowledge_pack_ids": [],
+                "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+            },
+        )
+        assert response.status_code == 200
+        completed_line = next(
+            json.loads(line)
+            for line in response.text.splitlines()
+            if '"type":"assistant.message.completed"' in line
+        )
+        completed_texts.append(completed_line["payload"]["text"])
+        approval_line = next(
+            (
+                json.loads(line)["payload"]
+                for line in response.text.splitlines()
+                if '"type":"approval.required"' in line
+            ),
+            None,
+        )
+        if approval_line is not None:
+            pending_tool_names.append(approval_line["tool_name"])
+            edited_payload: dict[str, str] = {}
+            if approval_line["tool_name"] == "create_checklist":
+                edited_payload = {
+                    "title": "Departure shortage checklist",
+                    "content": "- Pack lantern batteries\n- Refill translator phone credits\n",
+                }
+            elif approval_line["tool_name"] == "create_report":
+                edited_payload = {
+                    "title": "Mining Video Review Report",
+                    "content": (
+                        "Mining Video Review Report\n\n"
+                        "Key points:\n"
+                        "- Workers are visible near excavation equipment.\n"
+                        "- The review remains conservative and sampled-frame based.\n"
+                    ),
+                }
+            elif approval_line["tool_name"] == "export_brief":
+                edited_payload = {
+                    "title": "Field Assistant Architecture Brief",
+                    "content": (
+                        "Field Assistant Architecture Brief\n\n"
+                        "Key points:\n"
+                        "- Local-first assistant built on Gemma.\n"
+                        "- Uses bounded routing, retrieval, vision, and approvals.\n"
+                    ),
+                }
+            decision = client.post(
+                f"/v1/approvals/{approval_line['id']}/decisions",
+                json={"action": "approve", "edited_payload": edited_payload},
+            )
+            assert decision.status_code == 200
+
+    assert pending_tool_names == ["create_checklist", "export_brief"]
+    assert completed_texts[11] == "Of course. I'm here when you want to keep going."
+    assert completed_texts[12] == "Hey. What's up?"
+    assert "field assistant architecture brief" in completed_texts[20].lower()
+    assert "there is no current report yet" in completed_texts[22].lower()
+    assert "lantern batteries" in completed_texts[24].lower()
+    assert "pit edge" not in completed_texts[24].lower()
+    assert "mining clip" not in completed_texts[24].lower()
 
 
 def test_follow_up_can_target_earlier_checklist_even_after_newer_export_draft(

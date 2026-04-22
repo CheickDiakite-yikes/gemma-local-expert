@@ -712,6 +712,113 @@ def test_context_service_preserves_earlier_image_across_longer_transcript_with_c
     assert "lantern batteries" in snapshot.selected_context_summary.lower()
 
 
+def test_context_service_keeps_earlier_image_summary_after_checklist_and_casual_turns() -> None:
+    service = ConversationContextService()
+    image_asset = AssetSummary(
+        id="asset_image",
+        display_name="board.png",
+        source_path="board.png",
+        kind=AssetKind.IMAGE,
+    )
+    video_asset = AssetSummary(
+        id="asset_video",
+        display_name="mine.mov",
+        source_path="mine.mov",
+        kind=AssetKind.VIDEO,
+    )
+
+    transcript = [
+        TranscriptMessage(
+            id="msg1",
+            role="user",
+            content="Describe the attached supply image conservatively.",
+            assets=[image_asset],
+        ),
+        TranscriptMessage(
+            id="msg2",
+            role="assistant",
+            content="From the image, lantern batteries look low.",
+        ),
+        TranscriptMessage(
+            id="msg3",
+            role="user",
+            content="Which two shortages matter most before departure?",
+        ),
+        TranscriptMessage(
+            id="msg4",
+            role="assistant",
+            content=(
+                "The two shortages that matter most before departure are lantern batteries "
+                "and translator phone credits."
+            ),
+        ),
+        TranscriptMessage(
+            id="msg5",
+            role="user",
+            content="Create a checklist from those two shortages for tomorrow morning.",
+        ),
+        TranscriptMessage(
+            id="msg6",
+            role="assistant",
+            content="I drafted a checklist here.",
+        ),
+        TranscriptMessage(
+            id="msg7",
+            role="user",
+            content="What is that checklist called?",
+        ),
+        TranscriptMessage(
+            id="msg8",
+            role="assistant",
+            content='The latest checklist is titled "Departure shortage checklist".',
+        ),
+        TranscriptMessage(
+            id="msg9",
+            role="user",
+            content="Thanks",
+        ),
+        TranscriptMessage(
+            id="msg10",
+            role="assistant",
+            content="Of course. I'm here when you want to keep going.",
+        ),
+        TranscriptMessage(
+            id="msg11",
+            role="user",
+            content="Actually just talk normally with me for a second.",
+        ),
+        TranscriptMessage(
+            id="msg12",
+            role="assistant",
+            content="Yes. We can just talk this through.",
+        ),
+        TranscriptMessage(
+            id="msg13",
+            role="user",
+            content="Review the attached mining video conservatively.",
+            assets=[video_asset],
+        ),
+        TranscriptMessage(
+            id="msg14",
+            role="assistant",
+            content="Reviewed the attached mining clip conservatively. I can see workers near excavation equipment.",
+        ),
+    ]
+
+    snapshot = service.build(
+        turn_text="Go back to the earlier image for a second. Which shortage mattered most?",
+        transcript=transcript,
+        attached_assets=[],
+    )
+
+    assert snapshot.selected_context_kind == "image"
+    assert snapshot.selected_context_assets
+    assert snapshot.selected_context_assets[0].id == "asset_image"
+    assert snapshot.selected_context_summary is not None
+    assert "shortages that matter most" in snapshot.selected_context_summary.lower()
+    assert "departure shortage checklist" not in snapshot.selected_context_summary.lower()
+
+
 def test_context_service_selects_persisted_grounded_evidence_for_earlier_video() -> None:
     service = ConversationContextService()
     video_asset = AssetSummary(

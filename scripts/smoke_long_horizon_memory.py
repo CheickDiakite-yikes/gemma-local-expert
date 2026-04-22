@@ -76,6 +76,8 @@ def main() -> None:
             ("Which two shortages matter most before departure?", []),
             ("Create a checklist from those two shortages for tomorrow morning.", []),
             ("What is that checklist called?", []),
+            ("Thanks", []),
+            ("yoo", []),
             ("Actually just talk normally with me for a second.", []),
             ("Review the attached mining video conservatively.", [video_asset["id"]]),
             ("Summarize what stands out in that video, but keep it cautious.", []),
@@ -150,15 +152,16 @@ def main() -> None:
         assert completed_texts[5].lower().startswith("in one sentence:")
         assert "grounded in [ors guidance]" in completed_texts[5].lower()
         assert "stop and escalate if you see worsening weakness, confusion, or inability to drink" in completed_texts[6].lower()
-        assert "field assistant architecture brief" in completed_texts[18].lower()
-        assert "local-first assistant built on gemma" in completed_texts[18].lower()
-        assert "bounded routing" in completed_texts[18].lower()
+        assert completed_texts[11] == "Of course. I'm here when you want to keep going."
+        assert completed_texts[12] == "Hey. What's up?"
+        assert "field assistant architecture brief" in completed_texts[20].lower()
+        assert "local-first assistant built on gemma" in completed_texts[20].lower()
+        assert "bounded routing" in completed_texts[20].lower()
+        assert "lantern batteries" in completed_texts[24].lower()
+        assert "pit edge" not in completed_texts[24].lower()
 
         memory_summaries = [memory.summary.lower() for memory in memories]
-        assert any(
-            "lantern batteries" in summary and "current work product" not in summary
-            for summary in memory_summaries
-        )
+        assert len(memory_summaries) <= 3
         assert any(
             "markdown export" in summary
             and "i reviewed" not in summary
@@ -169,6 +172,16 @@ def main() -> None:
             "start with the core action from [ors guidance]" in summary
             and "here is a practical way" not in summary
             for summary in memory_summaries
+        )
+        assert not any(
+            phrase in summary
+            for summary in memory_summaries
+            for phrase in {
+                "current work product",
+                "of course. i'm here when you want to keep going",
+                "hey. what's up",
+                "yes. we can just talk this through",
+            }
         )
 
         print("\nMEMORIES")

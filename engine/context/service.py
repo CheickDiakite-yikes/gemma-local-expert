@@ -1578,6 +1578,29 @@ class ConversationContextService:
             score -= 2
         if lowered_excerpt.startswith("from the image") and "shortage" not in lowered_excerpt:
             score -= 1
+        if any(
+            phrase in lowered_excerpt
+            for phrase in {
+                "is titled",
+                "latest checklist",
+                "latest export",
+                "latest report",
+                "current report",
+                "drafted a checklist",
+                "drafted a report",
+                "drafted a markdown export",
+            }
+        ):
+            score -= 10
+        if any(
+            phrase in lowered_excerpt
+            for phrase in {
+                "of course. i'm here when you want to keep going",
+                "yes. we can just talk this through",
+                "hey. what's up",
+            }
+        ):
+            score -= 10
         return score
 
     def _work_product_excerpt(self, payload: dict[str, object] | None) -> str | None:

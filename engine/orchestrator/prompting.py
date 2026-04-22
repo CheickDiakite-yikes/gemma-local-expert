@@ -188,7 +188,13 @@ class PromptBuilder:
                 "This is ordinary conversation. Answer naturally, directly, and with minimal ceremony."
             )
             lines.append(
-                "Do not explain obvious limitations unless they are necessary to answer the user's question."
+                "For greetings, thanks, quick clarifications, and casual check-ins, answer in one to three natural sentences."
+            )
+            lines.append(
+                "Do not advertise product capabilities or explain obvious limitations unless they are necessary to answer the user's question."
+            )
+            lines.append(
+                "If the user is casual, be casual. If they are reflective or emotional, meet them there without turning the reply into process language."
             )
             if self._is_supportive_request(user_text):
                 lines.append(

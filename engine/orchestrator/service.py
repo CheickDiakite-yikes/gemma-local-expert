@@ -23,6 +23,7 @@ from engine.contracts.api import (
     ExecutionMode,
     GroundingStatus,
     RuntimeProfile,
+    SearchResultItem,
     SourceDomain,
     TranscriptMessage,
 )
@@ -34,6 +35,7 @@ from engine.models.runtime import (
     AssistantGenerationResult,
     AssistantRuntime,
     MemoryFocusResult,
+    MockAssistantRuntime,
 )
 from engine.models.video import VideoAnalysisRequest, VideoAsset, VideoRuntime
 from engine.models.vision import VisionAnalysisRequest, VisionAsset, VisionRuntime
@@ -80,6 +82,7 @@ class OrchestratorService:
         self.audit = audit
         self.context_service = ConversationContextService()
         self.memory_service = ConversationMemoryService(runtime)
+        self.conversation_shortcut_runtime = MockAssistantRuntime()
 
     async def stream_turn(
         self, turn: ConversationTurnRequest
@@ -92,10 +95,7 @@ class OrchestratorService:
         )
         prior_transcript = self.store.list_transcript(
             turn.conversation_id,
-            limit=max(
-                self.settings.continuity_history_limit,
-                self.settings.conversation_history_limit,
-            ),
+            limit=self._continuity_transcript_limit(),
         )
         recent_memories = self.store.list_conversation_memories(
             turn.conversation_id,
@@ -828,50 +828,67 @@ class OrchestratorService:
                     else None
                 ),
             )
-
-            generation = self.runtime.generate(
-                AssistantGenerationRequest(
-                    conversation_id=turn.conversation_id,
-                    turn_id=turn_id,
-                    mode=turn.mode,
-                    user_text=turn.text,
-                    messages=prompt_context.messages,
-                    citations=results,
-                    interaction_kind=route.interaction_kind,
-                    is_follow_up=route.is_follow_up,
-                    active_topic=conversation_context.active_topic,
-                    conversation_context_summary="\n".join(conversation_context.prompt_lines()) or None,
-                    selected_memory_topic=conversation_context.selected_memory_topic,
-                    selected_memory_summary=conversation_context.selected_memory_summary,
-                    memory_focus_kind=conversation_context.memory_focus_kind,
-                    memory_focus_reason=conversation_context.memory_focus_reason,
-                    memory_focus_confidence=conversation_context.memory_focus_confidence,
-                    memory_focus_topic_frame=conversation_context.memory_focus_topic_frame,
-                    memory_focus_clarifying_question=conversation_context.memory_focus_clarifying_question,
-                    referent_kind=conversation_context.selected_referent_kind,
-                    referent_tool=conversation_context.selected_referent_tool,
-                    referent_title=conversation_context.selected_referent_title,
-                    referent_summary=conversation_context.selected_referent_summary,
-                    referent_excerpt=conversation_context.selected_referent_excerpt,
-                    proposed_tool=planned_tool_name,
-                    approval_required=approval_required,
-                    tool_result=tool_result
-                    or (
-                        {"message": tool_feedback, "status": "grounding_blocked"}
-                        if tool_feedback and not planned_tool_name
-                        else None
-                    ),
-                    assistant_model_name=model_selection.assistant_model,
-                    assistant_model_source=model_selection.assistant_model_source,
-                    specialist_model_name=model_selection.specialist_model,
-                    evidence_packet=evidence_packet,
-                    specialist_analysis_text=specialist_analysis.text if specialist_analysis else None,
-                    workspace_summary_text=workspace_summary,
-                    max_tokens=self.settings.assistant_max_tokens,
-                    temperature=self.settings.assistant_temperature,
-                    top_p=self.settings.assistant_top_p,
-                )
+            generation_request = AssistantGenerationRequest(
+                conversation_id=turn.conversation_id,
+                turn_id=turn_id,
+                mode=turn.mode,
+                user_text=turn.text,
+                messages=prompt_context.messages,
+                citations=results,
+                interaction_kind=route.interaction_kind,
+                is_follow_up=route.is_follow_up,
+                active_topic=conversation_context.active_topic,
+                conversation_context_summary="\n".join(conversation_context.prompt_lines()) or None,
+                selected_memory_topic=conversation_context.selected_memory_topic,
+                selected_memory_summary=conversation_context.selected_memory_summary,
+                memory_focus_kind=conversation_context.memory_focus_kind,
+                memory_focus_reason=conversation_context.memory_focus_reason,
+                memory_focus_confidence=conversation_context.memory_focus_confidence,
+                memory_focus_topic_frame=conversation_context.memory_focus_topic_frame,
+                memory_focus_clarifying_question=conversation_context.memory_focus_clarifying_question,
+                referent_kind=conversation_context.selected_referent_kind,
+                referent_tool=conversation_context.selected_referent_tool,
+                referent_title=conversation_context.selected_referent_title,
+                referent_summary=conversation_context.selected_referent_summary,
+                referent_excerpt=conversation_context.selected_referent_excerpt,
+                proposed_tool=planned_tool_name,
+                approval_required=approval_required,
+                tool_result=tool_result
+                or (
+                    {"message": tool_feedback, "status": "grounding_blocked"}
+                    if tool_feedback and not planned_tool_name
+                    else None
+                ),
+                assistant_model_name=model_selection.assistant_model,
+                assistant_model_source=model_selection.assistant_model_source,
+                specialist_model_name=model_selection.specialist_model,
+                evidence_packet=evidence_packet,
+                specialist_analysis_text=specialist_analysis.text if specialist_analysis else None,
+                workspace_summary_text=workspace_summary,
+                max_tokens=self.settings.assistant_max_tokens,
+                temperature=self.settings.assistant_temperature,
+                top_p=self.settings.assistant_top_p,
             )
+            if self._should_use_conversational_shortcut(
+                turn_text=turn.text,
+                route=route,
+                results=results,
+                evidence_packet=evidence_packet,
+                specialist_analysis_text=specialist_analysis.text if specialist_analysis else None,
+                workspace_summary=workspace_summary,
+                planned_tool_name=planned_tool_name,
+                tool_result=tool_result,
+                approval_required=approval_required,
+            ):
+                shortcut = self.conversation_shortcut_runtime.generate(generation_request)
+                generation = AssistantGenerationResult(
+                    text=shortcut.text,
+                    backend="deterministic",
+                    model_name="conversation-shortcut",
+                    model_source=None,
+                )
+            else:
+                generation = self.runtime.generate(generation_request)
         self.audit.record(
             "assistant.generated",
             conversation_id=turn.conversation_id,
@@ -1652,6 +1669,13 @@ class OrchestratorService:
             return title.strip()
         return None
 
+    def _continuity_transcript_limit(self) -> int:
+        return max(
+            self.settings.continuity_history_limit,
+            self.settings.conversation_history_limit,
+            96,
+        )
+
     def _tool_plan_excerpt(self, payload: dict[str, object] | None) -> str | None:
         _, excerpt = self.context_service.describe_payload(payload)
         return excerpt
@@ -1755,4 +1779,77 @@ class OrchestratorService:
         return (
             False,
             "I cannot prepare a durable draft from this turn yet because the local evidence path did not produce grounded extraction.",
+        )
+
+    def _should_use_conversational_shortcut(
+        self,
+        *,
+        turn_text: str,
+        route,
+        results: list[SearchResultItem],
+        evidence_packet: EvidencePacket | None,
+        specialist_analysis_text: str | None,
+        workspace_summary: str | None,
+        planned_tool_name: str | None,
+        tool_result: dict[str, object] | None,
+        approval_required: bool,
+    ) -> bool:
+        lowered = turn_text.lower().strip()
+        if not (
+            route.interaction_kind == "conversation"
+            or self._looks_like_gratitude_turn(lowered)
+            or self._looks_like_casual_greeting_turn(lowered)
+            or self._looks_like_plain_conversation_turn(lowered)
+            or self._looks_like_supportive_turn(lowered)
+        ):
+            return False
+        if results or evidence_packet or specialist_analysis_text or workspace_summary:
+            return False
+        if planned_tool_name or tool_result:
+            return False
+        return True
+
+    def _looks_like_gratitude_turn(self, lowered: str) -> bool:
+        return lowered in {"thanks", "thank you", "appreciate it", "thx", "ty"}
+
+    def _looks_like_casual_greeting_turn(self, lowered: str) -> bool:
+        return bool(
+            lowered == "how are you"
+            or re.match(r"^(hi|hello|hey|yo|yoo|sup|what's up|whats up)\b$", lowered)
+        )
+
+    def _looks_like_plain_conversation_turn(self, lowered: str) -> bool:
+        return any(
+            phrase in lowered
+            for phrase in {
+                "talk normally",
+                "just talk",
+                "just chat",
+                "chat normally",
+                "think out loud",
+                "keep this conversational",
+            }
+        )
+
+    def _looks_like_supportive_turn(self, lowered: str) -> bool:
+        return any(
+            phrase in lowered
+            for phrase in {
+                "i'm anxious",
+                "i am anxious",
+                "i'm nervous",
+                "i am nervous",
+                "i'm overwhelmed",
+                "i am overwhelmed",
+                "i'm stressed",
+                "i am stressed",
+                "i'm worried",
+                "i am worried",
+                "calm me down",
+                "help me calm down",
+                "talk me down",
+                "reassure me",
+                "no checklist right now",
+                "like a normal person would",
+            }
         )
