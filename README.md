@@ -37,6 +37,7 @@ If you want the shortest mental model, it is this:
 - [Product Principles](#product-principles)
 - [Architecture Overview](#architecture-overview)
 - [Agentic Architecture](#agentic-architecture)
+- [Codex-Informed Direction](#codex-informed-direction)
 - [Continuity, Memory, and Context Resolution](#continuity-memory-and-context-resolution)
 - [Routing and Specialist Selection](#routing-and-specialist-selection)
 - [Workspace Agent Runs](#workspace-agent-runs)
@@ -506,6 +507,50 @@ The repo currently prefers:
 
 Subagents may be worth adding later in carefully scoped ways, but they are not
 the current architecture.
+
+## Codex-Informed Direction
+
+This repository is increasingly informed by the upstream
+[`openai/codex`](https://github.com/openai/codex) architecture, but not in a
+copy-the-product sense.
+
+The important lessons are structural:
+
+- use a stronger `thread -> turn -> item` mental model instead of treating the
+  transcript as the only source of truth
+- make workspace identity explicit as runtime state, not a vague side effect of
+  memory or UI
+- keep `AGENTS.md` and explicit repo guidance separate from generated memories
+- model sandboxing, approvals, and execution policy as turn policy rather than
+  scattering those concerns across UI and engine code
+- treat document editing and security approval as different things
+
+The sharp translation for this repository is:
+
+- one visible assistant
+- one orchestrator
+- explicit workspace binding
+- explicit turn policy
+- canonical thread state
+- derived memory as a secondary layer
+- document-first draft surfaces instead of permission-shaped draft UX
+
+This is especially relevant to the current gaps in this repo.
+
+Many of the hardest bugs we have hit were not "the model forgot."
+
+They were disagreements between:
+
+- transcript state
+- approval ownership
+- workspace identity
+- memory selection
+- UI surface ownership
+
+That is exactly the kind of architectural coherence Codex gets right.
+
+See [docs/codex-architecture-learnings.md](/Users/cheickdiakite/Codex/gemma-local-expert/docs/codex-architecture-learnings.md)
+for the deeper comparison and the concrete adoption plan.
 
 ## Continuity, Memory, and Context Resolution
 
@@ -1841,6 +1886,13 @@ The current design requires approval for important actions such as:
 - markdown export
 - derived overlay generation
 
+One important design clarification from the Codex comparison is that security
+approvals and document collaboration should not be the same UX.
+
+Approval should remain the boundary for durable execution and risky capability.
+
+It should not be the main surface for simply reading or editing a draft.
+
 ### Workspace boundaries
 
 The workspace agent is intentionally limited to the configured workspace root.
@@ -2102,6 +2154,8 @@ Key docs in this repo:
 - [offline-field-assistant-v1-product-spec.md](/Users/cheickdiakite/Codex/gemma-local-expert/offline-field-assistant-v1-product-spec.md)
 - [offline-field-assistant-v1-technical-architecture.md](/Users/cheickdiakite/Codex/gemma-local-expert/offline-field-assistant-v1-technical-architecture.md)
 - [gemma-local-agent-architecture.md](/Users/cheickdiakite/Codex/gemma-local-expert/gemma-local-agent-architecture.md)
+- [docs/codex-architecture-learnings.md](/Users/cheickdiakite/Codex/gemma-local-expert/docs/codex-architecture-learnings.md)
+- [docs/codex-alignment-tracker.md](/Users/cheickdiakite/Codex/gemma-local-expert/docs/codex-alignment-tracker.md)
 - [CONTRIBUTING.md](/Users/cheickdiakite/Codex/gemma-local-expert/CONTRIBUTING.md)
 - [contracts/openapi/field-assistant.openapi.json](/Users/cheickdiakite/Codex/gemma-local-expert/contracts/openapi/field-assistant.openapi.json)
 

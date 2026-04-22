@@ -77,12 +77,32 @@ class GroundingStatus(str, Enum):
     UNAVAILABLE = "unavailable"
 
 
+class SandboxMode(str, Enum):
+    READ_ONLY = "read_only"
+    WORKSPACE_WRITE = "workspace_write"
+    DANGER_FULL_ACCESS = "danger_full_access"
+
+
+class ApprovalMode(str, Enum):
+    NONE = "none"
+    DURABLE_WRITE = "durable_write"
+    MEDICAL_STRICT = "medical_strict"
+
+
 class ConversationMemoryKind(str, Enum):
     GENERAL = "general"
     TEACHING = "teaching"
     MEDIA = "media"
     WORKSPACE = "workspace"
     OUTPUT = "output"
+
+
+class ConversationItemKind(str, Enum):
+    USER_MESSAGE = "user_message"
+    ASSISTANT_MESSAGE = "assistant_message"
+    EVIDENCE_PACKET = "evidence_packet"
+    APPROVAL = "approval"
+    AGENT_RUN = "agent_run"
 
 
 class StreamEventType(str, Enum):
@@ -148,6 +168,30 @@ class ConversationMessage(StrictModel):
     content: str
 
 
+class TurnExecutionPolicy(StrictModel):
+    workspace_root: str
+    cwd: str
+    sandbox_mode: SandboxMode = SandboxMode.READ_ONLY
+    network_access: bool = False
+    approval_mode: ApprovalMode = ApprovalMode.NONE
+    active_profile: RuntimeProfile = RuntimeProfile.FULL_LOCAL
+
+
+class ConversationTurnRecord(StrictModel):
+    id: str
+    conversation_id: str
+    mode: AssistantMode = AssistantMode.GENERAL
+    user_text: str
+    workspace_root: str
+    cwd: str
+    policy: TurnExecutionPolicy
+    route_kind: str | None = None
+    user_message_id: str | None = None
+    assistant_message_id: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
 class ConversationMemoryEntry(StrictModel):
     id: str
     conversation_id: str
@@ -186,6 +230,16 @@ class TranscriptMessage(StrictModel):
     assets: list[AssetSummary] = Field(default_factory=list)
     approval: ApprovalState | None = None
     evidence_packet: EvidencePacket | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class ConversationItem(StrictModel):
+    id: str
+    conversation_id: str
+    turn_id: str
+    kind: ConversationItemKind
+    summary: str
+    payload: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utc_now)
 
 

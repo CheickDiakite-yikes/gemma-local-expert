@@ -23,10 +23,13 @@ from engine.contracts.api import (
     AssetKind,
     AssetSummary,
     Conversation,
+    ConversationItem,
+    ConversationItemKind,
     ConversationMessage,
     ConversationMemoryEntry,
     ConversationSummary,
     ConversationCreateRequest,
+    ConversationTurnRecord,
     EvidencePacket,
     ExportRequest,
     ExportResult,
@@ -39,6 +42,7 @@ from engine.contracts.api import (
     SearchResultItem,
     Task,
     TranscriptMessage,
+    TurnExecutionPolicy,
     new_id,
     utc_now,
 )
@@ -90,6 +94,34 @@ class PersistenceStore(Protocol):
     def list_transcript(
         self, conversation_id: str, limit: int = 200
     ) -> list[TranscriptMessage]: ...
+
+    def create_turn_record(
+        self, record: ConversationTurnRecord
+    ) -> ConversationTurnRecord: ...
+
+    def get_turn_record(self, turn_id: str) -> ConversationTurnRecord | None: ...
+
+    def update_turn_record(
+        self,
+        turn_id: str,
+        *,
+        route_kind: str | None | object = _UNSET,
+        policy: TurnExecutionPolicy | object = _UNSET,
+        user_message_id: str | None | object = _UNSET,
+        assistant_message_id: str | None | object = _UNSET,
+        workspace_root: str | object = _UNSET,
+        cwd: str | object = _UNSET,
+    ) -> ConversationTurnRecord: ...
+
+    def list_turn_records(
+        self, conversation_id: str, limit: int = 100
+    ) -> list[ConversationTurnRecord]: ...
+
+    def append_item(self, item: ConversationItem) -> ConversationItem: ...
+
+    def list_items(
+        self, conversation_id: str, *, turn_id: str | None = None, limit: int = 500
+    ) -> list[ConversationItem]: ...
 
     def create_conversation_memory(
         self, entry: ConversationMemoryEntry
@@ -433,6 +465,42 @@ class SQLiteStore:
                     """,
                     (message_id, asset_id),
                 )
+            if turn_id:
+                item_kind = (
+                    ConversationItemKind.USER_MESSAGE
+                    if role == "user"
+                    else ConversationItemKind.ASSISTANT_MESSAGE
+                )
+                item_payload: dict[str, Any] = {
+                    "message_id": message_id,
+                    "role": role,
+                    "asset_ids": list(asset_ids or []),
+                }
+                if evidence_packet is not None:
+                    item_payload["evidence_packet_id"] = evidence_packet.id
+                self._insert_item_locked(
+                    ConversationItem(
+                        id=new_id("item"),
+                        conversation_id=conversation_id,
+                        turn_id=turn_id,
+                        kind=item_kind,
+                        summary=self._summarize_item_text(content),
+                        payload=item_payload,
+                        created_at=created_at,
+                    )
+                )
+                if evidence_packet is not None:
+                    self._insert_item_locked(
+                        ConversationItem(
+                            id=new_id("item"),
+                            conversation_id=conversation_id,
+                            turn_id=turn_id,
+                            kind=ConversationItemKind.EVIDENCE_PACKET,
+                            summary=evidence_packet.summary,
+                            payload=evidence_packet.model_dump(mode="json"),
+                            created_at=created_at,
+                        )
+                    )
             self._connection.commit()
         return TranscriptMessage(
             id=message_id,
@@ -443,6 +511,214 @@ class SQLiteStore:
             evidence_packet=evidence_packet,
             created_at=created_at,
         )
+
+    def create_turn_record(
+        self, record: ConversationTurnRecord
+    ) -> ConversationTurnRecord:
+        with self._lock:
+            self._connection.execute(
+                """
+                INSERT INTO conversation_turns (
+                    id,
+                    conversation_id,
+                    mode,
+                    user_text,
+                    workspace_root,
+                    cwd,
+                    policy_json,
+                    route_kind,
+                    user_message_id,
+                    assistant_message_id,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.id,
+                    record.conversation_id,
+                    record.mode.value,
+                    record.user_text,
+                    record.workspace_root,
+                    record.cwd,
+                    record.policy.model_dump_json(),
+                    record.route_kind,
+                    record.user_message_id,
+                    record.assistant_message_id,
+                    record.created_at.isoformat(),
+                    record.updated_at.isoformat(),
+                ),
+            )
+            self._connection.commit()
+        return record
+
+    def get_turn_record(self, turn_id: str) -> ConversationTurnRecord | None:
+        row = self._fetchone(
+            """
+            SELECT
+                id,
+                conversation_id,
+                mode,
+                user_text,
+                workspace_root,
+                cwd,
+                policy_json,
+                route_kind,
+                user_message_id,
+                assistant_message_id,
+                created_at,
+                updated_at
+            FROM conversation_turns
+            WHERE id = ?
+            """,
+            (turn_id,),
+        )
+        return self._row_to_turn_record(row) if row else None
+
+    def update_turn_record(
+        self,
+        turn_id: str,
+        *,
+        route_kind: str | None | object = _UNSET,
+        policy: TurnExecutionPolicy | object = _UNSET,
+        user_message_id: str | None | object = _UNSET,
+        assistant_message_id: str | None | object = _UNSET,
+        workspace_root: str | object = _UNSET,
+        cwd: str | object = _UNSET,
+    ) -> ConversationTurnRecord:
+        record = self.get_turn_record(turn_id)
+        if record is None:
+            raise KeyError(turn_id)
+
+        next_route_kind = record.route_kind if route_kind is _UNSET else route_kind
+        next_policy = record.policy if policy is _UNSET else policy
+        next_user_message_id = (
+            record.user_message_id if user_message_id is _UNSET else user_message_id
+        )
+        next_assistant_message_id = (
+            record.assistant_message_id
+            if assistant_message_id is _UNSET
+            else assistant_message_id
+        )
+        next_workspace_root = (
+            record.workspace_root if workspace_root is _UNSET else workspace_root
+        )
+        next_cwd = record.cwd if cwd is _UNSET else cwd
+        updated_at = utc_now()
+
+        with self._lock:
+            self._connection.execute(
+                """
+                UPDATE conversation_turns
+                SET
+                    workspace_root = ?,
+                    cwd = ?,
+                    policy_json = ?,
+                    route_kind = ?,
+                    user_message_id = ?,
+                    assistant_message_id = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    next_workspace_root,
+                    next_cwd,
+                    next_policy.model_dump_json(),
+                    next_route_kind,
+                    next_user_message_id,
+                    next_assistant_message_id,
+                    updated_at.isoformat(),
+                    turn_id,
+                ),
+            )
+            self._connection.commit()
+
+        return record.model_copy(
+            update={
+                "workspace_root": next_workspace_root,
+                "cwd": next_cwd,
+                "policy": next_policy,
+                "route_kind": next_route_kind,
+                "user_message_id": next_user_message_id,
+                "assistant_message_id": next_assistant_message_id,
+                "updated_at": updated_at,
+            }
+        )
+
+    def list_turn_records(
+        self, conversation_id: str, limit: int = 100
+    ) -> list[ConversationTurnRecord]:
+        rows = self._fetchall(
+            """
+            SELECT
+                id,
+                conversation_id,
+                mode,
+                user_text,
+                workspace_root,
+                cwd,
+                policy_json,
+                route_kind,
+                user_message_id,
+                assistant_message_id,
+                created_at,
+                updated_at
+            FROM conversation_turns
+            WHERE conversation_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (conversation_id, limit),
+        )
+        rows.reverse()
+        return [self._row_to_turn_record(row) for row in rows]
+
+    def append_item(self, item: ConversationItem) -> ConversationItem:
+        with self._lock:
+            self._insert_item_locked(item)
+            self._connection.commit()
+        return item
+
+    def list_items(
+        self, conversation_id: str, *, turn_id: str | None = None, limit: int = 500
+    ) -> list[ConversationItem]:
+        if turn_id:
+            rows = self._fetchall(
+                """
+                SELECT
+                    id,
+                    conversation_id,
+                    turn_id,
+                    item_kind,
+                    summary,
+                    payload_json,
+                    created_at
+                FROM conversation_items
+                WHERE conversation_id = ? AND turn_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (conversation_id, turn_id, limit),
+            )
+        else:
+            rows = self._fetchall(
+                """
+                SELECT
+                    id,
+                    conversation_id,
+                    turn_id,
+                    item_kind,
+                    summary,
+                    payload_json,
+                    created_at
+                FROM conversation_items
+                WHERE conversation_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (conversation_id, limit),
+            )
+        rows.reverse()
+        return [self._row_to_item(row) for row in rows]
 
     def list_recent_messages(
         self, conversation_id: str, limit: int = 8
@@ -951,6 +1227,7 @@ class SQLiteStore:
             status="pending",
             payload=payload or {},
         )
+        created_at = utc_now()
         with self._lock:
             self._connection.execute(
                 """
@@ -967,8 +1244,25 @@ class SQLiteStore:
                     approval.reason,
                     approval.status,
                     json.dumps(approval.payload),
-                    utc_now().isoformat(),
+                    created_at.isoformat(),
                 ),
+            )
+            self._insert_item_locked(
+                ConversationItem(
+                    id=new_id("item"),
+                    conversation_id=conversation_id,
+                    turn_id=turn_id,
+                    kind=ConversationItemKind.APPROVAL,
+                    summary=f"Pending approval for {tool_name}.",
+                    payload={
+                        "approval_id": approval.id,
+                        "tool_name": tool_name,
+                        "status": approval.status,
+                        "reason": reason,
+                        "run_id": run_id,
+                    },
+                    created_at=created_at,
+                )
             )
             self._connection.commit()
         return approval
@@ -996,10 +1290,27 @@ class SQLiteStore:
             raise KeyError(approval_id)
 
         next_turn_id = turn_id or approval.turn_id
+        updated_at = utc_now()
         with self._lock:
             self._connection.execute(
                 "UPDATE approvals SET payload_json = ?, turn_id = ? WHERE id = ?",
                 (json.dumps(payload), next_turn_id, approval_id),
+            )
+            self._insert_item_locked(
+                ConversationItem(
+                    id=new_id("item"),
+                    conversation_id=approval.conversation_id,
+                    turn_id=next_turn_id,
+                    kind=ConversationItemKind.APPROVAL,
+                    summary=f"Updated pending approval for {approval.tool_name}.",
+                    payload={
+                        "approval_id": approval.id,
+                        "tool_name": approval.tool_name,
+                        "status": approval.status,
+                        "previous_turn_id": approval.turn_id,
+                    },
+                    created_at=updated_at,
+                )
             )
             self._connection.commit()
 
@@ -1160,6 +1471,22 @@ class SQLiteStore:
                     run.updated_at.isoformat(),
                 ),
             )
+            self._insert_item_locked(
+                ConversationItem(
+                    id=new_id("item"),
+                    conversation_id=conversation_id,
+                    turn_id=turn_id,
+                    kind=ConversationItemKind.AGENT_RUN,
+                    summary=goal,
+                    payload={
+                        "run_id": run.id,
+                        "status": run.status.value,
+                        "scope_root": run.scope_root,
+                        "approval_id": run.approval_id,
+                    },
+                    created_at=now,
+                )
+            )
             self._connection.commit()
         return run
 
@@ -1271,6 +1598,23 @@ class SQLiteStore:
                     updated_at.isoformat(),
                     run_id,
                 ),
+            )
+            self._insert_item_locked(
+                ConversationItem(
+                    id=new_id("item"),
+                    conversation_id=run.conversation_id,
+                    turn_id=run.turn_id,
+                    kind=ConversationItemKind.AGENT_RUN,
+                    summary=next_result_summary or run.goal,
+                    payload={
+                        "run_id": run.id,
+                        "status": next_status.value,
+                        "scope_root": next_scope_root,
+                        "approval_id": next_approval_id,
+                        "artifact_ids": next_artifact_ids,
+                    },
+                    created_at=updated_at,
+                )
             )
             self._connection.commit()
 
@@ -1538,6 +1882,33 @@ class SQLiteStore:
             created_at=row["created_at"],
         )
 
+    def _row_to_turn_record(self, row: sqlite3.Row) -> ConversationTurnRecord:
+        return ConversationTurnRecord(
+            id=row["id"],
+            conversation_id=row["conversation_id"],
+            mode=AssistantMode(row["mode"]),
+            user_text=row["user_text"],
+            workspace_root=row["workspace_root"],
+            cwd=row["cwd"],
+            policy=TurnExecutionPolicy.model_validate_json(row["policy_json"]),
+            route_kind=row["route_kind"],
+            user_message_id=row["user_message_id"],
+            assistant_message_id=row["assistant_message_id"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def _row_to_item(self, row: sqlite3.Row) -> ConversationItem:
+        return ConversationItem(
+            id=row["id"],
+            conversation_id=row["conversation_id"],
+            turn_id=row["turn_id"],
+            kind=ConversationItemKind(row["item_kind"]),
+            summary=row["summary"],
+            payload=json.loads(row["payload_json"] or "{}"),
+            created_at=row["created_at"],
+        )
+
     def _row_to_approval(self, row: sqlite3.Row) -> ApprovalState:
         return ApprovalState(
             id=row["id"],
@@ -1657,6 +2028,36 @@ class SQLiteStore:
         for row in rows:
             approvals_by_turn[row["turn_id"]] = self._row_to_approval(row)
         return approvals_by_turn
+
+    def _insert_item_locked(self, item: ConversationItem) -> None:
+        self._connection.execute(
+            """
+            INSERT INTO conversation_items (
+                id,
+                conversation_id,
+                turn_id,
+                item_kind,
+                summary,
+                payload_json,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                item.id,
+                item.conversation_id,
+                item.turn_id,
+                item.kind.value,
+                item.summary,
+                json.dumps(item.payload),
+                item.created_at.isoformat(),
+            ),
+        )
+
+    def _summarize_item_text(self, text: str, limit: int = 180) -> str:
+        cleaned = " ".join(text.split())
+        if len(cleaned) <= limit:
+            return cleaned
+        return cleaned[: limit - 1].rstrip() + "…"
 
     def _tokenize(self, text: str) -> list[str]:
         tokens = re.findall(r"[a-z0-9]+", text.lower())

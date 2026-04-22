@@ -8,9 +8,12 @@ from engine.config.settings import Settings
 from engine.contracts.api import (
     AssetCareContext,
     AssetKind,
+    ApprovalMode,
     ConversationMemoryEntry,
     ConversationMemoryKind,
+    ConversationItemKind,
     SourceDomain,
+    SandboxMode,
     new_id,
 )
 from engine.models.video import VideoAnalysisResult, VideoArtifact
@@ -48,6 +51,75 @@ def test_conversation_turn_streams_completion_event(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     assert "assistant.message.completed" in response.text
+
+
+def test_turn_records_capture_policy_and_items_for_simple_chat(tmp_path: Path) -> None:
+    settings = Settings(database_path=str(tmp_path / "test-turn-records.db"))
+    app = create_app(settings)
+    client = TestClient(app)
+    conversation = client.post("/v1/conversations", json={"title": "Turns", "mode": "general"}).json()
+
+    response = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "general",
+            "text": "Say hello normally.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+
+    assert response.status_code == 200
+    turns = app.state.container.store.list_turn_records(conversation["id"])
+    assert len(turns) == 1
+    turn = turns[0]
+    assert turn.route_kind == "conversation"
+    assert turn.policy.workspace_root == settings.workspace_root
+    assert turn.policy.cwd == settings.workspace_root
+    assert turn.policy.sandbox_mode == SandboxMode.READ_ONLY
+    assert turn.policy.approval_mode == ApprovalMode.NONE
+    assert turn.user_message_id
+    assert turn.assistant_message_id
+
+    items = app.state.container.store.list_items(conversation["id"], turn_id=turn.id)
+    assert [item.kind for item in items] == [
+        ConversationItemKind.USER_MESSAGE,
+        ConversationItemKind.ASSISTANT_MESSAGE,
+    ]
+
+
+def test_durable_turn_persists_approval_item_and_workspace_write_policy(tmp_path: Path) -> None:
+    settings = Settings(database_path=str(tmp_path / "test-turn-approval-ledger.db"))
+    app = create_app(settings)
+    client = TestClient(app)
+    conversation = client.post("/v1/conversations", json={"title": "Draft", "mode": "general"}).json()
+
+    response = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "general",
+            "text": "Create a report summarizing the current field assistant architecture.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+
+    assert response.status_code == 200
+    turns = app.state.container.store.list_turn_records(conversation["id"])
+    assert len(turns) == 1
+    turn = turns[0]
+    assert turn.policy.sandbox_mode == SandboxMode.WORKSPACE_WRITE
+    assert turn.policy.approval_mode == ApprovalMode.DURABLE_WRITE
+
+    items = app.state.container.store.list_items(conversation["id"], turn_id=turn.id)
+    kinds = [item.kind for item in items]
+    assert ConversationItemKind.USER_MESSAGE in kinds
+    assert ConversationItemKind.ASSISTANT_MESSAGE in kinds
+    assert ConversationItemKind.APPROVAL in kinds
 
 
 def test_conversation_listing_and_transcript_endpoints(tmp_path: Path) -> None:

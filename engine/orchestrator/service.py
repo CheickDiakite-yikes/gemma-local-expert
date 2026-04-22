@@ -10,6 +10,7 @@ from engine.config.settings import Settings
 from engine.context.memory import ConversationMemoryService
 from engine.context.service import ConversationContextService
 from engine.contracts.api import (
+    ApprovalMode,
     AgentRun,
     AgentRunStatus,
     AgentRunStep,
@@ -23,9 +24,12 @@ from engine.contracts.api import (
     ExecutionMode,
     GroundingStatus,
     RuntimeProfile,
+    SandboxMode,
     SearchResultItem,
     SourceDomain,
     TranscriptMessage,
+    TurnExecutionPolicy,
+    ConversationTurnRecord,
 )
 from engine.contracts.api import ConversationStreamEvent, ConversationTurnRequest, StreamEventType, new_id
 from engine.models.document import DocumentAnalysisRequest, DocumentAsset, DocumentRuntime
@@ -89,6 +93,17 @@ class OrchestratorService:
     ) -> AsyncIterator[ConversationStreamEvent]:
         self.store.ensure_conversation(turn.conversation_id, turn.mode)
         turn_id = new_id("turn")
+        self.store.create_turn_record(
+            ConversationTurnRecord(
+                id=turn_id,
+                conversation_id=turn.conversation_id,
+                mode=turn.mode,
+                user_text=turn.text,
+                workspace_root=self.settings.workspace_root,
+                cwd=self.settings.workspace_root,
+                policy=self._build_turn_policy(),
+            )
+        )
         history = self.store.list_recent_messages(
             turn.conversation_id,
             limit=self.settings.conversation_history_limit,
@@ -144,13 +159,14 @@ class OrchestratorService:
         contextual_assets = conversation_context.selected_context_assets
         routed_assets = self._merge_assets(attached_assets, contextual_assets)
         attached_asset_ids = [asset.id for asset in attached_assets]
-        self.store.append_transcript(
+        user_message = self.store.append_transcript(
             turn.conversation_id,
             "user",
             turn.text,
             asset_ids=attached_asset_ids,
             turn_id=turn_id,
         )
+        self.store.update_turn_record(turn_id, user_message_id=user_message.id)
         route = self.router.decide(
             turn,
             assets=attached_assets,
@@ -161,6 +177,17 @@ class OrchestratorService:
         if contextual_assets and conversation_context.selected_context_reason:
             route.reasons.append(conversation_context.selected_context_reason)
         policy = self.policy.evaluate(turn, route)
+        self.store.update_turn_record(
+            turn_id,
+            route_kind=route.interaction_kind,
+            policy=self._build_turn_policy(
+                route=route,
+                policy=policy,
+                has_pending_approval=bool(
+                    getattr(conversation_context, "pending_approval_id", None)
+                ),
+            ),
+        )
         model_selection = self.models.select(route)
         assistant_asset_ids: list[str] = []
         tool_result: dict[str, object] | None = None
@@ -260,11 +287,15 @@ class OrchestratorService:
                 models=model_selection.model_dump(),
             ):
                 yield event
-            self.store.append_transcript(
+            blocked_entry = self.store.append_transcript(
                 turn.conversation_id,
                 "assistant",
                 blocked_message,
                 turn_id=turn_id,
+            )
+            self.store.update_turn_record(
+                turn_id,
+                assistant_message_id=blocked_entry.id,
             )
             self._persist_conversation_memory(
                 conversation_id=turn.conversation_id,
@@ -916,13 +947,17 @@ class OrchestratorService:
             },
         ):
             yield event
-        self.store.append_transcript(
+        assistant_entry = self.store.append_transcript(
             turn.conversation_id,
             "assistant",
             assistant_message,
             turn_id=turn_id,
             asset_ids=completed_asset_ids,
             evidence_packet=evidence_packet,
+        )
+        self.store.update_turn_record(
+            turn_id,
+            assistant_message_id=assistant_entry.id,
         )
         self._persist_conversation_memory(
             conversation_id=turn.conversation_id,
@@ -1660,6 +1695,47 @@ class OrchestratorService:
         if not label:
             return None
         return mapping.get(label)
+
+    def _build_turn_policy(
+        self,
+        *,
+        route=None,
+        policy=None,
+        has_pending_approval: bool = False,
+    ) -> TurnExecutionPolicy:
+        sandbox_mode = SandboxMode.READ_ONLY
+        approval_mode = ApprovalMode.NONE
+
+        if route is not None and (
+            getattr(route, "agent_run", False)
+            or getattr(route, "proposed_tool", None)
+            or has_pending_approval
+            or getattr(route, "interaction_kind", None) == "draft_follow_up"
+        ):
+            sandbox_mode = SandboxMode.WORKSPACE_WRITE
+
+        if policy is not None:
+            if policy.approval_required or has_pending_approval:
+                approval_mode = ApprovalMode.DURABLE_WRITE
+            if getattr(route, "specialist_model", None) == "medgemma":
+                approval_mode = ApprovalMode.MEDICAL_STRICT
+
+        return TurnExecutionPolicy(
+            workspace_root=self.settings.workspace_root,
+            cwd=self.settings.workspace_root,
+            sandbox_mode=sandbox_mode,
+            network_access=False,
+            approval_mode=approval_mode,
+            active_profile=self._active_runtime_profile(),
+        )
+
+    def _active_runtime_profile(self) -> RuntimeProfile:
+        low_memory_profile = (
+            self.settings.default_assistant_model == "gemma-4-e2b-it-4bit"
+            and self.settings.specialist_backend == "ocr"
+            and self.settings.embedding_backend == "hash"
+        )
+        return RuntimeProfile.LOW_MEMORY if low_memory_profile else RuntimeProfile.FULL_LOCAL
 
     def _tool_plan_title(self, payload: dict[str, object] | None) -> str | None:
         if not isinstance(payload, dict):
