@@ -1361,9 +1361,7 @@ class SQLiteStore:
         rows.reverse()
         message_ids = [row["id"] for row in rows]
         assets_by_message = self._list_assets_for_messages(message_ids)
-        approvals_by_turn = self._list_approvals_for_turns(
-            [row["turn_id"] for row in rows if row["turn_id"]]
-        )
+        approvals_by_turn = self._list_current_approvals_for_conversation(conversation_id)
         return [
             TranscriptMessage(
                 id=row["id"],
@@ -1844,22 +1842,10 @@ class SQLiteStore:
                     created_at.isoformat(),
                 ),
             )
-            self._insert_item_locked(
-                ConversationItem(
-                    id=new_id("item"),
-                    conversation_id=conversation_id,
-                    turn_id=turn_id,
-                    kind=ConversationItemKind.APPROVAL,
-                    summary=f"Pending approval for {tool_name}.",
-                    payload={
-                        "approval_id": approval.id,
-                        "tool_name": tool_name,
-                        "status": approval.status,
-                        "reason": reason,
-                        "run_id": run_id,
-                    },
-                    created_at=created_at,
-                )
+            self._insert_approval_item_locked(
+                approval,
+                summary=f"Pending approval for {tool_name}.",
+                created_at=created_at,
             )
             self._connection.commit()
         return approval
@@ -1888,30 +1874,21 @@ class SQLiteStore:
 
         next_turn_id = turn_id or approval.turn_id
         updated_at = utc_now()
+        next_approval = approval.model_copy(update={"payload": payload, "turn_id": next_turn_id})
         with self._lock:
             self._connection.execute(
                 "UPDATE approvals SET payload_json = ?, turn_id = ? WHERE id = ?",
                 (json.dumps(payload), next_turn_id, approval_id),
             )
-            self._insert_item_locked(
-                ConversationItem(
-                    id=new_id("item"),
-                    conversation_id=approval.conversation_id,
-                    turn_id=next_turn_id,
-                    kind=ConversationItemKind.APPROVAL,
-                    summary=f"Updated pending approval for {approval.tool_name}.",
-                    payload={
-                        "approval_id": approval.id,
-                        "tool_name": approval.tool_name,
-                        "status": approval.status,
-                        "previous_turn_id": approval.turn_id,
-                    },
-                    created_at=updated_at,
-                )
+            self._insert_approval_item_locked(
+                next_approval,
+                summary=f"Updated pending approval for {approval.tool_name}.",
+                created_at=updated_at,
+                extra_payload={"previous_turn_id": approval.turn_id},
             )
             self._connection.commit()
 
-        return approval.model_copy(update={"payload": payload, "turn_id": next_turn_id})
+        return next_approval
 
     def resolve_approval(
         self,
@@ -1926,14 +1903,20 @@ class SQLiteStore:
 
         status = "approved" if decision.action == "approve" else decision.action.value
         next_payload = approval.payload if payload is None else payload
+        next_approval = approval.model_copy(update={"status": status, "payload": next_payload})
         with self._lock:
             self._connection.execute(
                 "UPDATE approvals SET status = ?, payload_json = ? WHERE id = ?",
                 (status, json.dumps(next_payload), approval_id),
             )
+            self._insert_approval_item_locked(
+                next_approval,
+                summary=f"{approval.tool_name} marked {status}.",
+                created_at=utc_now(),
+            )
             self._connection.commit()
 
-        return approval.model_copy(update={"status": status, "payload": next_payload})
+        return next_approval
 
     def finalize_approval(
         self, approval_id: str, status: str, result: dict[str, Any] | None = None
@@ -1942,6 +1925,8 @@ class SQLiteStore:
         if approval is None:
             raise KeyError(approval_id)
 
+        executed_at = utc_now()
+        next_approval = approval.model_copy(update={"status": status, "result": result})
         with self._lock:
             self._connection.execute(
                 """
@@ -1952,13 +1937,18 @@ class SQLiteStore:
                 (
                     status,
                     json.dumps(result) if result is not None else None,
-                    utc_now().isoformat(),
+                    executed_at.isoformat(),
                     approval_id,
                 ),
             )
+            self._insert_approval_item_locked(
+                next_approval,
+                summary=f"{approval.tool_name} finalized as {status}.",
+                created_at=executed_at,
+            )
             self._connection.commit()
 
-        return approval.model_copy(update={"status": status, "result": result})
+        return next_approval
 
     def create_medical_session(self, conversation_id: str) -> MedicalSession:
         session = MedicalSession(id=new_id("med"), conversation_id=conversation_id)
@@ -2621,6 +2611,16 @@ class SQLiteStore:
             value = remapped.get(key)
             if isinstance(value, str) and value in mapping:
                 remapped[key] = mapping[value]
+        nested_approval = remapped.get("approval")
+        if isinstance(nested_approval, dict):
+            nested = dict(nested_approval)
+            if isinstance(nested.get("id"), str) and nested["id"] in approval_id_map:
+                nested["id"] = approval_id_map[nested["id"]]
+            if isinstance(nested.get("turn_id"), str) and nested["turn_id"] in turn_id_map:
+                nested["turn_id"] = turn_id_map[nested["turn_id"]]
+            if isinstance(nested.get("run_id"), str) and nested["run_id"] in run_id_map:
+                nested["run_id"] = run_id_map[nested["run_id"]]
+            remapped["approval"] = nested
         return remapped
 
     def _list_assets_for_messages(
@@ -2659,24 +2659,66 @@ class SQLiteStore:
             )
         return assets_by_message
 
-    def _list_approvals_for_turns(self, turn_ids: list[str]) -> dict[str, ApprovalState]:
-        if not turn_ids:
-            return {}
-
-        placeholders = ", ".join("?" for _ in turn_ids)
+    def _list_current_approvals_for_conversation(
+        self, conversation_id: str
+    ) -> dict[str, ApprovalState]:
         rows = self._fetchall(
-            f"""
-            SELECT id, conversation_id, turn_id, run_id, tool_name, reason, status, payload_json, result_json
-            FROM approvals
-            WHERE turn_id IN ({placeholders})
+            """
+            SELECT turn_id, payload_json
+            FROM conversation_items
+            WHERE conversation_id = ? AND item_kind = ?
             ORDER BY created_at ASC
             """,
-            tuple(turn_ids),
+            (conversation_id, ConversationItemKind.APPROVAL.value),
         )
-        approvals_by_turn: dict[str, ApprovalState] = {}
+        latest_by_approval_id: dict[str, ApprovalState] = {}
         for row in rows:
-            approvals_by_turn[row["turn_id"]] = self._row_to_approval(row)
+            payload = json.loads(row["payload_json"] or "{}")
+            approval = None
+            if isinstance(payload.get("approval"), dict):
+                approval = ApprovalState.model_validate(payload["approval"])
+            else:
+                approval_id = payload.get("approval_id")
+                if isinstance(approval_id, str):
+                    approval = self.get_approval(approval_id)
+            if approval is None:
+                continue
+            latest_by_approval_id[approval.id] = approval
+
+        approvals_by_turn: dict[str, ApprovalState] = {}
+        for approval in latest_by_approval_id.values():
+            approvals_by_turn[approval.turn_id] = approval
         return approvals_by_turn
+
+    def _insert_approval_item_locked(
+        self,
+        approval: ApprovalState,
+        *,
+        summary: str,
+        created_at: Any,
+        extra_payload: dict[str, Any] | None = None,
+    ) -> None:
+        payload = {
+            "approval_id": approval.id,
+            "tool_name": approval.tool_name,
+            "status": approval.status,
+            "reason": approval.reason,
+            "run_id": approval.run_id,
+            "approval": approval.model_dump(mode="json"),
+        }
+        if extra_payload:
+            payload.update(extra_payload)
+        self._insert_item_locked(
+            ConversationItem(
+                id=new_id("item"),
+                conversation_id=approval.conversation_id,
+                turn_id=approval.turn_id,
+                kind=ConversationItemKind.APPROVAL,
+                summary=summary,
+                payload=payload,
+                created_at=created_at,
+            )
+        )
 
     def _insert_item_locked(self, item: ConversationItem) -> None:
         self._connection.execute(

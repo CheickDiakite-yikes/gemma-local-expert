@@ -39,7 +39,7 @@ For each area, try to keep all three forms of evidence:
 
 | Area | Status | What exists now | Biggest gap |
 | --- | --- | --- | --- |
-| Thread / turn / item state | partial | turn ids everywhere; internal turn record + item ledger exist and are now inspectable through API read paths | not yet the canonical public state contract for clients |
+| Thread / turn / item state | partial | turn ids everywhere; internal turn record + item ledger exist, are inspectable through API read paths, and now back approval ownership/read state | not yet the canonical public state contract for clients |
 | Workspace binding | partial | workspace root exists; bounded workspace runs exist; turn policy now carries workspace binding; conversation state now persists thread-level workspace binding and fork lineage | no isolated background worktree model yet |
 | Turn policy | partial | explicit turn policy now exists and is inspectable through turn state | still minimal and not yet the single source of truth for all permission decisions |
 | Memory layering | partial | `AGENTS.md`, continuity snapshot, derived conversation memory, evidence memory, memory focus | no formal idle-thread memory lifecycle or eligibility rules |
@@ -76,6 +76,8 @@ Move from "messages plus side tables" toward a real internal ledger:
   - evidence packets
   - approvals
   - agent runs
+- approval items now carry full approval snapshots
+- transcript approval ownership is now rehydrated from approval items instead of only from approval table joins
 
 ### Missing
 
@@ -375,7 +377,7 @@ For any important architecture or UX slice, try to maintain:
 - inline canvas is much better than the old approval card, but still not truly document-first
 - workspace identity is now explicit per turn and persisted on the thread, but it is still not a full named-workspace/worktree model
 - turn policy exists and is inspectable, but it is still minimal
-- item ledger exists and is inspectable, but the client still mostly reconstructs state through older transcript conventions
+- item ledger exists, is inspectable, and now backs approval ownership, but the client still mostly reconstructs broader state through older transcript conventions
 - we still do not have isolated background workspaces/worktrees
 - we still do not have richer thread operations like rollback/compact/steer
 
@@ -390,6 +392,7 @@ For any important architecture or UX slice, try to maintain:
 - exposed turn and item inspection through the conversation API
 - added thread archiving as the first real thread lifecycle operation
 - added conversation detail and fork operations with thread lineage + workspace binding
+- moved approval/canvas ownership onto approval item snapshots in the persistence + web client path
 
 ## Operating Rule Going Forward
 

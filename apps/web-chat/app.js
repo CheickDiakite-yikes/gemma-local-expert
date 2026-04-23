@@ -8,6 +8,7 @@ const state = {
   draftMessages: [],
   pendingAttachments: [],
   transcripts: new Map(),
+  conversationItems: new Map(),
   agentRuns: new Map(),
   approvals: new Map(),
   approvalDrafts: new Map(),
@@ -98,6 +99,10 @@ function activeMessages() {
 
 function conversationTranscript(conversationId) {
   return state.transcripts.get(conversationId) ?? [];
+}
+
+function itemsForConversation(conversationId) {
+  return state.conversationItems.get(conversationId) ?? [];
 }
 
 function canUseStorage() {
@@ -224,6 +229,7 @@ function purgeConversationUiState(conversationId) {
   }
 
   state.transcripts.delete(conversationId);
+  state.conversationItems.delete(conversationId);
   state.agentRuns.delete(conversationId);
   state.medicalSessions.delete(conversationId);
   persistApprovalDrafts();
@@ -251,6 +257,84 @@ function upsertAgentRun(conversationId, run) {
   state.agentRuns.set(conversationId, runs);
   hydrateAgentRunsIntoMessages(conversationId);
   return run;
+}
+
+function approvalFromItem(item) {
+  if (!item || item.kind !== "approval") {
+    return null;
+  }
+  const payload = item.payload || {};
+  if (payload.approval && typeof payload.approval === "object") {
+    return payload.approval;
+  }
+  return null;
+}
+
+function hydrateApprovalsIntoMessages(conversationId) {
+  const messages = state.transcripts.get(conversationId);
+  if (!messages) {
+    return;
+  }
+  const items = itemsForConversation(conversationId);
+  const latestApprovalsById = new Map();
+  let itemApprovalCount = 0;
+  for (const item of items) {
+    const approval = approvalFromItem(item);
+    if (!approval?.id) {
+      continue;
+    }
+    itemApprovalCount += 1;
+    latestApprovalsById.set(approval.id, approval);
+    state.approvals.set(approval.id, approval);
+  }
+  if (itemApprovalCount === 0) {
+    return;
+  }
+  const approvalsByTurn = new Map();
+  for (const approval of latestApprovalsById.values()) {
+    if (approval?.turn_id) {
+      approvalsByTurn.set(approval.turn_id, approval);
+    }
+  }
+  for (const message of messages) {
+    if (message.role === "assistant" && message.turnId) {
+      const approval = approvalsByTurn.get(message.turnId) || null;
+      message.approval = approval;
+      if (approval) {
+        message.proposedTool = approval.tool_name || null;
+        message.toolResult = approval.result || null;
+      }
+    }
+  }
+}
+
+function setConversationItems(conversationId, items) {
+  state.conversationItems.set(conversationId, Array.isArray(items) ? items : []);
+  hydrateApprovalsIntoMessages(conversationId);
+}
+
+function upsertApprovalItem(conversationId, approval, summary = "") {
+  if (!conversationId || !approval?.id) {
+    return;
+  }
+  const items = [...itemsForConversation(conversationId)];
+  items.push({
+    id: `local-approval-${approval.id}-${Date.now()}`,
+    conversation_id: conversationId,
+    turn_id: approval.turn_id || null,
+    kind: "approval",
+    summary: summary || `Approval state updated for ${approval.tool_name || "draft"}.`,
+    payload: {
+      approval_id: approval.id,
+      tool_name: approval.tool_name || null,
+      status: approval.status || null,
+      reason: approval.reason || null,
+      run_id: approval.run_id || null,
+      approval,
+    },
+    created_at: new Date().toISOString(),
+  });
+  setConversationItems(conversationId, items);
 }
 
 function hydrateAgentRunsIntoMessages(conversationId) {
@@ -2721,13 +2805,24 @@ async function refreshAgentRuns(conversationId) {
   return runs;
 }
 
+async function refreshConversationItems(conversationId) {
+  if (!conversationId) {
+    return [];
+  }
+  const items = await requestJson(`/v1/conversations/${conversationId}/items`);
+  setConversationItems(conversationId, items);
+  render();
+  return items;
+}
+
 async function openConversation(conversationId) {
   state.activeConversationId = conversationId;
   persistActiveConversation();
   if (!state.transcripts.has(conversationId)) {
-    const [transcript, runs] = await Promise.all([
+    const [transcript, runs, items] = await Promise.all([
       requestJson(`/v1/conversations/${conversationId}/messages`),
       requestJson(`/v1/conversations/${conversationId}/runs`),
+      requestJson(`/v1/conversations/${conversationId}/items`),
     ]);
     state.agentRuns.set(conversationId, runs);
     const runsByTurn = new Map(
@@ -2753,9 +2848,10 @@ async function openConversation(conversationId) {
         loading: false,
       })),
     );
+    setConversationItems(conversationId, items);
     pruneResolvedApprovalDrafts(state.transcripts.get(conversationId));
   } else {
-    await refreshAgentRuns(conversationId);
+    await Promise.all([refreshAgentRuns(conversationId), refreshConversationItems(conversationId)]);
     pruneResolvedApprovalDrafts(state.transcripts.get(conversationId));
   }
   render();
@@ -3468,25 +3564,16 @@ function handleStreamEvent(event) {
     const runPayload = approvalPayload.run || null;
     delete approvalPayload.run;
     clearApprovalDraft(approvalPayload.id);
-    const targetMessage =
-      activeMessages().find(
-        (message) =>
-          message.approval?.id === approvalPayload.id ||
-          (message.role === "assistant" && message.turnId === approvalPayload.turn_id),
-      ) || null;
-    if (targetMessage) {
-      if (runPayload) {
-        const storedRun = upsertAgentRun(event.conversation_id, runPayload);
-        targetMessage.agentRun = storedRun;
-      }
-      targetMessage.approval = approvalPayload;
-      if (targetMessage !== assistantMessage) {
-        assistantMessage.agentRun = null;
-      }
+    if (runPayload) {
+      upsertAgentRun(event.conversation_id, runPayload);
     } else {
       syncRunFromEvent(event.conversation_id, assistantMessage, event.payload);
-      assistantMessage.approval = approvalPayload;
     }
+    upsertApprovalItem(
+      event.conversation_id,
+      approvalPayload,
+      `Pending approval for ${approvalPayload.tool_name || "draft"}.`,
+    );
     state.approvals.set(approvalPayload.id, approvalPayload);
     const detail = "A durable action is ready for review and approval.";
     mergeMessageProcess(assistantMessage, {
@@ -3521,14 +3608,16 @@ async function submitApprovalDecision(approvalId, action, editedPayload = {}) {
     clearApprovalDraft(approvalId);
     state.approvalErrors.delete(approvalId);
     state.approvals.set(approvalId, approval);
-    const messages = activeMessages();
-    for (const message of messages) {
-      if (message.approval && message.approval.id === approvalId) {
-        message.approval = approval;
-      }
-    }
     if (state.activeConversationId) {
-      await refreshAgentRuns(state.activeConversationId);
+      upsertApprovalItem(
+        state.activeConversationId,
+        approval,
+        `Approval state updated for ${approval.tool_name || "draft"}.`,
+      );
+      await Promise.all([
+        refreshAgentRuns(state.activeConversationId),
+        refreshConversationItems(state.activeConversationId),
+      ]);
     }
     render();
   } catch (error) {

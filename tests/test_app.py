@@ -641,6 +641,22 @@ def test_transcript_rehydrates_executed_approval_state(tmp_path: Path) -> None:
     assert approval_response.status_code == 200
     assert approval_response.json()["status"] == "executed"
 
+    items_response = client.get(f"/v1/conversations/{conversation['id']}/items")
+    assert items_response.status_code == 200
+    approval_items = [item for item in items_response.json() if item["kind"] == "approval"]
+    assert approval_items
+    latest_approval = approval_items[-1]["payload"]["approval"]
+    assert latest_approval["id"] == approval_id
+    assert latest_approval["status"] == "executed"
+
+    transcript_response = client.get(f"/v1/conversations/{conversation['id']}/messages")
+    assert transcript_response.status_code == 200
+    assistant_message = next(
+        message for message in transcript_response.json() if message["role"] == "assistant"
+    )
+    assert assistant_message["approval"]["id"] == approval_id
+    assert assistant_message["approval"]["status"] == "executed"
+
 
 def test_report_turn_requires_approval_and_persists_report_kind(tmp_path: Path) -> None:
     settings = Settings(database_path=str(tmp_path / "test-report-approval.db"))
@@ -747,6 +763,53 @@ def test_pending_report_follow_up_can_update_same_report_before_save(tmp_path: P
     assert latest_assistant["approval"]["id"] == approval_event["payload"]["id"]
     assert (
         latest_assistant["approval"]["payload"]["content"]
+        == approval_event["payload"]["payload"]["content"]
+    )
+
+    items_response = client.get(f"/v1/conversations/{conversation['id']}/items")
+    assert items_response.status_code == 200
+    approval_items = [item for item in items_response.json() if item["kind"] == "approval"]
+    assert approval_items
+    latest_approval_item = approval_items[-1]
+    assert latest_approval_item["payload"]["approval"]["id"] == approval_event["payload"]["id"]
+    assert latest_approval_item["payload"]["approval"]["turn_id"] == latest_assistant["turn_id"]
+    assert (
+        latest_approval_item["payload"]["approval"]["payload"]["content"]
+        == approval_event["payload"]["payload"]["content"]
+    )
+
+
+def test_items_endpoint_exposes_full_pending_approval_snapshot_for_canvas_ownership(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(database_path=str(tmp_path / "test-approval-item-snapshot.db"))
+    client = TestClient(create_app(settings))
+    conversation = client.post("/v1/conversations", json={"title": "Snapshot", "mode": "research"}).json()
+
+    response = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Create a report summarizing the current field assistant architecture.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+    assert response.status_code == 200
+    lines = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+    approval_event = next(line for line in lines if line["type"] == "approval.required")
+
+    items_response = client.get(f"/v1/conversations/{conversation['id']}/items")
+    assert items_response.status_code == 200
+    approval_item = next(item for item in items_response.json() if item["kind"] == "approval")
+
+    assert approval_item["payload"]["approval_id"] == approval_event["payload"]["id"]
+    assert approval_item["payload"]["approval"]["id"] == approval_event["payload"]["id"]
+    assert approval_item["payload"]["approval"]["turn_id"] == approval_event["payload"]["turn_id"]
+    assert (
+        approval_item["payload"]["approval"]["payload"]["content"]
         == approval_event["payload"]["payload"]["content"]
     )
 
