@@ -14,6 +14,7 @@ from engine.contracts.api import (
     AgentRun,
     AgentRunStatus,
     AgentRunStep,
+    ApprovalCategory,
     ApprovalDecision,
     ApprovalState,
     AssetAnalysisStatus,
@@ -45,6 +46,7 @@ from engine.contracts.api import (
     LibrarySearchRequest,
     MedicalSession,
     Note,
+    PermissionClass,
     SearchResultItem,
     Task,
     TranscriptMessage,
@@ -214,6 +216,9 @@ class PersistenceStore(Protocol):
         reason: str,
         payload: dict[str, Any] | None = None,
         run_id: str | None = None,
+        category: ApprovalCategory | None = None,
+        permission_classes: list[PermissionClass] | None = None,
+        work_product_context: dict[str, Any] | None = None,
     ) -> ApprovalState: ...
 
     def get_approval(self, approval_id: str) -> ApprovalState | None: ...
@@ -677,6 +682,8 @@ class SQLiteStore:
                     tool_name,
                     reason,
                     status,
+                    category,
+                    permission_classes_json,
                     payload_json,
                     result_json
                 FROM approvals
@@ -934,10 +941,12 @@ class SQLiteStore:
                         tool_name,
                         reason,
                         status,
+                        category,
+                        permission_classes_json,
                         payload_json,
                         result_json,
                         created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         approval_id_map[row["id"]],
@@ -947,6 +956,8 @@ class SQLiteStore:
                         row["tool_name"],
                         row["reason"],
                         row["status"],
+                        row["category"],
+                        row["permission_classes_json"],
                         row["payload_json"],
                         row["result_json"],
                         copied_created_at.isoformat(),
@@ -1961,6 +1972,9 @@ class SQLiteStore:
         reason: str,
         payload: dict[str, Any] | None = None,
         run_id: str | None = None,
+        category: ApprovalCategory | None = None,
+        permission_classes: list[PermissionClass] | None = None,
+        work_product_context: dict[str, Any] | None = None,
     ) -> ApprovalState:
         approval = ApprovalState(
             id=new_id("approval"),
@@ -1970,6 +1984,8 @@ class SQLiteStore:
             tool_name=tool_name,
             reason=reason,
             status="pending",
+            category=category,
+            permission_classes=permission_classes or [],
             payload=payload or {},
         )
         created_at = utc_now()
@@ -1977,8 +1993,18 @@ class SQLiteStore:
             self._connection.execute(
                 """
                 INSERT INTO approvals (
-                    id, conversation_id, turn_id, run_id, tool_name, reason, status, payload_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    id,
+                    conversation_id,
+                    turn_id,
+                    run_id,
+                    tool_name,
+                    reason,
+                    status,
+                    category,
+                    permission_classes_json,
+                    payload_json,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     approval.id,
@@ -1988,6 +2014,8 @@ class SQLiteStore:
                     approval.tool_name,
                     approval.reason,
                     approval.status,
+                    approval.category.value if approval.category is not None else None,
+                    json.dumps([item.value for item in approval.permission_classes]),
                     json.dumps(approval.payload),
                     created_at.isoformat(),
                 ),
@@ -1997,13 +2025,30 @@ class SQLiteStore:
                 summary=f"Pending approval for {tool_name}.",
                 created_at=created_at,
             )
+            self._insert_work_product_item_locked(
+                approval,
+                summary=f"Prepared {tool_name} as the active work product.",
+                created_at=created_at,
+                work_product_context=work_product_context,
+            )
             self._connection.commit()
         return approval
 
     def get_approval(self, approval_id: str) -> ApprovalState | None:
         row = self._fetchone(
             """
-            SELECT id, conversation_id, turn_id, run_id, tool_name, reason, status, payload_json, result_json
+            SELECT
+                id,
+                conversation_id,
+                turn_id,
+                run_id,
+                tool_name,
+                reason,
+                status,
+                category,
+                permission_classes_json,
+                payload_json,
+                result_json
             FROM approvals
             WHERE id = ?
             """,
@@ -2036,6 +2081,12 @@ class SQLiteStore:
                 created_at=updated_at,
                 extra_payload={"previous_turn_id": approval.turn_id},
             )
+            self._insert_work_product_item_locked(
+                next_approval,
+                summary=f"Updated the active {approval.tool_name} work product.",
+                created_at=updated_at,
+                extra_payload={"previous_turn_id": approval.turn_id},
+            )
             self._connection.commit()
 
         return next_approval
@@ -2054,6 +2105,7 @@ class SQLiteStore:
         status = "approved" if decision.action == "approve" else decision.action.value
         next_payload = approval.payload if payload is None else payload
         next_approval = approval.model_copy(update={"status": status, "payload": next_payload})
+        updated_at = utc_now()
         with self._lock:
             self._connection.execute(
                 "UPDATE approvals SET status = ?, payload_json = ? WHERE id = ?",
@@ -2062,7 +2114,12 @@ class SQLiteStore:
             self._insert_approval_item_locked(
                 next_approval,
                 summary=f"{approval.tool_name} marked {status}.",
-                created_at=utc_now(),
+                created_at=updated_at,
+            )
+            self._insert_work_product_item_locked(
+                next_approval,
+                summary=f"{approval.tool_name} work product marked {status}.",
+                created_at=updated_at,
             )
             self._connection.commit()
 
@@ -2094,6 +2151,11 @@ class SQLiteStore:
             self._insert_approval_item_locked(
                 next_approval,
                 summary=f"{approval.tool_name} finalized as {status}.",
+                created_at=executed_at,
+            )
+            self._insert_work_product_item_locked(
+                next_approval,
+                summary=f"{approval.tool_name} work product finalized as {status}.",
                 created_at=executed_at,
             )
             self._connection.commit()
@@ -2208,6 +2270,7 @@ class SQLiteStore:
                     run.updated_at.isoformat(),
                 ),
             )
+            run_payload = run.model_dump(mode="json")
             self._insert_item_locked(
                 ConversationItem(
                     id=new_id("item"),
@@ -2220,6 +2283,8 @@ class SQLiteStore:
                         "status": run.status.value,
                         "scope_root": run.scope_root,
                         "approval_id": run.approval_id,
+                        "artifact_ids": run.artifact_ids,
+                        "run": run_payload,
                     },
                     created_at=now,
                 )
@@ -2336,6 +2401,18 @@ class SQLiteStore:
                     run_id,
                 ),
             )
+            next_run = run.model_copy(
+                update={
+                    "scope_root": next_scope_root,
+                    "status": next_status,
+                    "plan_steps": next_plan_steps,
+                    "executed_steps": next_executed_steps,
+                    "result_summary": next_result_summary,
+                    "artifact_ids": next_artifact_ids,
+                    "approval_id": next_approval_id,
+                    "updated_at": updated_at,
+                }
+            )
             self._insert_item_locked(
                 ConversationItem(
                     id=new_id("item"),
@@ -2349,24 +2426,14 @@ class SQLiteStore:
                         "scope_root": next_scope_root,
                         "approval_id": next_approval_id,
                         "artifact_ids": next_artifact_ids,
+                        "run": next_run.model_dump(mode="json"),
                     },
                     created_at=updated_at,
                 )
             )
             self._connection.commit()
 
-        return run.model_copy(
-            update={
-                "scope_root": next_scope_root,
-                "status": next_status,
-                "plan_steps": next_plan_steps,
-                "executed_steps": next_executed_steps,
-                "result_summary": next_result_summary,
-                "artifact_ids": next_artifact_ids,
-                "approval_id": next_approval_id,
-                "updated_at": updated_at,
-            }
-        )
+        return next_run
 
     def create_note(self, title: str, content: str, kind: str = "note") -> Note:
         note = Note(
@@ -2661,6 +2728,10 @@ class SQLiteStore:
         )
 
     def _row_to_approval(self, row: sqlite3.Row) -> ApprovalState:
+        permission_classes = [
+            PermissionClass(item)
+            for item in json.loads(row["permission_classes_json"] or "[]")
+        ]
         return ApprovalState(
             id=row["id"],
             conversation_id=row["conversation_id"],
@@ -2669,6 +2740,8 @@ class SQLiteStore:
             tool_name=row["tool_name"],
             reason=row["reason"],
             status=row["status"],
+            category=ApprovalCategory(row["category"]) if row["category"] else None,
+            permission_classes=permission_classes,
             payload=json.loads(row["payload_json"] or "{}"),
             result=json.loads(row["result_json"]) if row["result_json"] else None,
         )
@@ -2876,12 +2949,16 @@ class SQLiteStore:
     ) -> dict[str, ApprovalState]:
         rows = self._fetchall(
             """
-            SELECT turn_id, payload_json
+            SELECT turn_id, item_kind, payload_json
             FROM conversation_items
-            WHERE conversation_id = ? AND item_kind = ?
+            WHERE conversation_id = ? AND item_kind IN (?, ?)
             ORDER BY created_at ASC
             """,
-            (conversation_id, ConversationItemKind.APPROVAL.value),
+            (
+                conversation_id,
+                ConversationItemKind.APPROVAL.value,
+                ConversationItemKind.WORK_PRODUCT.value,
+            ),
         )
         latest_by_approval_id: dict[str, ApprovalState] = {}
         for row in rows:
@@ -2902,6 +2979,48 @@ class SQLiteStore:
             approvals_by_turn[approval.turn_id] = approval
         return approvals_by_turn
 
+    def _approval_supports_work_product(self, tool_name: str) -> bool:
+        return tool_name in {
+            "create_note",
+            "create_report",
+            "create_message_draft",
+            "create_checklist",
+            "create_task",
+            "export_brief",
+            "log_observation",
+            "update_note",
+            "update_task",
+        }
+
+    def _latest_work_product_context_locked(
+        self, conversation_id: str, approval_id: str
+    ) -> dict[str, Any]:
+        rows = self._connection.execute(
+            """
+            SELECT payload_json
+            FROM conversation_items
+            WHERE conversation_id = ? AND item_kind = ?
+            ORDER BY created_at DESC
+            LIMIT 128
+            """,
+            (conversation_id, ConversationItemKind.WORK_PRODUCT.value),
+        ).fetchall()
+        for row in rows:
+            payload = json.loads(row["payload_json"] or "{}")
+            if payload.get("approval_id") != approval_id:
+                continue
+            return {
+                key: payload.get(key)
+                for key in (
+                    "source_domain",
+                    "execution_mode",
+                    "grounding_status",
+                    "evidence_packet_id",
+                )
+                if payload.get(key) is not None
+            }
+        return {}
+
     def _insert_approval_item_locked(
         self,
         approval: ApprovalState,
@@ -2915,6 +3034,8 @@ class SQLiteStore:
             "tool_name": approval.tool_name,
             "status": approval.status,
             "reason": approval.reason,
+            "category": approval.category.value if approval.category is not None else None,
+            "permission_classes": [item.value for item in approval.permission_classes],
             "run_id": approval.run_id,
             "approval": approval.model_dump(mode="json"),
         }
@@ -2926,6 +3047,55 @@ class SQLiteStore:
                 conversation_id=approval.conversation_id,
                 turn_id=approval.turn_id,
                 kind=ConversationItemKind.APPROVAL,
+                summary=summary,
+                payload=payload,
+                created_at=created_at,
+            )
+        )
+
+    def _insert_work_product_item_locked(
+        self,
+        approval: ApprovalState,
+        *,
+        summary: str,
+        created_at: Any,
+        extra_payload: dict[str, Any] | None = None,
+        work_product_context: dict[str, Any] | None = None,
+    ) -> None:
+        if not self._approval_supports_work_product(approval.tool_name):
+            return
+        context = self._latest_work_product_context_locked(
+            approval.conversation_id, approval.id
+        )
+        if work_product_context:
+            context.update(
+                {
+                    key: value
+                    for key, value in work_product_context.items()
+                    if value is not None
+                }
+            )
+        payload = {
+            "approval_id": approval.id,
+            "tool_name": approval.tool_name,
+            "status": approval.status,
+            "reason": approval.reason,
+            "category": approval.category.value if approval.category is not None else None,
+            "permission_classes": [item.value for item in approval.permission_classes],
+            "run_id": approval.run_id,
+            "work_product": approval.payload,
+            "result": approval.result,
+            "approval": approval.model_dump(mode="json"),
+            **context,
+        }
+        if extra_payload:
+            payload.update(extra_payload)
+        self._insert_item_locked(
+            ConversationItem(
+                id=new_id("item"),
+                conversation_id=approval.conversation_id,
+                turn_id=approval.turn_id,
+                kind=ConversationItemKind.WORK_PRODUCT,
                 summary=summary,
                 payload=payload,
                 created_at=created_at,

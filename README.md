@@ -437,6 +437,7 @@ user turn
   -> continuity snapshot
   -> memory reranking + MemoryFocus
   -> route decision
+  -> typed turn policy
   -> optional retrieval or specialist analysis
   -> typed evidence packet
   -> optional workspace run
@@ -606,7 +607,9 @@ The current continuity model combines several layers:
 5. **Work-product continuity**
 
    The system tracks pending approval drafts and recent saved outputs as
-   separate referents.
+   separate referents. Active pending drafts now persist as dedicated
+   `work_product` items, so the inline canvas can rehydrate from canonical item
+   state instead of depending only on message-local approval blobs.
 
 6. **Explicit referent selection**
 
@@ -1129,8 +1132,17 @@ Workspace-related tool and approval events can carry:
 - step metadata
 - progress state
 - approval linkage
+- canonical item snapshots for tool proposals, tool results, agent runs, approvals, active `work_product`s, and completed assistant messages
+- tool-descriptor metadata such as permission classes and approval category
+- typed turn policy through the canonical thread state surface
 
-That lets the client render a quieter workbench surface without inventing state.
+That lets the client move toward item-backed live updates instead of inventing
+parallel local state during streaming.
+
+Approval decisions also return canonical approval item snapshots and updated run
+snapshots, and now return canonical `work_product` item snapshots too, so the
+client can merge resolved state immediately and use `/state` as reconciliation
+instead of as the only source of truth after approval.
 
 ### UI contract philosophy
 
@@ -1413,6 +1425,7 @@ The current public local API is intentionally small but real.
 - `GET /v1/system/health`
 - `GET /v1/system/capabilities`
 - `GET /v1/system/tools`
+  exposes typed tool descriptors, including permission classes and approval category
 
 ### Conversations
 
@@ -1457,6 +1470,7 @@ The current public local API is intentionally small but real.
 ### Control surfaces
 
 - `POST /v1/approvals/{approval_id}/decisions`
+  returns the resolved approval plus canonical approval item/run snapshots when available
 - `POST /v1/medical/sessions`
 - `POST /v1/translate`
 
@@ -1471,8 +1485,11 @@ ownership from multiple stitched reads.
 
 `POST /v1/conversations/{conversation_id}/compact` writes a compaction marker
 into thread state, and `POST /v1/conversations/{conversation_id}/steer` writes
-explicit future-turn guidance into thread state. Both are backend-first
-thread-control primitives today; they are not yet polished UI features.
+explicit thread guidance into thread state. Steering now feeds active
+workspace-agent planning and stored run goals, and compaction markers now get
+promoted more aggressively when bounded continuity windows drop older topic
+cues. Both are still backend-first thread-control primitives rather than
+polished UI features.
 
 ### Capabilities truthfulness
 
@@ -1648,6 +1665,7 @@ uv run python scripts/smoke_asset_turn.py --care-context general
 uv run python scripts/smoke_tool_approval.py
 uv run python scripts/smoke_workspace_agent.py --mode summarize
 uv run python scripts/smoke_workspace_agent.py --mode brief
+uv run python scripts/smoke_thread_state_protocol.py
 uv run python scripts/smoke_deep_conversation.py
 ```
 
@@ -1764,6 +1782,7 @@ The smoke scripts cover operational slices such as:
 - tool approval path
 - workspace summarize
 - workspace brief
+- thread / item / state protocol
 - deeper mixed conversation smoke
 
 ### 4. Live browser QA
@@ -1802,6 +1821,18 @@ It exercises a conversation that mixes:
 - supportive normal chat
 - video turn
 - workspace export flow
+- later return to earlier media
+- pending draft recall and shortening before approval
+
+The newer headless smokes now do more than print transcripts.
+
+They assert:
+
+- canonical `tool_proposal`, `tool_result`, `approval`, and `work_product` item snapshots
+- approval categories and permission classes
+- grounded draft refinement behavior for workspace outputs
+- thread controls such as `steer`, `compact`, `fork`, and `rollback`
+- long mixed conversation continuity across casual detours, media turns, and draft recall
 - draft follow-up
 - topic reset
 - approval execution and run inspection
@@ -1904,6 +1935,15 @@ The current design requires approval for important actions such as:
 - observation logging
 - markdown export
 - derived overlay generation
+
+Those boundaries are now typed, not just implied.
+
+Approvals can carry category and capability metadata such as:
+
+- durable write
+- audited export
+- guarded medical specialist workflow
+- permission classes like durable output, audit log, and medical specialist
 
 One important design clarification from the Codex comparison is that security
 approvals and document collaboration should not be the same UX.
@@ -2175,6 +2215,7 @@ Key docs in this repo:
 - [gemma-local-agent-architecture.md](/Users/cheickdiakite/Codex/gemma-local-expert/gemma-local-agent-architecture.md)
 - [docs/codex-architecture-learnings.md](/Users/cheickdiakite/Codex/gemma-local-expert/docs/codex-architecture-learnings.md)
 - [docs/codex-alignment-tracker.md](/Users/cheickdiakite/Codex/gemma-local-expert/docs/codex-alignment-tracker.md)
+- [docs/competitive-roadblocks-research-2026-04-23.md](/Users/cheickdiakite/Codex/gemma-local-expert/docs/competitive-roadblocks-research-2026-04-23.md)
 - [CONTRIBUTING.md](/Users/cheickdiakite/Codex/gemma-local-expert/CONTRIBUTING.md)
 - [contracts/openapi/field-assistant.openapi.json](/Users/cheickdiakite/Codex/gemma-local-expert/contracts/openapi/field-assistant.openapi.json)
 

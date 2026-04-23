@@ -1,50 +1,145 @@
 from __future__ import annotations
 
-from engine.contracts.api import ToolDescriptor
+from engine.contracts.api import ApprovalCategory, PermissionClass, ToolDescriptor
 
 
 class ToolRegistry:
     def __init__(self) -> None:
         self._tools = {
-            "create_note": ToolDescriptor(name="create_note", requires_confirmation=True),
-            "create_report": ToolDescriptor(name="create_report", requires_confirmation=True),
-            "create_message_draft": ToolDescriptor(
-                name="create_message_draft", requires_confirmation=True
+            "create_note": ToolDescriptor(
+                name="create_note",
+                requires_confirmation=True,
+                approval_category=ApprovalCategory.DURABLE_WRITE,
+                approval_summary="Confirmation is required before writing a durable local note.",
+                permission_classes=[
+                    PermissionClass.TOOL_EXECUTION,
+                    PermissionClass.DURABLE_OUTPUT,
+                ],
             ),
-            "update_note": ToolDescriptor(name="update_note", requires_confirmation=True),
-            "create_task": ToolDescriptor(name="create_task", requires_confirmation=True),
-            "update_task": ToolDescriptor(name="update_task", requires_confirmation=True),
+            "create_report": ToolDescriptor(
+                name="create_report",
+                requires_confirmation=True,
+                approval_category=ApprovalCategory.DURABLE_WRITE,
+                approval_summary="Confirmation is required before writing a durable local report.",
+                permission_classes=[
+                    PermissionClass.TOOL_EXECUTION,
+                    PermissionClass.DURABLE_OUTPUT,
+                ],
+            ),
+            "create_message_draft": ToolDescriptor(
+                name="create_message_draft",
+                requires_confirmation=True,
+                approval_category=ApprovalCategory.DURABLE_WRITE,
+                approval_summary="Confirmation is required before saving a message draft locally.",
+                permission_classes=[
+                    PermissionClass.TOOL_EXECUTION,
+                    PermissionClass.DURABLE_OUTPUT,
+                ],
+            ),
+            "update_note": ToolDescriptor(
+                name="update_note",
+                requires_confirmation=True,
+                approval_category=ApprovalCategory.DURABLE_WRITE,
+                approval_summary="Confirmation is required before changing a saved local note.",
+                permission_classes=[
+                    PermissionClass.TOOL_EXECUTION,
+                    PermissionClass.DURABLE_OUTPUT,
+                ],
+            ),
+            "create_task": ToolDescriptor(
+                name="create_task",
+                requires_confirmation=True,
+                approval_category=ApprovalCategory.DURABLE_WRITE,
+                approval_summary="Confirmation is required before creating a durable local task.",
+                permission_classes=[
+                    PermissionClass.TOOL_EXECUTION,
+                    PermissionClass.DURABLE_OUTPUT,
+                ],
+            ),
+            "update_task": ToolDescriptor(
+                name="update_task",
+                requires_confirmation=True,
+                approval_category=ApprovalCategory.DURABLE_WRITE,
+                approval_summary="Confirmation is required before changing a saved local task.",
+                permission_classes=[
+                    PermissionClass.TOOL_EXECUTION,
+                    PermissionClass.DURABLE_OUTPUT,
+                ],
+            ),
             "create_checklist": ToolDescriptor(
-                name="create_checklist", requires_confirmation=True
+                name="create_checklist",
+                requires_confirmation=True,
+                approval_category=ApprovalCategory.DURABLE_WRITE,
+                approval_summary="Confirmation is required before saving a checklist locally.",
+                permission_classes=[
+                    PermissionClass.TOOL_EXECUTION,
+                    PermissionClass.DURABLE_OUTPUT,
+                ],
             ),
             "log_observation": ToolDescriptor(
-                name="log_observation", requires_confirmation=True
+                name="log_observation",
+                requires_confirmation=True,
+                approval_category=ApprovalCategory.DURABLE_WRITE,
+                approval_summary="Confirmation is required before saving a local observation.",
+                permission_classes=[
+                    PermissionClass.TOOL_EXECUTION,
+                    PermissionClass.DURABLE_OUTPUT,
+                ],
             ),
-            "export_brief": ToolDescriptor(name="export_brief", requires_confirmation=True),
+            "export_brief": ToolDescriptor(
+                name="export_brief",
+                requires_confirmation=True,
+                approval_category=ApprovalCategory.AUDITED_EXPORT,
+                approval_summary="Confirmation is required before writing an audited markdown export.",
+                permission_classes=[
+                    PermissionClass.TOOL_EXECUTION,
+                    PermissionClass.DURABLE_OUTPUT,
+                    PermissionClass.AUDIT_LOG,
+                ],
+            ),
             "medical_case_summary": ToolDescriptor(
                 name="medical_case_summary",
                 requires_confirmation=True,
                 namespace="medical",
+                approval_category=ApprovalCategory.MEDICAL_SPECIALIST,
+                approval_summary="Explicit guarded medical specialist review is required.",
+                permission_classes=[
+                    PermissionClass.TOOL_EXECUTION,
+                    PermissionClass.MEDICAL_SPECIALIST,
+                ],
             ),
             "workspace_search": ToolDescriptor(
                 name="workspace_search",
                 requires_confirmation=False,
                 namespace="agent",
+                permission_classes=[
+                    PermissionClass.TOOL_EXECUTION,
+                    PermissionClass.WORKSPACE_AGENT,
+                ],
             ),
             "workspace_read_files": ToolDescriptor(
                 name="workspace_read_files",
                 requires_confirmation=False,
                 namespace="agent",
+                permission_classes=[
+                    PermissionClass.TOOL_EXECUTION,
+                    PermissionClass.WORKSPACE_AGENT,
+                ],
             ),
             "workspace_summarize": ToolDescriptor(
                 name="workspace_summarize",
                 requires_confirmation=False,
                 namespace="agent",
+                permission_classes=[
+                    PermissionClass.TOOL_EXECUTION,
+                    PermissionClass.WORKSPACE_AGENT,
+                ],
             ),
             "generate_heatmap_overlay": ToolDescriptor(
                 name="generate_heatmap_overlay",
                 requires_confirmation=False,
                 namespace="vision",
+                permission_classes=[PermissionClass.TOOL_EXECUTION],
             ),
         }
 
@@ -54,6 +149,9 @@ class ToolRegistry:
     def requires_confirmation(self, tool_name: str) -> bool:
         tool = self._tools.get(tool_name)
         return bool(tool and tool.requires_confirmation)
+
+    def descriptor_for(self, tool_name: str) -> ToolDescriptor | None:
+        return self._tools.get(tool_name)
 
     def namespace_for(self, tool_name: str) -> str:
         tool = self._tools.get(tool_name)

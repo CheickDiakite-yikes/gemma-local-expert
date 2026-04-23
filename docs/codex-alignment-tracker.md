@@ -39,15 +39,15 @@ For each area, try to keep all three forms of evidence:
 
 | Area | Status | What exists now | Biggest gap |
 | --- | --- | --- | --- |
-| Thread / turn / item state | partial | turn ids everywhere; internal turn record + item ledger exist, are inspectable through API read paths, now back approval ownership/read state, and now feed a canonical conversation state surface | streaming and broader active work-product state are still not item/event-first |
+| Thread / turn / item state | partial | turn ids everywhere; internal turn record + item ledger exist, are inspectable through API read paths, now back approval ownership/read state, now feed a canonical conversation state surface, now surface item snapshots during assistant completion, tool proposal, tool completion, approval, and agent-run streaming milestones, and now persist dedicated `work_product` items for active drafts | streaming still mixes item snapshots with transcript-shaped local mutation instead of a full item/event replay contract |
 | Workspace binding | partial | workspace root exists; bounded workspace runs exist; turn policy now carries workspace binding; conversation state now persists thread-level workspace binding and fork lineage | no isolated background worktree model yet |
-| Turn policy | partial | explicit turn policy now exists and is inspectable through turn state | still minimal and not yet the single source of truth for all permission decisions |
+| Turn policy | partial | explicit turn policy now exists and is inspectable through turn state, now carries typed permission classes, typed approval category, confirmation intent, and approval summary, and now cleanly distinguishes plain chat, durable writes, audited exports, workspace runs, and guarded medical specialist turns | policy is still not yet the single source of truth for all runtime permission decisions |
 | Memory layering | partial | `AGENTS.md`, continuity snapshot, derived conversation memory, evidence memory, memory focus, and thread compaction summaries now exist | no formal idle-thread memory lifecycle or eligibility rules |
-| Permissions system | partial | engine policy + approval gating + bounded workspace root | not yet a full typed permission model comparable to Codex execpolicy + approval categories |
+| Permissions system | partial | engine policy + approval gating + bounded workspace root, plus typed turn-level permission classes, typed approval categories, and approval metadata persisted on approval state, approval items, and tool descriptors | not yet a full typed permission model comparable to Codex execpolicy + approval categories |
 | Document/canvas UX | partial | inline canvas is replacing preview-plus-hidden-editor patterns | still not a true document-first surface with selection-aware edits |
-| App-server style client seam | partial | current local API now exposes transcript, turns, items, approvals, runs, and a canonical `/state` surface; the web client now loads from that single state read on open/refresh | still too web-chat shaped and not yet item/event-first during streaming/live updates |
+| App-server style client seam | partial | current local API now exposes transcript, turns, items, approvals, runs, and a canonical `/state` surface; the web client now loads from that single state read on open/refresh, now consumes canonical item snapshots during key live stream events, now gets canonical approval item/run snapshots back from approval resolution, and now receives canonical tool proposal/result item snapshots too | still too web-chat shaped and not yet a true item/event replay protocol |
 | Worktree-backed background work | missing | bounded workspace agent exists | no true isolated worktree/local clone system |
-| Thread ops: fork/archive/rollback/compact | partial | delete, archive, conversation detail, fork, safe rollback, explicit compact, and explicit steer now exist | compact and steer are backend-first and still do not drive streaming/live control paths |
+| Thread ops: fork/archive/rollback/compact | partial | delete, archive, conversation detail, fork, safe rollback, explicit compact, and explicit steer now exist; steer now influences workspace-agent planning and active run goals, and compaction summaries now get promoted more strongly when bounded history drops older topic cues | compact and steer still need richer live control semantics and stronger pruning/replay behavior |
 
 ## Domain Checklists
 
@@ -74,17 +74,25 @@ Move from "messages plus side tables" toward a real internal ledger:
   - user messages
   - assistant messages
   - evidence packets
+  - tool proposals
+  - tool results
   - approvals
   - agent runs
 - approval items now carry full approval snapshots
 - transcript approval ownership is now rehydrated from approval items instead of only from approval table joins
 - public `ConversationState` now exposes conversation, messages, turns, items, and runs in one read model
 - the web chat now opens and refreshes conversations from that canonical `/state` surface instead of stitching together separate messages/runs/items fetches
+- assistant completion, approval-required, and agent-run status stream events now carry canonical item snapshots
+- tool proposal and direct tool completion stream events now carry canonical item snapshots too
+- the web chat now merges those item snapshots into live state instead of inventing local approval items during streaming
+- approval decisions now return canonical approval item snapshots and run snapshots too, so the client can merge resolved state before the next full `/state` reconciliation
+- active draft canvases now have dedicated `work_product` items persisted alongside approval lifecycle changes
+- the web chat now hydrates active draft/canvas state from `work_product` items first, with approval rows as compatibility fallback
+- CLI headless smokes now assert these same state contracts across tool approvals, workspace draft refinement, thread controls, long mixed conversation recall, and canonical `work_product` ownership
 
 ### Missing
 
-- streaming/live-update paths are still not fully item/event-first
-- active work-product and canvas state are still only partially item-backed on the client
+- streaming/live-update paths are now more item-first, but still not a full item/event replay contract
 - no item-level streaming/event replay contract yet
 
 ### Acceptance criteria for `done`
@@ -95,8 +103,8 @@ Move from "messages plus side tables" toward a real internal ledger:
 
 ### Next slice
 
-- keep moving the client toward the canonical `/state` surface for active work-product state
-- define item/event replay so live updates stop depending on transcript-shaped heuristics
+- keep moving the client toward a single item/event replay model for active work-product state
+- reduce the remaining transcript-shaped local mutation during streaming
 
 ## 2. Workspace Model
 
@@ -154,12 +162,16 @@ Make execution policy a typed runtime object per turn.
   - sandbox mode
   - network access
   - approval mode
+  - approval category
   - active profile
+  - typed permission classes
+  - requires-confirmation flag
+  - approval summary
 
 ### Missing
 
 - network policy is currently static
-- approval policy is still much simpler than Codex category-based approval controls
+- approval policy is richer now, but approval execution still is not fully driven from stored turn policy
 - some runtime decisions still depend on legacy route/tool heuristics instead of policy as the single source of truth
 
 ### Acceptance criteria for `done`
@@ -170,8 +182,8 @@ Make execution policy a typed runtime object per turn.
 
 ### Next slice
 
-- expose turn policy through internal/state inspection APIs
-- tie more approval and canvas logic directly to policy
+- keep expanding turn policy until it is the real source of truth for runtime permission posture
+- tie more approval execution and canvas logic directly to stored policy/approval metadata instead of route heuristics
 
 ## 4. Memory Layering
 
@@ -227,11 +239,13 @@ Separate security approvals from content collaboration.
 - explicit medical-mode boundary
 - truthful capability reporting
 - internal turn policy with sandbox/approval fields
+- typed turn-level permission classes and confirmation intent
+- typed approval categories on tool descriptors, approval state, and approval items
 
 ### Missing
 
 - no richer command/exec policy comparable to Codex execpolicy
-- no granular approval categories beyond current heuristics
+- no granular command/exec approval controls beyond current tool and workflow categories
 - draft UX still leaks approval concepts into normal editing behavior in places
 
 ### Acceptance criteria for `done`
@@ -242,7 +256,7 @@ Separate security approvals from content collaboration.
 
 ### Next slice
 
-- formalize approval categories and risky capability classes
+- formalize richer approval categories and risky capability classes on top of the new typed turn policy
 - continue demoting save-gating chrome from the draft-reading/editing experience
 
 ## 6. Document / Canvas Surface
@@ -299,12 +313,13 @@ Stop letting the web chat surface define the state model.
 - archive API
 - canonical `GET /v1/conversations/{conversation_id}/state`
 - web chat conversation load/refresh now consumes that state surface directly
+- key live stream milestones now carry canonical item snapshots for assistant messages, approvals, and agent runs
 
 ### Missing
 
-- item/event-first thread contract
+- full item/event-first thread contract
 - richer thread operations
-- streaming/live updates still merge local heuristics with canonical state
+- streaming/live updates still merge canonical items with transcript-shaped local mutation
 
 ### Acceptance criteria for `done`
 
@@ -313,7 +328,7 @@ Stop letting the web chat surface define the state model.
 
 ### Next slice
 
-- extend the canonical state surface into streaming/live-update ownership
+- keep collapsing live-update ownership toward items instead of ad hoc message mutation
 - make one more client path consume the same state semantics without web-specific assumptions
 
 ## 8. Thread Operations
@@ -334,6 +349,8 @@ Support stronger thread lifecycle than create/delete/list.
 - explicit compact operation that writes a compaction marker into thread state
 - explicit steer operation that writes active thread guidance into thread state
 - conversation detail/read path for thread lineage and workspace binding
+- steer now influences active workspace-agent planning and stored run goals
+- compaction summaries now get promoted into continuity more aggressively when recent topic cues are weak
 
 ### Missing
 
@@ -349,8 +366,8 @@ single long thread.
 
 ### Next slice
 
-- tie steer into richer active-run control semantics instead of only future-turn guidance
-- use compaction markers more explicitly when continuity windows are trimmed
+- keep extending steer into richer active-run control beyond the current workspace-agent path
+- push compaction markers deeper into pruning/replay behavior beyond the current summary promotion
 
 ## 9. Evaluation Discipline
 
@@ -369,6 +386,14 @@ For any important architecture or UX slice, try to maintain:
 - `backend green`
 - `transcript green`
 - `live UX green`
+
+For state and continuity work, we should also keep a fourth proof:
+
+- `CLI headless green`
+
+That means the smoke harnesses fail hard on broken item ownership, approval
+categories, thread controls, or long-horizon continuity instead of only dumping
+logs for manual reading.
 
 ### Missing
 
@@ -404,6 +429,7 @@ For any important architecture or UX slice, try to maintain:
 - added a canonical conversation `/state` surface and switched the web conversation open/refresh path to use it
 - added a safe rollback operation that restores an earlier turn into a replacement thread and archives the source thread
 - added explicit compact and steer thread operations and fed them into the continuity snapshot/prompting path
+- upgraded the CLI smoke harnesses so they now assert canonical item snapshots, grounded workspace draft refinement, thread protocol controls, and deep mixed conversation continuity
 
 ## Operating Rule Going Forward
 

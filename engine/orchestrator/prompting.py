@@ -150,6 +150,7 @@ class PromptBuilder:
                     policy,
                     results,
                     tool_result,
+                    history_trimmed,
                     evidence_packet,
                 ),
             }
@@ -371,6 +372,7 @@ class PromptBuilder:
         policy: PolicyDecision,
         results: list[SearchResultItem],
         tool_result: dict[str, object] | None,
+        history_trimmed: bool,
         evidence_packet: EvidencePacket | None = None,
     ) -> str:
         sections = [f"User request:\n{turn.text}"]
@@ -385,6 +387,11 @@ class PromptBuilder:
             )
 
         if conversation_context:
+            if history_trimmed and conversation_context.active_compaction_summary:
+                sections.append(
+                    "Compacted earlier thread state:\n"
+                    + conversation_context.active_compaction_summary
+                )
             continuity_lines = conversation_context.prompt_lines()
             if continuity_lines:
                 sections.append(

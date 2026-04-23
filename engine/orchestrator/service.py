@@ -10,6 +10,7 @@ from engine.config.settings import Settings
 from engine.context.memory import ConversationMemoryService
 from engine.context.service import ConversationContextService
 from engine.contracts.api import (
+    ApprovalCategory,
     ApprovalMode,
     AgentRun,
     AgentRunStatus,
@@ -23,11 +24,14 @@ from engine.contracts.api import (
     EvidenceRef,
     ExecutionMode,
     GroundingStatus,
+    PermissionClass,
     RuntimeProfile,
     SandboxMode,
     SearchResultItem,
     SourceDomain,
     TranscriptMessage,
+    ConversationItemKind,
+    ConversationItem,
     TurnExecutionPolicy,
     ConversationTurnRecord,
     WorkspaceBinding,
@@ -197,6 +201,7 @@ class OrchestratorService:
         if contextual_assets and conversation_context.selected_context_reason:
             route.reasons.append(conversation_context.selected_context_reason)
         policy = self.policy.evaluate(turn, route)
+        active_pending_approval = self._pending_approval_for_context(conversation_context)
         self.store.update_turn_record(
             turn_id,
             route_kind=route.interaction_kind,
@@ -205,6 +210,13 @@ class OrchestratorService:
                 policy=policy,
                 has_pending_approval=bool(
                     getattr(conversation_context, "pending_approval_id", None)
+                ),
+                tool_name=route.proposed_tool,
+                approval_category=(
+                    active_pending_approval.category if active_pending_approval else None
+                ),
+                approval_summary=(
+                    active_pending_approval.reason if active_pending_approval else None
                 ),
             ),
         )
@@ -218,7 +230,10 @@ class OrchestratorService:
         memory_referent_title: str | None = None
         memory_referent_excerpt: str | None = None
         draft_updated = False
-        active_pending_approval = self._pending_approval_for_context(conversation_context)
+        active_steering_instruction = self._active_steering_instruction(
+            turn_text=turn.text,
+            conversation_context=conversation_context,
+        )
         approval_required = policy.approval_required or bool(
             active_pending_approval and active_pending_approval.status == "pending"
         )
@@ -283,6 +298,11 @@ class OrchestratorService:
                     kind="tool",
                     label="Updated local draft",
                     detail="Revised the pending draft while keeping the local save gated.",
+                    extra=self._agent_status_extra(
+                        conversation_id=turn.conversation_id,
+                        turn_id=turn_id,
+                        run=agent_run,
+                    ),
                 )
                 yield ConversationStreamEvent(
                     type=StreamEventType.APPROVAL_REQUIRED,
@@ -291,6 +311,36 @@ class OrchestratorService:
                     payload={
                         **revised_approval.model_dump(mode="json"),
                         "run": agent_run.model_dump(mode="json") if agent_run else None,
+                        "item": (
+                            self._latest_approval_item(
+                                turn.conversation_id,
+                                turn_id,
+                                revised_approval.id,
+                                ConversationItemKind.APPROVAL,
+                            ).model_dump(mode="json")
+                            if self._latest_approval_item(
+                                turn.conversation_id,
+                                turn_id,
+                                revised_approval.id,
+                                ConversationItemKind.APPROVAL,
+                            )
+                            else None
+                        ),
+                        "work_product_item": (
+                            self._latest_approval_item(
+                                turn.conversation_id,
+                                turn_id,
+                                revised_approval.id,
+                                ConversationItemKind.WORK_PRODUCT,
+                            ).model_dump(mode="json")
+                            if self._latest_approval_item(
+                                turn.conversation_id,
+                                turn_id,
+                                revised_approval.id,
+                                ConversationItemKind.WORK_PRODUCT,
+                            )
+                            else None
+                        ),
                     },
                 )
 
@@ -299,12 +349,10 @@ class OrchestratorService:
                 "Request blocked by policy. Open an explicit medical session before using "
                 "medical specialist workflows."
             )
-            for event in self._message_events(
+            for event in self._assistant_delta_events(
                 conversation_id=turn.conversation_id,
                 turn_id=turn_id,
                 text=blocked_message,
-                assets=[],
-                models=model_selection.model_dump(),
             ):
                 yield event
             blocked_entry = self.store.append_transcript(
@@ -316,6 +364,19 @@ class OrchestratorService:
             self.store.update_turn_record(
                 turn_id,
                 assistant_message_id=blocked_entry.id,
+            )
+            blocked_item = self._latest_turn_item(
+                turn.conversation_id,
+                turn_id,
+                ConversationItemKind.ASSISTANT_MESSAGE,
+            )
+            yield self._assistant_completed_event(
+                conversation_id=turn.conversation_id,
+                turn_id=turn_id,
+                text=blocked_message,
+                assets=[],
+                models=model_selection.model_dump(),
+                item=blocked_item.model_dump(mode="json") if blocked_item else None,
             )
             self._persist_conversation_memory(
                 conversation_id=turn.conversation_id,
@@ -491,19 +552,27 @@ class OrchestratorService:
                     )
 
         if route.agent_run:
+            planning_detail = "Preparing a bounded local workspace run before the final answer."
+            if active_steering_instruction:
+                planning_detail = (
+                    "Preparing a bounded local workspace run while keeping the active thread steering in view."
+                )
             yield self._status_event(
                 conversation_id=turn.conversation_id,
                 turn_id=turn_id,
                 kind="agent",
                 label="Planning workspace run",
-                detail="Preparing a bounded local workspace run before the final answer.",
+                detail=planning_detail,
             )
             try:
-                agent_plan = self.workspace_agent.plan(turn.text)
+                agent_plan = self.workspace_agent.plan(
+                    turn.text,
+                    steering_instruction=active_steering_instruction,
+                )
                 agent_run = self.store.create_agent_run(
                     turn.conversation_id,
                     turn_id,
-                    turn.text,
+                    self._agent_run_goal(turn.text, active_steering_instruction),
                     agent_plan.scope_root,
                     status=AgentRunStatus.RUNNING,
                     plan_steps=agent_plan.steps,
@@ -544,12 +613,12 @@ class OrchestratorService:
                         kind="agent",
                         label=step_result.title,
                         detail=step_result.detail or "Workspace step complete.",
-                        extra={
-                            "run_id": agent_run.id,
-                            "run_status": agent_run.status.value,
-                            "run": agent_run.model_dump(mode="json"),
-                            "step": step_result.model_dump(mode="json"),
-                        },
+                        extra=self._agent_status_extra(
+                            conversation_id=turn.conversation_id,
+                            turn_id=turn_id,
+                            run=agent_run,
+                            step=step_result,
+                        ),
                     )
                     if agent_run.status in {AgentRunStatus.BLOCKED, AgentRunStatus.FAILED}:
                         break
@@ -602,17 +671,17 @@ class OrchestratorService:
                         kind="agent",
                         label="Workspace run complete",
                         detail=agent_run.result_summary,
-                        extra={
-                            "run_id": agent_run.id,
-                            "run_status": agent_run.status.value,
-                            "run": agent_run.model_dump(mode="json"),
-                        },
+                        extra=self._agent_status_extra(
+                            conversation_id=turn.conversation_id,
+                            turn_id=turn_id,
+                            run=agent_run,
+                        ),
                     )
             except WorkspaceAgentError as exc:
                 agent_run = self.store.create_agent_run(
                     turn.conversation_id,
                     turn_id,
-                    turn.text,
+                    self._agent_run_goal(turn.text, active_steering_instruction),
                     self.settings.workspace_root,
                     status=AgentRunStatus.BLOCKED,
                     result_summary=str(exc),
@@ -630,11 +699,11 @@ class OrchestratorService:
                     kind="agent",
                     label="Workspace run blocked",
                     detail=str(exc),
-                    extra={
-                        "run_id": agent_run.id,
-                        "run_status": agent_run.status.value,
-                        "run": agent_run.model_dump(mode="json"),
-                    },
+                    extra=self._agent_status_extra(
+                        conversation_id=turn.conversation_id,
+                        turn_id=turn_id,
+                        run=agent_run,
+                    ),
                 )
                 self.audit.record(
                     "agent.run.blocked",
@@ -668,6 +737,30 @@ class OrchestratorService:
                 )
                 planned_tool_name = None
         if planned_tool_name:
+            tool_descriptor = self.policy.tools.descriptor_for(planned_tool_name)
+            approval_category = (
+                policy.approval_category
+                if policy is not None and policy.approval_required
+                else None
+            ) or (tool_descriptor.approval_category if tool_descriptor else None)
+            approval_summary = (
+                policy.approval_summary
+                if policy is not None and policy.approval_required
+                else None
+            ) or (tool_descriptor.approval_summary if tool_descriptor else None)
+            self.store.update_turn_record(
+                turn_id,
+                policy=self._build_turn_policy(
+                    route=route,
+                    policy=policy,
+                    has_pending_approval=bool(
+                        getattr(conversation_context, "pending_approval_id", None)
+                    ),
+                    tool_name=planned_tool_name,
+                    approval_category=approval_category,
+                    approval_summary=approval_summary,
+                ),
+            )
             tool_plan = prepared_tool_plan or self.tool_runtime.plan(
                 turn,
                 planned_tool_name,
@@ -682,12 +775,37 @@ class OrchestratorService:
             )
             memory_referent_title = self._tool_plan_title(tool_plan.payload)
             memory_referent_excerpt = self._tool_plan_excerpt(tool_plan.payload)
+            tool_proposal_item = self._append_turn_item(
+                conversation_id=turn.conversation_id,
+                turn_id=turn_id,
+                kind=ConversationItemKind.TOOL_PROPOSAL,
+                summary=f"Prepared {planned_tool_name} for this turn.",
+                payload={
+                    "tool_name": planned_tool_name,
+                    "tool_descriptor": (
+                        tool_descriptor.model_dump(mode="json")
+                        if tool_descriptor is not None
+                        else None
+                    ),
+                    "payload": tool_plan.payload,
+                    "source_domain": route.source_domain.value if route.source_domain else None,
+                    "execution_mode": evidence_packet.execution_mode.value if evidence_packet else None,
+                    "grounding_status": evidence_packet.grounding_status.value if evidence_packet else None,
+                    "evidence_packet_id": evidence_packet.id if evidence_packet else None,
+                    "run_id": agent_run.id if agent_run else None,
+                },
+            )
             yield ConversationStreamEvent(
                 type=StreamEventType.TOOL_PROPOSED,
                 conversation_id=turn.conversation_id,
                 turn_id=turn_id,
                 payload={
                     "tool_name": planned_tool_name,
+                    "tool_descriptor": (
+                        tool_descriptor.model_dump(mode="json")
+                        if tool_descriptor is not None
+                        else None
+                    ),
                     "payload": tool_plan.payload,
                     "source_domain": route.source_domain.value if route.source_domain else None,
                     "execution_mode": evidence_packet.execution_mode.value if evidence_packet else None,
@@ -695,6 +813,7 @@ class OrchestratorService:
                     "evidence_packet_id": evidence_packet.id if evidence_packet else None,
                     "run_id": agent_run.id if agent_run else None,
                     "run": agent_run.model_dump(mode="json") if agent_run else None,
+                    "item": tool_proposal_item.model_dump(mode="json"),
                 },
             )
             if approval_required:
@@ -704,15 +823,42 @@ class OrchestratorService:
                     kind="tool",
                     label="Preparing a draft for approval",
                     detail="A local write is ready for review before it runs.",
-                    extra={"run_id": agent_run.id if agent_run else None},
+                    extra=self._agent_status_extra(
+                        conversation_id=turn.conversation_id,
+                        turn_id=turn_id,
+                        run=agent_run,
+                    ),
                 )
                 approval = self.store.create_approval(
                     turn.conversation_id,
                     turn_id,
                     planned_tool_name,
-                    reason="Tool writes durable state or enters a gated workflow.",
+                    reason=approval_summary
+                    or "Confirmation is required before this local action can run.",
                     payload=tool_plan.payload,
                     run_id=agent_run.id if agent_run else None,
+                    category=approval_category,
+                    permission_classes=(
+                        list(tool_descriptor.permission_classes)
+                        if tool_descriptor is not None
+                        else [PermissionClass.TOOL_EXECUTION]
+                    ),
+                    work_product_context={
+                        "source_domain": (
+                            route.source_domain.value if route.source_domain else None
+                        ),
+                        "execution_mode": (
+                            evidence_packet.execution_mode.value
+                            if evidence_packet
+                            else None
+                        ),
+                        "grounding_status": (
+                            evidence_packet.grounding_status.value
+                            if evidence_packet
+                            else None
+                        ),
+                        "evidence_packet_id": evidence_packet.id if evidence_packet else None,
+                    },
                 )
                 if agent_run:
                     agent_run = self.store.update_agent_run(
@@ -738,6 +884,36 @@ class OrchestratorService:
                         "grounding_status": evidence_packet.grounding_status.value if evidence_packet else None,
                         "evidence_packet_id": evidence_packet.id if evidence_packet else None,
                         "run": agent_run.model_dump(mode="json") if agent_run else None,
+                        "item": (
+                            self._latest_approval_item(
+                                turn.conversation_id,
+                                turn_id,
+                                approval.id,
+                                ConversationItemKind.APPROVAL,
+                            ).model_dump(mode="json")
+                            if self._latest_approval_item(
+                                turn.conversation_id,
+                                turn_id,
+                                approval.id,
+                                ConversationItemKind.APPROVAL,
+                            )
+                            else None
+                        ),
+                        "work_product_item": (
+                            self._latest_approval_item(
+                                turn.conversation_id,
+                                turn_id,
+                                approval.id,
+                                ConversationItemKind.WORK_PRODUCT,
+                            ).model_dump(mode="json")
+                            if self._latest_approval_item(
+                                turn.conversation_id,
+                                turn_id,
+                                approval.id,
+                                ConversationItemKind.WORK_PRODUCT,
+                            )
+                            else None
+                        ),
                     },
                 )
             else:
@@ -747,7 +923,11 @@ class OrchestratorService:
                     kind="tool",
                     label="Running a local helper",
                     detail=f"Executing {planned_tool_name} inside the local engine.",
-                    extra={"run_id": agent_run.id if agent_run else None},
+                    extra=self._agent_status_extra(
+                        conversation_id=turn.conversation_id,
+                        turn_id=turn_id,
+                        run=agent_run,
+                    ),
                 )
                 yield ConversationStreamEvent(
                     type=StreamEventType.TOOL_STARTED,
@@ -755,6 +935,11 @@ class OrchestratorService:
                     turn_id=turn_id,
                     payload={
                         "tool_name": planned_tool_name,
+                        "tool_descriptor": (
+                            tool_descriptor.model_dump(mode="json")
+                            if tool_descriptor is not None
+                            else None
+                        ),
                         "payload": tool_plan.payload,
                         "source_domain": route.source_domain.value if route.source_domain else None,
                         "execution_mode": evidence_packet.execution_mode.value if evidence_packet else None,
@@ -781,12 +966,38 @@ class OrchestratorService:
                         artifact_ids=assistant_asset_ids,
                         result_summary=self._tool_result_summary(tool_result),
                     )
+                tool_result_item = self._append_turn_item(
+                    conversation_id=turn.conversation_id,
+                    turn_id=turn_id,
+                    kind=ConversationItemKind.TOOL_RESULT,
+                    summary=f"Completed {planned_tool_name} for this turn.",
+                    payload={
+                        "tool_name": planned_tool_name,
+                        "tool_descriptor": (
+                            tool_descriptor.model_dump(mode="json")
+                            if tool_descriptor is not None
+                            else None
+                        ),
+                        "result": tool_result,
+                        "asset_ids": assistant_asset_ids,
+                        "source_domain": route.source_domain.value if route.source_domain else None,
+                        "execution_mode": evidence_packet.execution_mode.value if evidence_packet else None,
+                        "grounding_status": evidence_packet.grounding_status.value if evidence_packet else None,
+                        "evidence_packet_id": evidence_packet.id if evidence_packet else None,
+                        "run_id": agent_run.id if agent_run else None,
+                    },
+                )
                 yield ConversationStreamEvent(
                     type=StreamEventType.TOOL_COMPLETED,
                     conversation_id=turn.conversation_id,
                     turn_id=turn_id,
                     payload={
                         "tool_name": planned_tool_name,
+                        "tool_descriptor": (
+                            tool_descriptor.model_dump(mode="json")
+                            if tool_descriptor is not None
+                            else None
+                        ),
                         "result": tool_result,
                         "assets": [asset.model_dump(mode="json") for asset in completed_assets],
                         "source_domain": route.source_domain.value if route.source_domain else None,
@@ -795,6 +1006,7 @@ class OrchestratorService:
                         "evidence_packet_id": evidence_packet.id if evidence_packet else None,
                         "run_id": agent_run.id if agent_run else None,
                         "run": agent_run.model_dump(mode="json") if agent_run else None,
+                        "item": tool_result_item.model_dump(mode="json"),
                     },
                 )
                 self.audit.record(
@@ -951,20 +1163,19 @@ class OrchestratorService:
         assistant_message = generation.text
         completed_asset_ids = assistant_asset_ids + specialist_asset_ids
         completed_assets = self.store.list_assets(completed_asset_ids)
-        for event in self._message_events(
+        model_payload = {
+            **model_selection.model_dump(),
+            "assistant_backend": generation.backend,
+            "assistant_model_source": generation.model_source,
+            "specialist_backend": specialist_analysis.backend if specialist_analysis else None,
+            "specialist_model_source": (
+                specialist_analysis.model_source if specialist_analysis else None
+            ),
+        }
+        for event in self._assistant_delta_events(
             conversation_id=turn.conversation_id,
             turn_id=turn_id,
             text=assistant_message,
-            assets=completed_assets,
-            models={
-                **model_selection.model_dump(),
-                "assistant_backend": generation.backend,
-                "assistant_model_source": generation.model_source,
-                "specialist_backend": specialist_analysis.backend if specialist_analysis else None,
-                "specialist_model_source": (
-                    specialist_analysis.model_source if specialist_analysis else None
-                ),
-            },
         ):
             yield event
         assistant_entry = self.store.append_transcript(
@@ -978,6 +1189,19 @@ class OrchestratorService:
         self.store.update_turn_record(
             turn_id,
             assistant_message_id=assistant_entry.id,
+        )
+        assistant_item = self._latest_turn_item(
+            turn.conversation_id,
+            turn_id,
+            ConversationItemKind.ASSISTANT_MESSAGE,
+        )
+        yield self._assistant_completed_event(
+            conversation_id=turn.conversation_id,
+            turn_id=turn_id,
+            text=assistant_message,
+            assets=completed_assets,
+            models=model_payload,
+            item=assistant_item.model_dump(mode="json") if assistant_item else None,
         )
         self._persist_conversation_memory(
             conversation_id=turn.conversation_id,
@@ -1484,14 +1708,12 @@ class OrchestratorService:
             payload=payload,
         )
 
-    def _message_events(
+    def _assistant_delta_events(
         self,
         *,
         conversation_id: str,
         turn_id: str,
         text: str,
-        assets: list[AssetSummary],
-        models: dict[str, str | None],
     ) -> list[ConversationStreamEvent]:
         events: list[ConversationStreamEvent] = []
         for chunk in self._chunk_text(text):
@@ -1503,20 +1725,31 @@ class OrchestratorService:
                     payload={"text": chunk},
                 )
             )
-
-        events.append(
-            ConversationStreamEvent(
-                type=StreamEventType.ASSISTANT_MESSAGE_COMPLETED,
-                conversation_id=conversation_id,
-                turn_id=turn_id,
-                payload={
-                    "text": text,
-                    "models": models,
-                    "assets": [asset.model_dump(mode="json") for asset in assets],
-                },
-            )
-        )
         return events
+
+    def _assistant_completed_event(
+        self,
+        *,
+        conversation_id: str,
+        turn_id: str,
+        text: str,
+        assets: list[AssetSummary],
+        models: dict[str, str | None],
+        item: dict[str, object] | None = None,
+    ) -> ConversationStreamEvent:
+        payload: dict[str, object] = {
+            "text": text,
+            "models": models,
+            "assets": [asset.model_dump(mode="json") for asset in assets],
+        }
+        if item is not None:
+            payload["item"] = item
+        return ConversationStreamEvent(
+            type=StreamEventType.ASSISTANT_MESSAGE_COMPLETED,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            payload=payload,
+        )
 
     def _chunk_text(self, text: str) -> list[str]:
         size = self.settings.max_stream_chunk_chars
@@ -1527,6 +1760,109 @@ class OrchestratorService:
         if len(cleaned) <= 220:
             return cleaned
         return cleaned[:219].rstrip() + "…"
+
+    def _latest_turn_item(
+        self,
+        conversation_id: str,
+        turn_id: str,
+        kind: ConversationItemKind,
+    ):
+        items = self.store.list_items(conversation_id, turn_id=turn_id, limit=24)
+        for item in reversed(items):
+            if item.kind == kind:
+                return item
+        return None
+
+    def _latest_approval_item(
+        self,
+        conversation_id: str,
+        turn_id: str,
+        approval_id: str,
+        kind: ConversationItemKind,
+    ):
+        items = self.store.list_items(conversation_id, turn_id=turn_id, limit=32)
+        for item in reversed(items):
+            if item.kind != kind:
+                continue
+            if item.payload.get("approval_id") == approval_id:
+                return item
+        return None
+
+    def _append_turn_item(
+        self,
+        *,
+        conversation_id: str,
+        turn_id: str,
+        kind: ConversationItemKind,
+        summary: str,
+        payload: dict[str, object],
+    ):
+        return self.store.append_item(
+            ConversationItem(
+                id=new_id("item"),
+                conversation_id=conversation_id,
+                turn_id=turn_id,
+                kind=kind,
+                summary=summary,
+                payload=payload,
+            )
+        )
+
+    def _agent_status_extra(
+        self,
+        *,
+        conversation_id: str,
+        turn_id: str,
+        run: AgentRun | None,
+        step: AgentRunStep | None = None,
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {"run_id": run.id if run else None}
+        if run is not None:
+            payload["run_status"] = run.status.value
+            payload["run"] = run.model_dump(mode="json")
+            run_item = self._latest_turn_item(
+                conversation_id,
+                turn_id,
+                ConversationItemKind.AGENT_RUN,
+            )
+            if run_item is not None:
+                payload["item"] = run_item.model_dump(mode="json")
+        if step is not None:
+            payload["step"] = step.model_dump(mode="json")
+        return payload
+
+    def _active_steering_instruction(
+        self,
+        *,
+        turn_text: str,
+        conversation_context,
+    ) -> str | None:
+        instruction = getattr(conversation_context, "active_steering_instruction", None)
+        if not isinstance(instruction, str) or not instruction.strip():
+            return None
+        lowered_turn = turn_text.lower()
+        if any(
+            phrase in lowered_turn
+            for phrase in {
+                "ignore that steer",
+                "ignore the steering",
+                "different direction",
+                "new direction",
+                "switch gears",
+                "separate topic",
+            }
+        ):
+            return None
+        return instruction.strip()
+
+    def _agent_run_goal(
+        self,
+        turn_text: str,
+        steering_instruction: str | None,
+    ) -> str:
+        if not steering_instruction:
+            return turn_text
+        return f"{turn_text}\n\nThread steering: {steering_instruction}"
 
     def _pending_approval_for_context(
         self, conversation_context: object
@@ -1722,9 +2058,23 @@ class OrchestratorService:
         route=None,
         policy=None,
         has_pending_approval: bool = False,
+        tool_name: str | None = None,
+        approval_category: ApprovalCategory | None = None,
+        approval_summary: str | None = None,
     ) -> TurnExecutionPolicy:
         sandbox_mode = SandboxMode.READ_ONLY
         approval_mode = ApprovalMode.NONE
+        permission_classes: list[PermissionClass] = [PermissionClass.LOCAL_READ]
+        requires_confirmation = False
+        resolved_approval_summary = approval_summary
+        resolved_approval_category = approval_category
+        descriptor = self.policy.tools.descriptor_for(tool_name) if tool_name else None
+
+        if route is not None and getattr(route, "needs_retrieval", False):
+            permission_classes.append(PermissionClass.RETRIEVAL)
+
+        if route is not None and getattr(route, "specialist_model", None):
+            permission_classes.append(PermissionClass.SPECIALIST_MODEL)
 
         if route is not None and (
             getattr(route, "agent_run", False)
@@ -1733,12 +2083,52 @@ class OrchestratorService:
             or getattr(route, "interaction_kind", None) == "draft_follow_up"
         ):
             sandbox_mode = SandboxMode.WORKSPACE_WRITE
+            permission_classes.append(PermissionClass.WORKSPACE_WRITE)
+
+        if route is not None and getattr(route, "agent_run", False):
+            permission_classes.append(PermissionClass.WORKSPACE_AGENT)
+
+        if route is not None and getattr(route, "proposed_tool", None):
+            permission_classes.append(PermissionClass.TOOL_EXECUTION)
+
+        if descriptor is not None:
+            permission_classes.extend(descriptor.permission_classes)
+            if resolved_approval_category is None:
+                resolved_approval_category = descriptor.approval_category
+            if resolved_approval_summary is None:
+                resolved_approval_summary = descriptor.approval_summary
+
+        if policy is not None:
+            if resolved_approval_category is None:
+                resolved_approval_category = policy.approval_category
+            if resolved_approval_summary is None:
+                resolved_approval_summary = policy.approval_summary
+
+        if resolved_approval_category == ApprovalCategory.MEDICAL_SPECIALIST:
+            approval_mode = ApprovalMode.MEDICAL_STRICT
+            requires_confirmation = True
+            permission_classes.append(PermissionClass.MEDICAL_SPECIALIST)
 
         if policy is not None:
             if policy.approval_required or has_pending_approval:
-                approval_mode = ApprovalMode.DURABLE_WRITE
-            if getattr(route, "specialist_model", None) == "medgemma":
-                approval_mode = ApprovalMode.MEDICAL_STRICT
+                approval_mode = (
+                    ApprovalMode.MEDICAL_STRICT
+                    if resolved_approval_category == ApprovalCategory.MEDICAL_SPECIALIST
+                    else ApprovalMode.DURABLE_WRITE
+                )
+                requires_confirmation = True
+                resolved_approval_category = (
+                    policy.approval_category or resolved_approval_category
+                )
+                resolved_approval_summary = (
+                    policy.approval_summary
+                    or resolved_approval_summary
+                    or "Pending or required confirmation before durable local action."
+                )
+                if resolved_approval_category != ApprovalCategory.MEDICAL_SPECIALIST:
+                    permission_classes.append(PermissionClass.DURABLE_OUTPUT)
+
+        permission_classes = list(dict.fromkeys(permission_classes))
 
         return TurnExecutionPolicy(
             workspace_root=self.settings.workspace_root,
@@ -1746,7 +2136,11 @@ class OrchestratorService:
             sandbox_mode=sandbox_mode,
             network_access=False,
             approval_mode=approval_mode,
+            approval_category=resolved_approval_category,
             active_profile=self._active_runtime_profile(),
+            permission_classes=permission_classes,
+            requires_confirmation=requires_confirmation,
+            approval_summary=resolved_approval_summary,
         )
 
     def _active_runtime_profile(self) -> RuntimeProfile:

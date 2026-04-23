@@ -4,6 +4,7 @@ from engine.api.app import build_container
 from engine.config.settings import Settings
 from engine.contracts.api import (
     AgentRunStatus,
+    ApprovalCategory,
     ApprovalMode,
     AssistantMode,
     ConversationCompactRequest,
@@ -13,6 +14,7 @@ from engine.contracts.api import (
     ConversationRollbackRequest,
     ConversationItemKind,
     ConversationTurnRecord,
+    PermissionClass,
     RuntimeProfile,
     SandboxMode,
     TurnExecutionPolicy,
@@ -55,16 +57,30 @@ def test_agent_run_persists_across_container_rebuilds(tmp_path: Path) -> None:
         status=AgentRunStatus.COMPLETED,
         result_summary="Completed a bounded workspace run.",
     )
+    items_before = container.store.list_items(conversation.id)
     container.store.close()
 
     reloaded = build_container(settings)
     restored = reloaded.store.get_agent_run(run.id)
+    restored_items = reloaded.store.list_items(conversation.id)
     reloaded.store.close()
 
     assert restored is not None
     assert restored.id == run.id
     assert restored.status == AgentRunStatus.COMPLETED
     assert restored.result_summary == "Completed a bounded workspace run."
+    assert any(
+        item.kind == ConversationItemKind.AGENT_RUN
+        and item.payload["run"]["id"] == run.id
+        and item.payload["run"]["status"] == AgentRunStatus.COMPLETED.value
+        for item in items_before
+    )
+    assert any(
+        item.kind == ConversationItemKind.AGENT_RUN
+        and item.payload["run"]["id"] == run.id
+        and item.payload["run"]["status"] == AgentRunStatus.COMPLETED.value
+        for item in restored_items
+    )
 
 
 def test_turn_record_and_item_ledger_persist_across_container_rebuilds(tmp_path: Path) -> None:
@@ -123,6 +139,63 @@ def test_turn_record_and_item_ledger_persist_across_container_rebuilds(tmp_path:
         ConversationItemKind.USER_MESSAGE,
         ConversationItemKind.ASSISTANT_MESSAGE,
     ]
+
+
+def test_approval_policy_metadata_persists_across_store_reads(tmp_path: Path) -> None:
+    settings = Settings(database_path=str(tmp_path / "approval-policy-persist.db"))
+    container = build_container(settings)
+    conversation = container.store.create_conversation(
+        ConversationCreateRequest(title="Approvals", mode=AssistantMode.GENERAL)
+    )
+    turn = container.store.create_turn_record(
+        ConversationTurnRecord(
+            id=new_id("turn"),
+            conversation_id=conversation.id,
+            mode=AssistantMode.GENERAL,
+            user_text="Export a markdown brief.",
+            workspace_root=settings.workspace_root,
+            cwd=settings.workspace_root,
+            policy=TurnExecutionPolicy(
+                workspace_root=settings.workspace_root,
+                cwd=settings.workspace_root,
+                sandbox_mode=SandboxMode.WORKSPACE_WRITE,
+                network_access=False,
+                approval_mode=ApprovalMode.DURABLE_WRITE,
+                active_profile=RuntimeProfile.FULL_LOCAL,
+            ),
+            route_kind="task",
+        )
+    )
+
+    approval = container.store.create_approval(
+        conversation.id,
+        turn.id,
+        "export_brief",
+        "Confirmation is required before writing an audited markdown export.",
+        payload={"title": "Architecture Brief", "content": "Summary"},
+        category=ApprovalCategory.AUDITED_EXPORT,
+        permission_classes=[
+            PermissionClass.TOOL_EXECUTION,
+            PermissionClass.DURABLE_OUTPUT,
+            PermissionClass.AUDIT_LOG,
+        ],
+    )
+
+    restored = container.store.get_approval(approval.id)
+    items = container.store.list_items(conversation.id, turn_id=turn.id)
+    container.store.close()
+
+    assert restored is not None
+    assert restored.category == ApprovalCategory.AUDITED_EXPORT
+    assert PermissionClass.AUDIT_LOG in restored.permission_classes
+    approval_item = next(item for item in items if item.kind == ConversationItemKind.APPROVAL)
+    work_product_item = next(item for item in items if item.kind == ConversationItemKind.WORK_PRODUCT)
+    assert approval_item.payload["category"] == "audited_export"
+    assert "audit_log" in approval_item.payload["permission_classes"]
+    assert approval_item.payload["approval"]["category"] == "audited_export"
+    assert work_product_item.payload["approval_id"] == approval.id
+    assert work_product_item.payload["work_product"]["title"] == "Architecture Brief"
+    assert work_product_item.payload["category"] == "audited_export"
 
 
 def test_archive_conversation_hides_default_listing_but_preserves_record(tmp_path: Path) -> None:
@@ -216,6 +289,7 @@ def test_fork_conversation_copies_lineage_and_visible_thread_state(tmp_path: Pat
     assert forked_transcript[-1].approval is not None
     assert forked_transcript[-1].approval.tool_name == "create_report"
     assert any(item.kind == ConversationItemKind.APPROVAL for item in forked_items)
+    assert any(item.kind == ConversationItemKind.WORK_PRODUCT for item in forked_items)
 
 
 def test_rollback_conversation_archives_source_and_restores_earlier_turn_state(

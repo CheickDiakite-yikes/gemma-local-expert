@@ -235,6 +235,44 @@ def test_prompt_builder_includes_compaction_and_steering_guidance() -> None:
     assert "Active thread steering:" in user_prompt
 
 
+def test_prompt_builder_promotes_compaction_section_when_history_is_trimmed() -> None:
+    builder = PromptBuilder()
+    history = [
+        ConversationMessage(role="user", content=f"Older turn {index} about architecture.")
+        for index in range(10)
+    ]
+    context = builder.build(
+        turn=ConversationTurnRequest(
+            conversation_id="conv_compact_trimmed",
+            mode=AssistantMode.GENERAL,
+            text="Keep going on that same thread.",
+        ),
+        history=history,
+        assets=[],
+        context_assets=[],
+        conversation_context=ConversationContextSnapshot(
+            active_compaction_summary=(
+                "Latest user focus: current field assistant architecture. "
+                "Pending draft: Field Assistant Architecture Report."
+            ),
+        ),
+        specialist_analysis=None,
+        workspace_summary=None,
+        route=RouteDecision(interaction_kind="conversation", is_follow_up=True),
+        policy=PolicyDecision(),
+        model_selection=ModelRouteSelection(
+            assistant_model="gemma-4-e2b-it-4bit",
+            embedding_model="embeddinggemma-300m",
+        ),
+        results=[],
+        tool_result=None,
+    )
+
+    user_prompt = context.messages[-1]["content"]
+    assert "Compacted earlier thread state:" in user_prompt
+    assert "Pending draft: Field Assistant Architecture Report." in user_prompt
+
+
 def test_prompt_builder_adds_draft_follow_up_guidance() -> None:
     builder = PromptBuilder()
     context = builder.build(

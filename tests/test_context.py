@@ -512,6 +512,48 @@ def test_context_service_exposes_latest_compaction_and_steering_items() -> None:
     assert snapshot.active_steering_instruction == "Keep the thread focused on architecture and product state."
 
 
+def test_context_service_uses_compaction_summary_when_recent_topic_window_is_low_signal() -> None:
+    service = ConversationContextService()
+
+    snapshot = service.build(
+        turn_text="keep going",
+        transcript=[
+            TranscriptMessage(
+                id="msg1",
+                role="user",
+                content="Thanks",
+                turn_id="turn_2",
+            ),
+            TranscriptMessage(
+                id="msg2",
+                role="assistant",
+                content="Of course. I'm here when you want to keep going.",
+                turn_id="turn_2",
+            ),
+        ],
+        attached_assets=[],
+        recent_items=[
+            ConversationItem(
+                id="item_compact",
+                conversation_id="conv_1",
+                turn_id="turn_1",
+                kind=ConversationItemKind.COMPACTION_MARKER,
+                summary="Compacted earlier architecture work.",
+                payload={
+                    "summary": (
+                        "Latest user focus: current field assistant architecture. "
+                        "Pending draft: Field Assistant Architecture Report."
+                    )
+                },
+            )
+        ],
+    )
+
+    assert snapshot.active_topic is not None
+    assert "field assistant architecture" in snapshot.active_topic.lower()
+    assert snapshot.last_user_request == snapshot.active_topic
+
+
 def test_context_service_prefers_matching_output_kind_over_newer_pending_draft() -> None:
     service = ConversationContextService()
     checklist_approval = ApprovalState(

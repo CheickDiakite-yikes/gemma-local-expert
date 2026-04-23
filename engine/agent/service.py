@@ -241,6 +241,7 @@ class WorkspaceAgentPlan:
     scope_root: str
     steps: list[AgentRunStep]
     output_tool_name: str | None = None
+    steering_instruction: str | None = None
 
 
 @dataclass(slots=True)
@@ -287,7 +288,12 @@ class WorkspaceAgentService:
         self.max_file_reads = max_file_reads
         self.max_context_chars = max_context_chars
 
-    def plan(self, goal: str) -> WorkspaceAgentPlan:
+    def plan(
+        self,
+        goal: str,
+        *,
+        steering_instruction: str | None = None,
+    ) -> WorkspaceAgentPlan:
         scope_root = self._resolve_scope_root(goal)
         output_tool_name = self._select_output_tool(goal)
         steps = [
@@ -303,6 +309,7 @@ class WorkspaceAgentService:
             scope_root=str(scope_root),
             steps=steps[: self.max_steps],
             output_tool_name=output_tool_name,
+            steering_instruction=self._clean_steering_instruction(steering_instruction),
         )
 
     def create_state(self, plan: WorkspaceAgentPlan) -> WorkspaceAgentState:
@@ -350,7 +357,7 @@ class WorkspaceAgentService:
         state: WorkspaceAgentState,
         step: AgentRunStep,
     ) -> AgentRunStep:
-        tokens = self._search_tokens(plan.goal)
+        tokens = self._plan_tokens(plan)
         architecture_focus = self._is_architecture_focused(tokens)
         candidate_limit = self._candidate_limit(tokens)
         candidates: list[WorkspaceCandidate] = []
@@ -511,7 +518,7 @@ class WorkspaceAgentService:
                 summary += "\n\nVisible scope entries:\n- " + "\n- ".join(state.top_entries[:5])
             return summary[: self.max_context_chars - 1].rstrip() + "…" if len(summary) > self.max_context_chars else summary
 
-        tokens = self._search_tokens(plan.goal)
+        tokens = self._plan_tokens(plan)
         key_points = self._key_points_from_documents(state.read_documents, tokens=tokens)
         reviewed_files = [document.relative_path for document in state.read_documents[: self.max_file_reads]]
         sections = [
@@ -809,6 +816,18 @@ class WorkspaceAgentService:
     def _search_tokens(self, goal: str) -> list[str]:
         tokens = re.findall(r"[a-z0-9]+", goal.lower())
         return [token for token in tokens if len(token) > 2 and token not in STOPWORDS]
+
+    def _plan_tokens(self, plan: WorkspaceAgentPlan) -> list[str]:
+        texts = [plan.goal]
+        if plan.steering_instruction:
+            texts.append(plan.steering_instruction)
+        return self._search_tokens(" ".join(texts))
+
+    def _clean_steering_instruction(self, instruction: str | None) -> str | None:
+        if not instruction:
+            return None
+        cleaned = re.sub(r"\s+", " ", instruction.strip())
+        return cleaned or None
 
     def _score_candidate(self, tokens: list[str], path: Path, preview: str) -> float:
         haystack = f"{path.as_posix()} {preview.lower()}"

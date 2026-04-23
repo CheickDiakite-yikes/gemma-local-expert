@@ -91,6 +91,9 @@ const elements = {
   voiceButton: document.getElementById("voice-button"),
 };
 
+const scheduledConversationRefreshes = new Map();
+const inflightConversationRefreshes = new Set();
+
 function activeMessages() {
   if (!state.activeConversationId) {
     return state.draftMessages;
@@ -218,6 +221,12 @@ function purgeConversationUiState(conversationId) {
   const approvalIds = transcript.map((message) => message.approval?.id).filter(Boolean);
   const messageIds = transcript.map((message) => message.id).filter(Boolean);
   const runs = runsForConversation(conversationId);
+  const scheduledRefresh = scheduledConversationRefreshes.get(conversationId);
+  if (scheduledRefresh) {
+    window.clearTimeout(scheduledRefresh);
+    scheduledConversationRefreshes.delete(conversationId);
+  }
+  inflightConversationRefreshes.delete(conversationId);
 
   for (const approvalId of approvalIds) {
     state.approvalDrafts.delete(approvalId);
@@ -280,6 +289,30 @@ function approvalFromItem(item) {
   return null;
 }
 
+function workProductFromItem(item) {
+  if (!item || item.kind !== "work_product") {
+    return null;
+  }
+  const payload = item.payload || {};
+  const approval = payload.approval && typeof payload.approval === "object" ? payload.approval : null;
+  if (!approval?.id) {
+    return null;
+  }
+  return {
+    ...approval,
+    payload:
+      payload.work_product && typeof payload.work_product === "object"
+        ? payload.work_product
+        : approval.payload || {},
+    result: payload.result || approval.result || null,
+    source_domain: payload.source_domain || approval.source_domain || null,
+    execution_mode: payload.execution_mode || approval.execution_mode || null,
+    grounding_status: payload.grounding_status || approval.grounding_status || null,
+    evidence_packet_id: payload.evidence_packet_id || approval.evidence_packet_id || null,
+    workProductItem: item,
+  };
+}
+
 function hydrateApprovalsIntoMessages(conversationId) {
   const messages = state.transcripts.get(conversationId);
   if (!messages) {
@@ -287,15 +320,21 @@ function hydrateApprovalsIntoMessages(conversationId) {
   }
   const items = itemsForConversation(conversationId);
   const latestApprovalsById = new Map();
+  const latestWorkProductsById = new Map();
   let itemApprovalCount = 0;
   for (const item of items) {
     const approval = approvalFromItem(item);
-    if (!approval?.id) {
-      continue;
+    const workProduct = workProductFromItem(item);
+    if (approval?.id) {
+      itemApprovalCount += 1;
+      latestApprovalsById.set(approval.id, approval);
+      state.approvals.set(approval.id, approval);
     }
-    itemApprovalCount += 1;
-    latestApprovalsById.set(approval.id, approval);
-    state.approvals.set(approval.id, approval);
+    if (workProduct?.id) {
+      itemApprovalCount += 1;
+      latestWorkProductsById.set(workProduct.id, workProduct);
+      state.approvals.set(workProduct.id, workProduct);
+    }
   }
   if (itemApprovalCount === 0) {
     return;
@@ -306,21 +345,55 @@ function hydrateApprovalsIntoMessages(conversationId) {
       approvalsByTurn.set(approval.turn_id, approval);
     }
   }
+  const workProductsByTurn = new Map();
+  for (const workProduct of latestWorkProductsById.values()) {
+    if (workProduct?.turn_id) {
+      workProductsByTurn.set(workProduct.turn_id, workProduct);
+    }
+  }
   for (const message of messages) {
     if (message.role === "assistant" && message.turnId) {
-      const approval = approvalsByTurn.get(message.turnId) || null;
+      const workProduct = workProductsByTurn.get(message.turnId) || null;
+      const approval = workProduct || approvalsByTurn.get(message.turnId) || null;
+      message.workProduct = workProduct;
       message.approval = approval;
-      if (approval) {
-        message.proposedTool = approval.tool_name || null;
-        message.toolResult = approval.result || null;
-      }
+      message.proposedTool = approval?.tool_name || null;
+      message.toolResult = approval?.result || null;
     }
   }
 }
 
 function setConversationItems(conversationId, items) {
-  state.conversationItems.set(conversationId, Array.isArray(items) ? items : []);
+  const nextItems = Array.isArray(items) ? [...items] : [];
+  nextItems.sort((left, right) => String(left?.created_at || "").localeCompare(String(right?.created_at || "")));
+  state.conversationItems.set(conversationId, nextItems);
   hydrateApprovalsIntoMessages(conversationId);
+}
+
+function upsertConversationItem(conversationId, item) {
+  if (!conversationId || !item?.id) {
+    return null;
+  }
+  const items = [...itemsForConversation(conversationId)];
+  const index = items.findIndex((entry) => entry.id === item.id);
+  if (index === -1) {
+    items.push(item);
+  } else {
+    items[index] = item;
+  }
+  setConversationItems(conversationId, items);
+  const approval = approvalFromItem(item);
+  if (approval?.id) {
+    state.approvals.set(approval.id, approval);
+  }
+  const workProduct = workProductFromItem(item);
+  if (workProduct?.id) {
+    state.approvals.set(workProduct.id, workProduct);
+  }
+  if (item.kind === "agent_run" && item.payload?.run) {
+    upsertAgentRun(conversationId, item.payload.run);
+  }
+  return item;
 }
 
 function normalizeTranscriptMessage(message, runsByTurn = new Map()) {
@@ -332,6 +405,7 @@ function normalizeTranscriptMessage(message, runsByTurn = new Map()) {
     assets: message.assets || [],
     citations: [],
     approval: message.approval || null,
+    workProduct: null,
     proposedTool: message.approval?.tool_name || null,
     process: [],
     toolResult: message.approval?.result || null,
@@ -362,30 +436,6 @@ function applyConversationState(conversationId, snapshot) {
   );
   setConversationItems(conversationId, items);
   return state.transcripts.get(conversationId) || [];
-}
-
-function upsertApprovalItem(conversationId, approval, summary = "") {
-  if (!conversationId || !approval?.id) {
-    return;
-  }
-  const items = [...itemsForConversation(conversationId)];
-  items.push({
-    id: `local-approval-${approval.id}-${Date.now()}`,
-    conversation_id: conversationId,
-    turn_id: approval.turn_id || null,
-    kind: "approval",
-    summary: summary || `Approval state updated for ${approval.tool_name || "draft"}.`,
-    payload: {
-      approval_id: approval.id,
-      tool_name: approval.tool_name || null,
-      status: approval.status || null,
-      reason: approval.reason || null,
-      run_id: approval.run_id || null,
-      approval,
-    },
-    created_at: new Date().toISOString(),
-  });
-  setConversationItems(conversationId, items);
 }
 
 function hydrateAgentRunsIntoMessages(conversationId) {
@@ -691,6 +741,25 @@ function approvalReasonCopy(approval) {
           : "From this conversation.";
     default:
       return "Drafted locally.";
+  }
+}
+
+function approvalReviewDetail(approvalLike) {
+  const explicitReason = String(approvalLike?.reason || "").trim();
+  if (explicitReason) {
+    return explicitReason;
+  }
+  const descriptorSummary = String(approvalLike?.tool_descriptor?.approval_summary || "").trim();
+  if (descriptorSummary) {
+    return descriptorSummary;
+  }
+  switch (String(approvalLike?.category || "").toLowerCase()) {
+    case "audited_export":
+      return "Review the markdown export before it is written locally.";
+    case "medical_specialist":
+      return "Review the guarded medical specialist action before it continues.";
+    default:
+      return `Review the ${approvalSurfaceNoun(approvalLike?.tool_name || "")} before it is written locally.`;
   }
 }
 
@@ -2324,13 +2393,14 @@ function renderMessages({ preserveScroll = false } = {}) {
       continue;
     }
     const visibleContent = messageDisplayContent(message);
+    const activeWorkProduct = message.workProduct || message.approval;
     const row = document.createElement("article");
     row.className = [
       "message-row",
       message.role,
       message.loading ? "is-loading" : "",
       message.agentRun ? "has-agent-run" : "",
-      message.approval ? "has-approval" : "",
+      activeWorkProduct ? "has-approval" : "",
     ]
       .filter(Boolean)
       .join(" ");
@@ -2342,14 +2412,14 @@ function renderMessages({ preserveScroll = false } = {}) {
       )
       .join("");
 
-    const toolChip = message.proposedTool && !message.approval
+    const toolChip = message.proposedTool && !activeWorkProduct
       ? `<span class="tool-chip">Prepared ${escapeHtml(message.proposedTool)}</span>`
       : "";
 
-    const approvalCard = renderApprovalMarkup(message.approval);
+    const approvalCard = renderApprovalMarkup(activeWorkProduct);
     const assetGallery = renderAssetMarkup(message.assets || []);
     const toolResultCard = renderToolResultMarkup(message.toolResult);
-    const agentRunCard = renderAgentRunMarkup(message.agentRun, message.approval);
+    const agentRunCard = renderAgentRunMarkup(message.agentRun, activeWorkProduct);
     const loadingShell = renderAssistantLoadingMarkup(message, visibleContent);
     const contentMarkup = renderMessageContent(message, visibleContent);
 
@@ -2372,8 +2442,8 @@ function renderMessages({ preserveScroll = false } = {}) {
     elements.messageList.append(row);
 
     wireMessageCardActions(row, message);
-    if (message.approval) {
-      wireApprovalActions(row, message.approval);
+    if (activeWorkProduct) {
+      wireApprovalActions(row, activeWorkProduct);
     }
     if (message.agentRun) {
       wireRunCardActions(row, message.agentRun);
@@ -2866,6 +2936,32 @@ async function refreshConversationState(conversationId) {
   return snapshot;
 }
 
+function scheduleConversationStateRefresh(conversationId, delay = 80) {
+  if (!conversationId) {
+    return;
+  }
+  const existing = scheduledConversationRefreshes.get(conversationId);
+  if (existing) {
+    return;
+  }
+  const timer = window.setTimeout(async () => {
+    scheduledConversationRefreshes.delete(conversationId);
+    if (inflightConversationRefreshes.has(conversationId)) {
+      scheduleConversationStateRefresh(conversationId, delay);
+      return;
+    }
+    inflightConversationRefreshes.add(conversationId);
+    try {
+      await refreshConversationState(conversationId);
+    } catch (error) {
+      // Ignore transient live-refresh failures and let the next full reload recover.
+    } finally {
+      inflightConversationRefreshes.delete(conversationId);
+    }
+  }, delay);
+  scheduledConversationRefreshes.set(conversationId, timer);
+}
+
 async function openConversation(conversationId) {
   state.activeConversationId = conversationId;
   persistActiveConversation();
@@ -2939,6 +3035,7 @@ function ensureAssistantMessage(turnId) {
       assets: [],
       citations: [],
       approval: null,
+      workProduct: null,
       proposedTool: null,
       process: [],
       toolResult: null,
@@ -2976,13 +3073,29 @@ function updateConversationPreview(conversationId, fallbackText) {
 }
 
 function syncRunFromEvent(conversationId, assistantMessage, payload) {
-  const run = payload?.run || null;
+  const run = payload?.run || payload?.item?.payload?.run || null;
   if (!run) {
     return null;
   }
   const stored = upsertAgentRun(conversationId, run);
   assistantMessage.agentRun = stored;
   return stored;
+}
+
+function syncItemFromEvent(conversationId, payload) {
+  if (!conversationId) {
+    return null;
+  }
+  const itemKeys = ["item", "approval_item", "work_product_item"];
+  let latest = null;
+  for (const key of itemKeys) {
+    const item = payload?.[key];
+    if (!item) {
+      continue;
+    }
+    latest = upsertConversationItem(conversationId, item);
+  }
+  return latest;
 }
 
 async function uploadAttachment(attachment) {
@@ -3479,6 +3592,7 @@ function mergeAssets(existingAssets, newAssets) {
 
 function handleStreamEvent(event) {
   const assistantMessage = event.turn_id ? ensureAssistantMessage(event.turn_id) : null;
+  syncItemFromEvent(event.conversation_id, event.payload);
 
   if (event.type === "citation.added") {
     if (!assistantMessage) {
@@ -3524,6 +3638,7 @@ function handleStreamEvent(event) {
     assistantMessage.process = [];
     updateConversationPreview(event.conversation_id, assistantMessage.content);
     updateStatus("ready", "Ready", "Response complete.");
+    scheduleConversationStateRefresh(event.conversation_id);
   } else if (event.type === "tool.proposed") {
     if (!assistantMessage) {
       render();
@@ -3532,7 +3647,7 @@ function handleStreamEvent(event) {
     assistantMessage.loading = true;
     syncRunFromEvent(event.conversation_id, assistantMessage, event.payload);
     assistantMessage.proposedTool = event.payload.tool_name;
-    const detail = `Draft ready for ${approvalSurfaceNoun(event.payload.tool_name)} review.`;
+    const detail = approvalReviewDetail(event.payload);
     mergeMessageProcess(assistantMessage, {
       kind: "tool",
       label: "Prepared local action",
@@ -3586,13 +3701,8 @@ function handleStreamEvent(event) {
     } else {
       syncRunFromEvent(event.conversation_id, assistantMessage, event.payload);
     }
-    upsertApprovalItem(
-      event.conversation_id,
-      approvalPayload,
-      `Pending approval for ${approvalPayload.tool_name || "draft"}.`,
-    );
     state.approvals.set(approvalPayload.id, approvalPayload);
-    const detail = "A durable action is ready for review and approval.";
+    const detail = approvalReviewDetail(approvalPayload);
     mergeMessageProcess(assistantMessage, {
       kind: "tool",
       label: "Approval needed",
@@ -3625,8 +3735,17 @@ async function submitApprovalDecision(approvalId, action, editedPayload = {}) {
     clearApprovalDraft(approvalId);
     state.approvalErrors.delete(approvalId);
     state.approvals.set(approvalId, approval);
+    if (approval.item && state.activeConversationId) {
+      upsertConversationItem(state.activeConversationId, approval.item);
+    }
+    if (approval.work_product_item && state.activeConversationId) {
+      upsertConversationItem(state.activeConversationId, approval.work_product_item);
+    }
+    if (approval.run && state.activeConversationId) {
+      upsertAgentRun(state.activeConversationId, approval.run);
+    }
     if (state.activeConversationId) {
-      await refreshConversationState(state.activeConversationId);
+      scheduleConversationStateRefresh(state.activeConversationId, 30);
     }
     render();
   } catch (error) {

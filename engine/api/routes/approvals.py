@@ -97,4 +97,45 @@ async def decide_approval(
         approval_id=approval_id,
         status=approval.status,
     )
-    return approval
+    approval_item = next(
+        (
+            item
+            for item in reversed(
+                container.store.list_items(
+                    approval.conversation_id,
+                    turn_id=approval.turn_id,
+                    limit=64,
+                )
+            )
+            if item.kind.value == "approval"
+            and item.payload.get("approval_id") == approval.id
+        ),
+        None,
+    )
+    work_product_item = next(
+        (
+            item
+            for item in reversed(
+                container.store.list_items(
+                    approval.conversation_id,
+                    turn_id=approval.turn_id,
+                    limit=64,
+                )
+            )
+            if item.kind.value == "work_product"
+            and item.payload.get("approval_id") == approval.id
+        ),
+        None,
+    )
+    run = (
+        container.store.get_agent_run(approval.run_id)
+        if approval.run_id
+        else None
+    )
+    return approval.model_copy(
+        update={
+            "item": approval_item,
+            "work_product_item": work_product_item,
+            "run": run,
+        }
+    )

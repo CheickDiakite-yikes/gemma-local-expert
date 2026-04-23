@@ -6,12 +6,14 @@ from fastapi.testclient import TestClient
 from engine.api.app import build_container, create_app
 from engine.config.settings import Settings
 from engine.contracts.api import (
+    ApprovalCategory,
     AssetCareContext,
     AssetKind,
     ApprovalMode,
     ConversationMemoryEntry,
     ConversationMemoryKind,
     ConversationItemKind,
+    PermissionClass,
     SourceDomain,
     SandboxMode,
     new_id,
@@ -30,6 +32,22 @@ def test_health_endpoint(tmp_path: Path) -> None:
     assert response.json()["status"] == "ok"
     assert response.json()["tracking_backend"] == settings.tracking_backend
     assert response.json()["tracking_model"] == settings.default_tracking_model
+
+
+def test_system_tools_expose_permission_classes_and_approval_categories(tmp_path: Path) -> None:
+    settings = Settings(database_path=str(tmp_path / "test-tools-endpoint.db"))
+    client = TestClient(create_app(settings))
+
+    response = client.get("/v1/system/tools")
+
+    assert response.status_code == 200
+    tools = {tool["name"]: tool for tool in response.json()}
+
+    assert tools["create_report"]["approval_category"] == "durable_write"
+    assert "durable_output" in tools["create_report"]["permission_classes"]
+    assert tools["export_brief"]["approval_category"] == "audited_export"
+    assert "audit_log" in tools["export_brief"]["permission_classes"]
+    assert tools["generate_heatmap_overlay"]["approval_category"] is None
 
 
 def test_conversation_turn_streams_completion_event(tmp_path: Path) -> None:
@@ -51,6 +69,46 @@ def test_conversation_turn_streams_completion_event(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     assert "assistant.message.completed" in response.text
+
+
+def test_stream_events_include_item_snapshots_for_assistant_and_approval_state(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(database_path=str(tmp_path / "test-stream-items.db"))
+    client = TestClient(create_app(settings))
+    conversation = client.post(
+        "/v1/conversations", json={"title": "Stream items", "mode": "research"}
+    ).json()
+
+    response = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Create a report summarizing the current field assistant architecture.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+
+    assert response.status_code == 200
+    lines = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+    completed = next(line for line in lines if line["type"] == "assistant.message.completed")
+    proposed = next(line for line in lines if line["type"] == "tool.proposed")
+    approval = next(line for line in lines if line["type"] == "approval.required")
+
+    assert completed["payload"]["item"]["kind"] == "assistant_message"
+    assert completed["payload"]["item"]["turn_id"] == completed["turn_id"]
+    assert proposed["payload"]["item"]["kind"] == "tool_proposal"
+    assert proposed["payload"]["item"]["payload"]["tool_name"] == "create_report"
+    assert approval["payload"]["item"]["kind"] == "approval"
+    assert approval["payload"]["item"]["payload"]["approval"]["id"] == approval["payload"]["id"]
+    assert approval["payload"]["work_product_item"]["kind"] == "work_product"
+    assert approval["payload"]["work_product_item"]["payload"]["approval_id"] == approval["payload"]["id"]
+    assert approval["payload"]["work_product_item"]["payload"]["work_product"]["title"] == "Field Assistant Architecture Report"
+    assert approval["payload"]["category"] == "durable_write"
+    assert "durable_output" in approval["payload"]["permission_classes"]
 
 
 def test_turn_records_capture_policy_and_items_for_simple_chat(tmp_path: Path) -> None:
@@ -80,6 +138,9 @@ def test_turn_records_capture_policy_and_items_for_simple_chat(tmp_path: Path) -
     assert turn.policy.cwd == settings.workspace_root
     assert turn.policy.sandbox_mode == SandboxMode.READ_ONLY
     assert turn.policy.approval_mode == ApprovalMode.NONE
+    assert turn.policy.permission_classes == [PermissionClass.LOCAL_READ]
+    assert turn.policy.requires_confirmation is False
+    assert turn.policy.approval_summary is None
     assert turn.user_message_id
     assert turn.assistant_message_id
 
@@ -114,12 +175,19 @@ def test_durable_turn_persists_approval_item_and_workspace_write_policy(tmp_path
     turn = turns[0]
     assert turn.policy.sandbox_mode == SandboxMode.WORKSPACE_WRITE
     assert turn.policy.approval_mode == ApprovalMode.DURABLE_WRITE
+    assert turn.policy.approval_category == ApprovalCategory.DURABLE_WRITE
+    assert PermissionClass.WORKSPACE_WRITE in turn.policy.permission_classes
+    assert PermissionClass.TOOL_EXECUTION in turn.policy.permission_classes
+    assert PermissionClass.DURABLE_OUTPUT in turn.policy.permission_classes
+    assert turn.policy.requires_confirmation is True
+    assert "durable local report" in (turn.policy.approval_summary or "").lower()
 
     items = app.state.container.store.list_items(conversation["id"], turn_id=turn.id)
     kinds = [item.kind for item in items]
     assert ConversationItemKind.USER_MESSAGE in kinds
     assert ConversationItemKind.ASSISTANT_MESSAGE in kinds
     assert ConversationItemKind.APPROVAL in kinds
+    assert ConversationItemKind.WORK_PRODUCT in kinds
 
 
 def test_turn_and_item_endpoints_expose_internal_thread_state(tmp_path: Path) -> None:
@@ -154,6 +222,10 @@ def test_turn_and_item_endpoints_expose_internal_thread_state(tmp_path: Path) ->
     assert turns[0]["route_kind"]
     assert turns[0]["policy"]["sandbox_mode"] == "workspace_write"
     assert turns[0]["policy"]["approval_mode"] == "durable_write"
+    assert turns[0]["policy"]["approval_category"] == "durable_write"
+    assert "workspace_write" in turns[0]["policy"]["permission_classes"]
+    assert "tool_execution" in turns[0]["policy"]["permission_classes"]
+    assert turns[0]["policy"]["requires_confirmation"] is True
     assert any(item["kind"] == "approval" for item in items)
 
 
@@ -187,6 +259,7 @@ def test_conversation_state_endpoint_returns_coherent_thread_surface(tmp_path: P
     assistant_message = snapshot["messages"][-1]
     turn = snapshot["turns"][0]
     approval_item = next(item for item in snapshot["items"] if item["kind"] == "approval")
+    work_product_item = next(item for item in snapshot["items"] if item["kind"] == "work_product")
 
     assert assistant_message["approval"] is not None
     assert assistant_message["approval"]["id"] == approval_item["payload"]["approval"]["id"]
@@ -194,7 +267,12 @@ def test_conversation_state_endpoint_returns_coherent_thread_surface(tmp_path: P
     assert turn["route_kind"]
     assert turn["policy"]["sandbox_mode"] == "workspace_write"
     assert turn["policy"]["approval_mode"] == "durable_write"
+    assert turn["policy"]["approval_category"] == "durable_write"
+    assert "durable_output" in turn["policy"]["permission_classes"]
+    assert turn["policy"]["requires_confirmation"] is True
     assert approval_item["turn_id"] == assistant_message["turn_id"]
+    assert work_product_item["turn_id"] == assistant_message["turn_id"]
+    assert work_product_item["payload"]["approval_id"] == assistant_message["approval"]["id"]
 
 
 def test_archive_endpoint_hides_conversation_from_default_list_but_keeps_transcript(tmp_path: Path) -> None:
@@ -684,7 +762,11 @@ def test_approval_executes_checklist_tool_and_persists_note(tmp_path: Path) -> N
     )
 
     assert approval_response.status_code == 200
-    assert approval_response.json()["status"] == "executed"
+    approval = approval_response.json()
+    assert approval["status"] == "executed"
+    assert approval["item"]["kind"] == "approval"
+    assert approval["item"]["payload"]["approval"]["status"] == "executed"
+    assert approval["run"] is None
 
     notes_response = client.get("/v1/notes")
     assert notes_response.status_code == 200
@@ -774,6 +856,7 @@ def test_transcript_rehydrates_executed_approval_state(tmp_path: Path) -> None:
     )
     assert approval_response.status_code == 200
     assert approval_response.json()["status"] == "executed"
+    assert approval_response.json()["item"]["payload"]["approval"]["status"] == "executed"
 
     items_response = client.get(f"/v1/conversations/{conversation['id']}/items")
     assert items_response.status_code == 200
@@ -1502,6 +1585,13 @@ def test_medical_image_requires_explicit_session(tmp_path: Path) -> None:
     assert "Medical specialist access requires an explicit medical session." in response.text
     assert "Request blocked by policy." in response.text
 
+    turns = client.get(f"/v1/conversations/{conversation['id']}/turns").json()
+    assert len(turns) == 1
+    assert turns[0]["policy"]["approval_mode"] == "medical_strict"
+    assert turns[0]["policy"]["approval_category"] == "medical_specialist"
+    assert "medical_specialist" in turns[0]["policy"]["permission_classes"]
+    assert turns[0]["policy"]["requires_confirmation"] is True
+
 
 def test_heatmap_overlay_tool_generates_asset_and_persists_on_assistant_message(
     tmp_path: Path,
@@ -1544,6 +1634,8 @@ def test_heatmap_overlay_tool_generates_asset_and_persists_on_assistant_message(
 
     completed_event = next(line for line in lines if line["type"] == "tool.completed")
     generated_asset = completed_event["payload"]["assets"][0]
+    assert completed_event["payload"]["item"]["kind"] == "tool_result"
+    assert completed_event["payload"]["item"]["payload"]["tool_name"] == "generate_heatmap_overlay"
     assert generated_asset["content_url"]
     assert generated_asset["display_name"].endswith("-segmented-heatmap.png")
 
@@ -1556,6 +1648,12 @@ def test_heatmap_overlay_tool_generates_asset_and_persists_on_assistant_message(
     transcript = transcript_response.json()
     assistant_message = transcript[-1]
     assert assistant_message["assets"][0]["id"] == generated_asset["id"]
+
+    items_response = client.get(f"/v1/conversations/{conversation['id']}/items")
+    assert items_response.status_code == 200
+    items = items_response.json()
+    assert any(item["kind"] == "tool_proposal" for item in items)
+    assert any(item["kind"] == "tool_result" for item in items)
 
 
 def test_capabilities_endpoint_reports_runtime_truth(tmp_path: Path) -> None:
@@ -1800,6 +1898,77 @@ def test_workspace_agent_turn_persists_completed_run(tmp_path: Path) -> None:
     assert runs[0]["result_summary"]
 
 
+def test_thread_steering_biases_workspace_run_and_streams_agent_run_items(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    (workspace_root / "field-assistant-architecture.md").write_text(
+        "Local-first assistant built on Gemma.\nUses bounded routing and explicit approvals.\n",
+        encoding="utf-8",
+    )
+    (workspace_root / "trip-checklist.md").write_text(
+        "Pack batteries.\nConfirm translator contact sheet before departure.\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings(
+        database_path=str(tmp_path / "test-steered-workspace-run.db"),
+        workspace_root=str(workspace_root),
+    )
+    client = TestClient(create_app(settings))
+    conversation = client.post(
+        "/v1/conversations",
+        json={"title": "Steered workspace run", "mode": "research"},
+    ).json()
+
+    steer_response = client.post(
+        f"/v1/conversations/{conversation['id']}/steer",
+        json={"instruction": "Keep the thread focused on architecture and product state."},
+    )
+    assert steer_response.status_code == 200
+
+    response = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Prepare a briefing from the relevant workspace files.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+
+    assert response.status_code == 200
+    lines = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+    agent_status = next(
+        line
+        for line in lines
+        if line["type"] == "turn.status"
+        and isinstance(line["payload"].get("item"), dict)
+        and line["payload"]["item"]["kind"] == "agent_run"
+    )
+    approval_event = next(line for line in lines if line["type"] == "approval.required")
+
+    assert agent_status["payload"]["item"]["payload"]["status"] in {
+        "running",
+        "awaiting_approval",
+        "completed",
+        "blocked",
+        "failed",
+    }
+    assert (
+        agent_status["payload"]["item"]["payload"]["run"]["goal"]
+        == agent_status["payload"]["run"]["goal"]
+    )
+    assert "Local-first assistant built on Gemma" in approval_event["payload"]["payload"]["content"]
+
+    runs = client.get(f"/v1/conversations/{conversation['id']}/runs").json()
+    assert len(runs) == 1
+    assert "Thread steering: Keep the thread focused on architecture and product state." in runs[0]["goal"]
+
+
 def test_workspace_agent_briefing_requires_approval_and_completes_after_decision(
     tmp_path: Path,
 ) -> None:
@@ -1862,6 +2031,11 @@ def test_workspace_agent_briefing_requires_approval_and_completes_after_decision
     assert decision_response.status_code == 200
     approval = decision_response.json()
     assert approval["payload"]["title"] == "Edited workspace briefing"
+    assert approval["item"]["payload"]["approval"]["status"] == "executed"
+    assert approval["work_product_item"]["kind"] == "work_product"
+    assert approval["work_product_item"]["payload"]["approval"]["status"] == "executed"
+    assert approval["work_product_item"]["payload"]["work_product"]["title"] == "Edited workspace briefing"
+    assert approval["run"]["status"] == "completed"
 
     run_response = client.get(f"/v1/runs/{run_id}")
     assert run_response.status_code == 200

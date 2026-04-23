@@ -89,6 +89,24 @@ class ApprovalMode(str, Enum):
     MEDICAL_STRICT = "medical_strict"
 
 
+class ApprovalCategory(str, Enum):
+    DURABLE_WRITE = "durable_write"
+    AUDITED_EXPORT = "audited_export"
+    MEDICAL_SPECIALIST = "medical_specialist"
+
+
+class PermissionClass(str, Enum):
+    LOCAL_READ = "local_read"
+    RETRIEVAL = "retrieval"
+    SPECIALIST_MODEL = "specialist_model"
+    WORKSPACE_WRITE = "workspace_write"
+    WORKSPACE_AGENT = "workspace_agent"
+    TOOL_EXECUTION = "tool_execution"
+    DURABLE_OUTPUT = "durable_output"
+    MEDICAL_SPECIALIST = "medical_specialist"
+    AUDIT_LOG = "audit_log"
+
+
 class WorkspaceIsolationMode(str, Enum):
     SHARED = "shared"
     FORKED = "forked"
@@ -108,7 +126,10 @@ class ConversationItemKind(str, Enum):
     ASSISTANT_MESSAGE = "assistant_message"
     EVIDENCE_PACKET = "evidence_packet"
     APPROVAL = "approval"
+    WORK_PRODUCT = "work_product"
     AGENT_RUN = "agent_run"
+    TOOL_PROPOSAL = "tool_proposal"
+    TOOL_RESULT = "tool_result"
     COMPACTION_MARKER = "compaction_marker"
     STEER = "steer"
 
@@ -196,7 +217,11 @@ class TurnExecutionPolicy(StrictModel):
     sandbox_mode: SandboxMode = SandboxMode.READ_ONLY
     network_access: bool = False
     approval_mode: ApprovalMode = ApprovalMode.NONE
+    approval_category: ApprovalCategory | None = None
     active_profile: RuntimeProfile = RuntimeProfile.FULL_LOCAL
+    permission_classes: list[PermissionClass] = Field(default_factory=list)
+    requires_confirmation: bool = False
+    approval_summary: str | None = None
 
 
 class ConversationTurnRecord(StrictModel):
@@ -415,8 +440,13 @@ class ApprovalState(StrictModel):
     tool_name: str
     reason: str
     status: str
+    category: ApprovalCategory | None = None
+    permission_classes: list[PermissionClass] = Field(default_factory=list)
     payload: dict[str, Any] = Field(default_factory=dict)
     result: dict[str, Any] | None = None
+    item: ConversationItem | None = None
+    work_product_item: ConversationItem | None = None
+    run: AgentRun | None = None
 
 
 class Note(StrictModel):
@@ -519,3 +549,6 @@ class ToolDescriptor(StrictModel):
     name: str
     requires_confirmation: bool
     namespace: str = "general"
+    approval_category: ApprovalCategory | None = None
+    approval_summary: str | None = None
+    permission_classes: list[PermissionClass] = Field(default_factory=list)

@@ -580,6 +580,9 @@ class ConversationContextService:
         snapshot.active_steering_instruction, snapshot.active_steering_turn_id = self._latest_steering_instruction(
             recent_items or []
         )
+        if snapshot.active_compaction_summary and not snapshot.active_topic:
+            snapshot.active_topic = snapshot.active_compaction_summary
+            snapshot.last_user_request = snapshot.active_compaction_summary
         snapshot.last_image_assets = image_reference_groups[0] if image_reference_groups else []
         snapshot.last_video_assets = video_reference_groups[0] if video_reference_groups else []
         snapshot.recent_evidence_memories = self._recent_evidence_memories(transcript)
