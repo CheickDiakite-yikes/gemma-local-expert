@@ -316,6 +316,56 @@ def test_fork_endpoint_can_branch_from_earlier_turn_only(tmp_path: Path) -> None
     assert forked_transcript[-1]["approval"] is None
 
 
+def test_rollback_endpoint_archives_source_and_restores_earlier_turn_state(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(database_path=str(tmp_path / "test-rollback-endpoint.db"))
+    client = TestClient(create_app(settings))
+    conversation = client.post("/v1/conversations", json={"title": "Rollback source", "mode": "research"}).json()
+
+    prompts = [
+        "Say hello normally.",
+        "Create a report summarizing the current field assistant architecture.",
+    ]
+    for prompt in prompts:
+        response = client.post(
+            f"/v1/conversations/{conversation['id']}/turns",
+            json={
+                "conversation_id": conversation["id"],
+                "mode": "research",
+                "text": prompt,
+                "asset_ids": [],
+                "enabled_knowledge_pack_ids": [],
+                "response_preferences": {
+                    "style": "concise",
+                    "citations": True,
+                    "audio_reply": False,
+                },
+            },
+        )
+        assert response.status_code == 200
+
+    source_turns = client.get(f"/v1/conversations/{conversation['id']}/turns").json()
+    rollback_response = client.post(
+        f"/v1/conversations/{conversation['id']}/rollback",
+        json={"up_to_turn_id": source_turns[0]["id"]},
+    )
+    assert rollback_response.status_code == 200
+
+    rolled_back = rollback_response.json()
+    archived_source = client.get(f"/v1/conversations/{conversation['id']}").json()
+    rolled_back_state = client.get(f"/v1/conversations/{rolled_back['id']}/state").json()
+
+    assert archived_source["archived_at"] is not None
+    assert rolled_back["title"] == conversation["title"]
+    assert rolled_back["parent_conversation_id"] == conversation["id"]
+    assert rolled_back["forked_from_turn_id"] == source_turns[0]["id"]
+    assert len(rolled_back_state["turns"]) == 1
+    assert [message["role"] for message in rolled_back_state["messages"]] == ["user", "assistant"]
+    assert "report" not in rolled_back_state["messages"][-1]["content"].lower()
+    assert rolled_back_state["messages"][-1]["approval"] is None
+
+
 def test_conversation_listing_and_transcript_endpoints(tmp_path: Path) -> None:
     settings = Settings(database_path=str(tmp_path / "test-listing.db"))
     client = TestClient(create_app(settings))

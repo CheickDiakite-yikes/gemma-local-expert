@@ -32,6 +32,7 @@ from engine.contracts.api import (
     ConversationState,
     ConversationCreateRequest,
     ConversationForkRequest,
+    ConversationRollbackRequest,
     ConversationTurnRecord,
     EvidencePacket,
     ExportRequest,
@@ -97,6 +98,10 @@ class PersistenceStore(Protocol):
 
     def fork_conversation(
         self, conversation_id: str, request: ConversationForkRequest
+    ) -> Conversation | None: ...
+
+    def rollback_conversation(
+        self, conversation_id: str, request: ConversationRollbackRequest
     ) -> Conversation | None: ...
 
     def ensure_conversation(
@@ -1006,6 +1011,32 @@ class SQLiteStore:
             self._connection.commit()
 
         return forked
+
+    def rollback_conversation(
+        self, conversation_id: str, request: ConversationRollbackRequest
+    ) -> Conversation | None:
+        source = self.get_conversation(conversation_id)
+        if source is None:
+            return None
+
+        rolled_back = self.fork_conversation(
+            conversation_id,
+            ConversationForkRequest(
+                title=request.title or source.title,
+                mode=source.mode,
+                up_to_turn_id=request.up_to_turn_id,
+                copy_memories=request.copy_memories,
+                copy_approvals=request.copy_approvals,
+                copy_agent_runs=request.copy_agent_runs,
+            ),
+        )
+        if rolled_back is None:
+            return None
+
+        if request.archive_current:
+            self.archive_conversation(conversation_id)
+
+        return rolled_back
 
     def ensure_conversation(
         self,

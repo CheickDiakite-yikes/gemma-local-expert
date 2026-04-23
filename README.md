@@ -1425,6 +1425,7 @@ The current public local API is intentionally small but real.
 - `GET /v1/conversations/{conversation_id}/items`
 - `POST /v1/conversations/{conversation_id}/archive`
 - `POST /v1/conversations/{conversation_id}/fork`
+- `POST /v1/conversations/{conversation_id}/rollback`
 - `DELETE /v1/conversations/{conversation_id}`
 - `POST /v1/conversations/{conversation_id}/turns`
 

@@ -8,6 +8,7 @@ from engine.contracts.api import (
     AssistantMode,
     ConversationCreateRequest,
     ConversationForkRequest,
+    ConversationRollbackRequest,
     ConversationItemKind,
     ConversationTurnRecord,
     RuntimeProfile,
@@ -213,3 +214,90 @@ def test_fork_conversation_copies_lineage_and_visible_thread_state(tmp_path: Pat
     assert forked_transcript[-1].approval is not None
     assert forked_transcript[-1].approval.tool_name == "create_report"
     assert any(item.kind == ConversationItemKind.APPROVAL for item in forked_items)
+
+
+def test_rollback_conversation_archives_source_and_restores_earlier_turn_state(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(database_path=str(tmp_path / "rollback-persist.db"))
+    container = build_container(settings)
+
+    created = container.store.create_conversation(
+        ConversationCreateRequest(title="Rollback me", mode=AssistantMode.RESEARCH)
+    )
+    first_turn = container.store.create_turn_record(
+        ConversationTurnRecord(
+            id=new_id("turn"),
+            conversation_id=created.id,
+            mode=AssistantMode.RESEARCH,
+            user_text="Say hello normally.",
+            workspace_root=settings.workspace_root,
+            cwd=settings.workspace_root,
+            policy=TurnExecutionPolicy(
+                workspace_root=settings.workspace_root,
+                cwd=settings.workspace_root,
+                sandbox_mode=SandboxMode.READ_ONLY,
+                network_access=False,
+                approval_mode=ApprovalMode.NONE,
+                active_profile=RuntimeProfile.FULL_LOCAL,
+            ),
+            route_kind="conversation",
+        )
+    )
+    container.store.append_transcript(created.id, "user", "Say hello normally.", turn_id=first_turn.id)
+    container.store.append_transcript(created.id, "assistant", "Hello.", turn_id=first_turn.id)
+
+    second_turn = container.store.create_turn_record(
+        ConversationTurnRecord(
+            id=new_id("turn"),
+            conversation_id=created.id,
+            mode=AssistantMode.RESEARCH,
+            user_text="Create a report.",
+            workspace_root=settings.workspace_root,
+            cwd=settings.workspace_root,
+            policy=TurnExecutionPolicy(
+                workspace_root=settings.workspace_root,
+                cwd=settings.workspace_root,
+                sandbox_mode=SandboxMode.WORKSPACE_WRITE,
+                network_access=False,
+                approval_mode=ApprovalMode.DURABLE_WRITE,
+                active_profile=RuntimeProfile.FULL_LOCAL,
+            ),
+            route_kind="task",
+        )
+    )
+    container.store.append_transcript(created.id, "user", "Create a report.", turn_id=second_turn.id)
+    container.store.append_transcript(
+        created.id,
+        "assistant",
+        "I drafted a report here.",
+        turn_id=second_turn.id,
+    )
+    container.store.create_approval(
+        created.id,
+        second_turn.id,
+        "create_report",
+        "Save a report locally.",
+        payload={"title": "Rollback Report", "content": "Summary"},
+    )
+
+    rolled_back = container.store.rollback_conversation(
+        created.id,
+        ConversationRollbackRequest(up_to_turn_id=first_turn.id),
+    )
+
+    assert rolled_back is not None
+    assert rolled_back.title == created.title
+    assert rolled_back.parent_conversation_id == created.id
+    assert rolled_back.forked_from_turn_id == first_turn.id
+
+    archived_source = container.store.get_conversation(created.id)
+    rolled_back_turns = container.store.list_turn_records(rolled_back.id)
+    rolled_back_transcript = container.store.list_transcript(rolled_back.id)
+
+    assert archived_source is not None
+    assert archived_source.archived_at is not None
+    assert len(rolled_back_turns) == 1
+    assert [message.role for message in rolled_back_transcript] == ["user", "assistant"]
+    assert rolled_back_transcript[-1].content == "Hello."
+    assert rolled_back_transcript[-1].approval is None

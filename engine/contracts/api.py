@@ -278,6 +278,15 @@ class ConversationForkRequest(StrictModel):
     copy_agent_runs: bool = True
 
 
+class ConversationRollbackRequest(StrictModel):
+    up_to_turn_id: str
+    title: str | None = None
+    archive_current: bool = True
+    copy_memories: bool = True
+    copy_approvals: bool = True
+    copy_agent_runs: bool = True
+
+
 class ConversationTurnRequest(StrictModel):
     conversation_id: str
     mode: AssistantMode = AssistantMode.GENERAL

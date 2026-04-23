@@ -47,7 +47,7 @@ For each area, try to keep all three forms of evidence:
 | Document/canvas UX | partial | inline canvas is replacing preview-plus-hidden-editor patterns | still not a true document-first surface with selection-aware edits |
 | App-server style client seam | partial | current local API now exposes transcript, turns, items, approvals, runs, and a canonical `/state` surface; the web client now loads from that single state read on open/refresh | still too web-chat shaped and not yet item/event-first during streaming/live updates |
 | Worktree-backed background work | missing | bounded workspace agent exists | no true isolated worktree/local clone system |
-| Thread ops: fork/archive/rollback/compact | partial | delete, archive, conversation detail, and fork now exist | no rollback, compact, or steer model yet |
+| Thread ops: fork/archive/rollback/compact | partial | delete, archive, conversation detail, fork, and safe rollback now exist | no compact or steer model yet |
 
 ## Domain Checklists
 
@@ -329,11 +329,11 @@ Support stronger thread lifecycle than create/delete/list.
 
 - archive
 - fork
+- safe rollback built on lineage plus source-thread archiving
 - conversation detail/read path for thread lineage and workspace binding
 
 ### Missing
 
-- rollback
 - compact
 - steer
 
@@ -347,7 +347,7 @@ single long thread.
 ### Next slice
 
 - define what `turn steer` should mean in this product before building it
-- add rollback/compact semantics on top of the new fork lineage
+- add compact semantics on top of the new fork and rollback lineage
 
 ## 9. Evaluation Discipline
 
@@ -399,6 +399,7 @@ For any important architecture or UX slice, try to maintain:
 - added conversation detail and fork operations with thread lineage + workspace binding
 - moved approval/canvas ownership onto approval item snapshots in the persistence + web client path
 - added a canonical conversation `/state` surface and switched the web conversation open/refresh path to use it
+- added a safe rollback operation that restores an earlier turn into a replacement thread and archives the source thread
 
 ## Operating Rule Going Forward
 

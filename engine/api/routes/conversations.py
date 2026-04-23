@@ -9,6 +9,7 @@ from engine.contracts.api import (
     ConversationCreateRequest,
     ConversationForkRequest,
     ConversationItem,
+    ConversationRollbackRequest,
     ConversationState,
     ConversationSummary,
     ConversationTurnRecord,
@@ -138,6 +139,21 @@ async def fork_conversation(
     if forked is None:
         raise HTTPException(status_code=404, detail="Conversation not found.")
     return forked
+
+
+@router.post("/{conversation_id}/rollback", response_model=Conversation)
+async def rollback_conversation(
+    conversation_id: str,
+    request: ConversationRollbackRequest,
+    container: ServiceContainer = Depends(get_container),
+) -> Conversation:
+    try:
+        rolled_back = container.store.rollback_conversation(conversation_id, request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if rolled_back is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return rolled_back
 
 
 @router.post("/{conversation_id}/turns")
