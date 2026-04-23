@@ -31,7 +31,9 @@ from engine.contracts.api import (
     ConversationSummary,
     ConversationState,
     ConversationCreateRequest,
+    ConversationCompactRequest,
     ConversationForkRequest,
+    ConversationSteerRequest,
     ConversationRollbackRequest,
     ConversationTurnRecord,
     EvidencePacket,
@@ -103,6 +105,14 @@ class PersistenceStore(Protocol):
     def rollback_conversation(
         self, conversation_id: str, request: ConversationRollbackRequest
     ) -> Conversation | None: ...
+
+    def compact_conversation(
+        self, conversation_id: str, request: ConversationCompactRequest
+    ) -> ConversationItem | None: ...
+
+    def steer_conversation(
+        self, conversation_id: str, request: ConversationSteerRequest
+    ) -> ConversationItem | None: ...
 
     def ensure_conversation(
         self,
@@ -1037,6 +1047,86 @@ class SQLiteStore:
             self.archive_conversation(conversation_id)
 
         return rolled_back
+
+    def compact_conversation(
+        self, conversation_id: str, request: ConversationCompactRequest
+    ) -> ConversationItem | None:
+        conversation = self.get_conversation(conversation_id)
+        if conversation is None:
+            return None
+
+        transcript = self.list_transcript(conversation_id, limit=500)
+        turns = self.list_turn_records(conversation_id, limit=500)
+        memories = self.list_conversation_memories(conversation_id, limit=8)
+        recent_items = self.list_items(conversation_id, limit=128)
+
+        selected_turns = turns
+        up_to_turn_id = request.up_to_turn_id or (turns[-1].id if turns else None)
+        if request.up_to_turn_id is not None:
+            matching_index = next(
+                (index for index, turn in enumerate(turns) if turn.id == request.up_to_turn_id),
+                None,
+            )
+            if matching_index is None:
+                raise ValueError("Turn not found in conversation.")
+            selected_turns = turns[: matching_index + 1]
+
+        selected_turn_ids = {turn.id for turn in selected_turns}
+        selected_messages = [
+            message
+            for message in transcript
+            if message.turn_id in selected_turn_ids or message.turn_id is None
+        ]
+        selected_memories = [
+            memory for memory in memories if memory.turn_id in selected_turn_ids
+        ]
+        selected_items = [
+            item for item in recent_items if item.turn_id in selected_turn_ids
+        ]
+        summary = request.summary or self._build_compaction_summary(
+            transcript=selected_messages,
+            turns=selected_turns,
+            memories=selected_memories,
+            items=selected_items,
+        )
+        item = ConversationItem(
+            id=new_id("item"),
+            conversation_id=conversation_id,
+            turn_id=up_to_turn_id or new_id("turn"),
+            kind=ConversationItemKind.COMPACTION_MARKER,
+            summary=self._summarize_item_text(summary),
+            payload={
+                "summary": summary,
+                "up_to_turn_id": up_to_turn_id,
+                "compacted_turn_ids": [turn.id for turn in selected_turns],
+                "turn_count": len(selected_turns),
+                "message_count": len(selected_messages),
+            },
+        )
+        return self.append_item(item)
+
+    def steer_conversation(
+        self, conversation_id: str, request: ConversationSteerRequest
+    ) -> ConversationItem | None:
+        conversation = self.get_conversation(conversation_id)
+        if conversation is None:
+            return None
+        instruction = request.instruction.strip()
+        if not instruction:
+            raise ValueError("Instruction cannot be empty.")
+        latest_turn = self.list_turn_records(conversation_id, limit=1)
+        turn_id = latest_turn[0].id if latest_turn else new_id("turn")
+        item = ConversationItem(
+            id=new_id("item"),
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            kind=ConversationItemKind.STEER,
+            summary=self._summarize_item_text(instruction),
+            payload={
+                "instruction": instruction,
+            },
+        )
+        return self.append_item(item)
 
     def ensure_conversation(
         self,
@@ -2663,6 +2753,7 @@ class SQLiteStore:
         scalar_mappings = {
             "turn_id": turn_id_map,
             "previous_turn_id": turn_id_map,
+            "up_to_turn_id": turn_id_map,
             "message_id": message_id_map,
             "approval_id": approval_id_map,
             "run_id": run_id_map,
@@ -2681,7 +2772,68 @@ class SQLiteStore:
             if isinstance(nested.get("run_id"), str) and nested["run_id"] in run_id_map:
                 nested["run_id"] = run_id_map[nested["run_id"]]
             remapped["approval"] = nested
+        compacted_turn_ids = remapped.get("compacted_turn_ids")
+        if isinstance(compacted_turn_ids, list):
+            remapped["compacted_turn_ids"] = [
+                turn_id_map.get(turn_id, turn_id)
+                for turn_id in compacted_turn_ids
+                if isinstance(turn_id, str)
+            ]
         return remapped
+
+    def _build_compaction_summary(
+        self,
+        *,
+        transcript: list[TranscriptMessage],
+        turns: list[ConversationTurnRecord],
+        memories: list[ConversationMemoryEntry],
+        items: list[ConversationItem],
+    ) -> str:
+        latest_user = next((message.content for message in reversed(transcript) if message.role == "user"), None)
+        latest_assistant = next(
+            (message.content for message in reversed(transcript) if message.role == "assistant"),
+            None,
+        )
+        pending_approval = next(
+            (
+                message.approval
+                for message in reversed(transcript)
+                if message.role == "assistant" and message.approval and message.approval.status == "pending"
+            ),
+            None,
+        )
+        steer_instruction = next(
+            (
+                item.payload.get("instruction")
+                for item in reversed(items)
+                if item.kind == ConversationItemKind.STEER
+                and isinstance(item.payload, dict)
+                and isinstance(item.payload.get("instruction"), str)
+                and item.payload.get("instruction").strip()
+            ),
+            None,
+        )
+        memory_topics = [memory.topic for memory in memories[:2] if memory.topic]
+
+        lines: list[str] = []
+        if latest_user:
+            lines.append(f"Latest user focus: {self._compact(latest_user)}")
+        if pending_approval:
+            title = pending_approval.payload.get("title")
+            if isinstance(title, str) and title.strip():
+                lines.append(f'Pending draft: {title.strip()}')
+        if steer_instruction:
+            lines.append(f"Current steering: {self._compact(steer_instruction)}")
+        if latest_assistant:
+            lines.append(f"Latest assistant state: {self._compact(latest_assistant)}")
+        if memory_topics:
+            lines.append("Recent memory anchors: " + "; ".join(self._compact(topic) for topic in memory_topics))
+        if turns:
+            lines.append(f"Compacted {len(turns)} turns into one thread summary.")
+        summary = " ".join(line for line in lines if line).strip()
+        if summary:
+            return summary
+        return "Compacted the earlier thread state into a condensed summary for future turns."
 
     def _list_assets_for_messages(
         self, message_ids: list[str]
@@ -2809,6 +2961,9 @@ class SQLiteStore:
         if len(cleaned) <= limit:
             return cleaned
         return cleaned[: limit - 1].rstrip() + "…"
+
+    def _compact(self, text: str) -> str:
+        return " ".join(str(text).split())
 
     def _tokenize(self, text: str) -> list[str]:
         tokens = re.findall(r"[a-z0-9]+", text.lower())

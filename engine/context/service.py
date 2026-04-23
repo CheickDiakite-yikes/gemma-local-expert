@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from engine.contracts.api import (
     AssetKind,
     AssetSummary,
+    ConversationItem,
+    ConversationItemKind,
     ConversationMemoryEntry,
     ConversationMemoryKind,
     EvidencePacket,
@@ -327,6 +329,10 @@ class ConversationContextSnapshot:
     recent_conversation_memories: list[ConversationMemoryEntry] = field(default_factory=list)
     selected_memory_topic: str | None = None
     selected_memory_summary: str | None = None
+    active_compaction_summary: str | None = None
+    active_compaction_turn_id: str | None = None
+    active_steering_instruction: str | None = None
+    active_steering_turn_id: str | None = None
     memory_focus_kind: str | None = None
     memory_focus_reason: str | None = None
     memory_focus_confidence: float | None = None
@@ -436,6 +442,10 @@ class ConversationContextSnapshot:
             if self.selected_memory_topic:
                 selected_memory = f"{self.selected_memory_topic}: {selected_memory}"
             lines.append(f"Selected conversation memory: {selected_memory}")
+        if self.active_compaction_summary:
+            lines.append(f"Latest compaction summary: {self.active_compaction_summary}")
+        if self.active_steering_instruction:
+            lines.append(f"Active thread steering: {self.active_steering_instruction}")
         if self.memory_focus_kind:
             confidence = (
                 f"{self.memory_focus_confidence:.2f}"
@@ -534,6 +544,7 @@ class ConversationContextService:
         transcript: list[TranscriptMessage],
         attached_assets: list[AssetSummary],
         recent_memories: list[ConversationMemoryEntry] | None = None,
+        recent_items: list[ConversationItem] | None = None,
     ) -> ConversationContextSnapshot:
         snapshot = ConversationContextSnapshot()
         snapshot.recent_topics = self._recent_topics(transcript)
@@ -563,6 +574,12 @@ class ConversationContextService:
             transcript, AssetKind.DOCUMENT
         )
         snapshot.recent_conversation_memories = list(recent_memories or [])
+        snapshot.active_compaction_summary, snapshot.active_compaction_turn_id = self._latest_compaction_summary(
+            recent_items or []
+        )
+        snapshot.active_steering_instruction, snapshot.active_steering_turn_id = self._latest_steering_instruction(
+            recent_items or []
+        )
         snapshot.last_image_assets = image_reference_groups[0] if image_reference_groups else []
         snapshot.last_video_assets = video_reference_groups[0] if video_reference_groups else []
         snapshot.recent_evidence_memories = self._recent_evidence_memories(transcript)
@@ -633,6 +650,34 @@ class ConversationContextService:
             snapshot.active_asset_labels = selected_evidence.asset_labels[:3]
         snapshot.active_draft_lineage = snapshot.pending_approval_id
         return snapshot
+
+    def _latest_compaction_summary(
+        self,
+        items: list[ConversationItem],
+    ) -> tuple[str | None, str | None]:
+        for item in reversed(items):
+            if item.kind != ConversationItemKind.COMPACTION_MARKER:
+                continue
+            summary = item.payload.get("summary") if isinstance(item.payload, dict) else None
+            if isinstance(summary, str) and summary.strip():
+                return self._trim(self._compact(summary), 220), item.turn_id
+            if item.summary:
+                return self._trim(self._compact(item.summary), 220), item.turn_id
+        return None, None
+
+    def _latest_steering_instruction(
+        self,
+        items: list[ConversationItem],
+    ) -> tuple[str | None, str | None]:
+        for item in reversed(items):
+            if item.kind != ConversationItemKind.STEER:
+                continue
+            instruction = item.payload.get("instruction") if isinstance(item.payload, dict) else None
+            if isinstance(instruction, str) and instruction.strip():
+                return self._trim(self._compact(instruction), 220), item.turn_id
+            if item.summary:
+                return self._trim(self._compact(item.summary), 220), item.turn_id
+        return None, None
 
     def _select_conversation_memory(
         self,

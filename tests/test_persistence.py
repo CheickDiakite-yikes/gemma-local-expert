@@ -6,8 +6,10 @@ from engine.contracts.api import (
     AgentRunStatus,
     ApprovalMode,
     AssistantMode,
+    ConversationCompactRequest,
     ConversationCreateRequest,
     ConversationForkRequest,
+    ConversationSteerRequest,
     ConversationRollbackRequest,
     ConversationItemKind,
     ConversationTurnRecord,
@@ -301,3 +303,72 @@ def test_rollback_conversation_archives_source_and_restores_earlier_turn_state(
     assert [message.role for message in rolled_back_transcript] == ["user", "assistant"]
     assert rolled_back_transcript[-1].content == "Hello."
     assert rolled_back_transcript[-1].approval is None
+
+
+def test_compact_and_steer_conversation_append_item_backed_thread_ops(tmp_path: Path) -> None:
+    settings = Settings(database_path=str(tmp_path / "compact-steer-persist.db"))
+    container = build_container(settings)
+
+    created = container.store.create_conversation(
+        ConversationCreateRequest(title="Compact me", mode=AssistantMode.RESEARCH)
+    )
+    turn = container.store.create_turn_record(
+        ConversationTurnRecord(
+            id=new_id("turn"),
+            conversation_id=created.id,
+            mode=AssistantMode.RESEARCH,
+            user_text="Create a report.",
+            workspace_root=settings.workspace_root,
+            cwd=settings.workspace_root,
+            policy=TurnExecutionPolicy(
+                workspace_root=settings.workspace_root,
+                cwd=settings.workspace_root,
+                sandbox_mode=SandboxMode.WORKSPACE_WRITE,
+                network_access=False,
+                approval_mode=ApprovalMode.DURABLE_WRITE,
+                active_profile=RuntimeProfile.FULL_LOCAL,
+            ),
+            route_kind="task",
+        )
+    )
+    container.store.append_transcript(created.id, "user", "Create a report.", turn_id=turn.id)
+    container.store.append_transcript(
+        created.id,
+        "assistant",
+        "I drafted a report here.",
+        turn_id=turn.id,
+    )
+    container.store.create_approval(
+        created.id,
+        turn.id,
+        "create_report",
+        "Save a report locally.",
+        payload={"title": "Compact Report", "content": "Summary"},
+    )
+
+    steer_item = container.store.steer_conversation(
+        created.id,
+        ConversationSteerRequest(instruction="Keep the thread focused on architecture."),
+    )
+    compact_item = container.store.compact_conversation(
+        created.id,
+        ConversationCompactRequest(up_to_turn_id=turn.id),
+    )
+
+    assert steer_item is not None
+    assert steer_item.kind == ConversationItemKind.STEER
+    assert steer_item.payload["instruction"] == "Keep the thread focused on architecture."
+
+    assert compact_item is not None
+    assert compact_item.kind == ConversationItemKind.COMPACTION_MARKER
+    assert compact_item.payload["up_to_turn_id"] == turn.id
+    assert compact_item.payload["turn_count"] == 1
+    assert "pending draft" in compact_item.payload["summary"].lower()
+
+    state = container.store.get_conversation_state(created.id)
+    container.store.close()
+
+    assert state is not None
+    kinds = [item.kind for item in state.items]
+    assert ConversationItemKind.STEER in kinds
+    assert ConversationItemKind.COMPACTION_MARKER in kinds

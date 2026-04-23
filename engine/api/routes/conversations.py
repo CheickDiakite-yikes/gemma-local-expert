@@ -6,12 +6,14 @@ from fastapi.responses import StreamingResponse
 from engine.api.dependencies import ServiceContainer, get_container
 from engine.contracts.api import (
     Conversation,
+    ConversationCompactRequest,
     ConversationCreateRequest,
     ConversationForkRequest,
     ConversationItem,
     ConversationRollbackRequest,
     ConversationState,
     ConversationSummary,
+    ConversationSteerRequest,
     ConversationTurnRecord,
     ConversationTurnRequest,
     TranscriptMessage,
@@ -154,6 +156,36 @@ async def rollback_conversation(
     if rolled_back is None:
         raise HTTPException(status_code=404, detail="Conversation not found.")
     return rolled_back
+
+
+@router.post("/{conversation_id}/compact", response_model=ConversationItem)
+async def compact_conversation(
+    conversation_id: str,
+    request: ConversationCompactRequest,
+    container: ServiceContainer = Depends(get_container),
+) -> ConversationItem:
+    try:
+        compaction = container.store.compact_conversation(conversation_id, request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if compaction is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return compaction
+
+
+@router.post("/{conversation_id}/steer", response_model=ConversationItem)
+async def steer_conversation(
+    conversation_id: str,
+    request: ConversationSteerRequest,
+    container: ServiceContainer = Depends(get_container),
+) -> ConversationItem:
+    try:
+        steer_item = container.store.steer_conversation(conversation_id, request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if steer_item is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return steer_item
 
 
 @router.post("/{conversation_id}/turns")

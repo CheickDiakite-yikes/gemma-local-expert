@@ -109,6 +109,8 @@ class ConversationItemKind(str, Enum):
     EVIDENCE_PACKET = "evidence_packet"
     APPROVAL = "approval"
     AGENT_RUN = "agent_run"
+    COMPACTION_MARKER = "compaction_marker"
+    STEER = "steer"
 
 
 class StreamEventType(str, Enum):
@@ -285,6 +287,15 @@ class ConversationRollbackRequest(StrictModel):
     copy_memories: bool = True
     copy_approvals: bool = True
     copy_agent_runs: bool = True
+
+
+class ConversationCompactRequest(StrictModel):
+    up_to_turn_id: str | None = None
+    summary: str | None = None
+
+
+class ConversationSteerRequest(StrictModel):
+    instruction: str
 
 
 class ConversationTurnRequest(StrictModel):

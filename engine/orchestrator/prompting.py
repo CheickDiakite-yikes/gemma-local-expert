@@ -249,6 +249,14 @@ class PromptBuilder:
             lines.append(
                 "Treat the referent summary and referent preview in that snapshot as the main continuity anchor for follow-up turns."
             )
+            if conversation_context.active_compaction_summary:
+                lines.append(
+                    "If the continuity snapshot includes a compaction summary, treat it as the current condensed thread state and prefer it over reviving older low-signal details."
+                )
+            if conversation_context.active_steering_instruction:
+                lines.append(
+                    "If the continuity snapshot includes an active thread steering note, treat it as explicit thread guidance unless the current user turn clearly overrides it."
+                )
             if conversation_context.selected_evidence_summary:
                 lines.append(
                     "If the continuity snapshot includes grounded evidence memory, prefer it over assistant prose. Reuse its facts directly and treat its uncertainty lines as hard limits."

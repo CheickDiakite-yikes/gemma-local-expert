@@ -1426,6 +1426,8 @@ The current public local API is intentionally small but real.
 - `POST /v1/conversations/{conversation_id}/archive`
 - `POST /v1/conversations/{conversation_id}/fork`
 - `POST /v1/conversations/{conversation_id}/rollback`
+- `POST /v1/conversations/{conversation_id}/compact`
+- `POST /v1/conversations/{conversation_id}/steer`
 - `DELETE /v1/conversations/{conversation_id}`
 - `POST /v1/conversations/{conversation_id}/turns`
 
@@ -1466,6 +1468,11 @@ The current public local API is intentionally small but real.
 client read model. It returns the thread record plus its current messages,
 turns, items, and runs in one surface so clients do not have to reconstruct
 ownership from multiple stitched reads.
+
+`POST /v1/conversations/{conversation_id}/compact` writes a compaction marker
+into thread state, and `POST /v1/conversations/{conversation_id}/steer` writes
+explicit future-turn guidance into thread state. Both are backend-first
+thread-control primitives today; they are not yet polished UI features.
 
 ### Capabilities truthfulness
 

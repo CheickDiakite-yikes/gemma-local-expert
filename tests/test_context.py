@@ -1,6 +1,8 @@
 from engine.context.service import ConversationContextService
 from engine.contracts.api import (
     ApprovalState,
+    ConversationItem,
+    ConversationItemKind,
     ConversationMemoryEntry,
     ConversationMemoryKind,
     EvidenceFact,
@@ -456,6 +458,58 @@ def test_context_service_suppresses_conversation_memory_when_pending_draft_is_st
 
     assert snapshot.selected_referent_kind == "pending_output"
     assert snapshot.selected_memory_summary is None
+
+
+def test_context_service_exposes_latest_compaction_and_steering_items() -> None:
+    service = ConversationContextService()
+
+    snapshot = service.build(
+        turn_text="Keep going on the same architecture direction.",
+        transcript=[
+            TranscriptMessage(
+                id="msg1",
+                role="user",
+                content="Create a report summarizing the current field assistant architecture.",
+                turn_id="turn_1",
+            ),
+            TranscriptMessage(
+                id="msg2",
+                role="assistant",
+                content="I drafted a report here.",
+                turn_id="turn_1",
+            ),
+        ],
+        attached_assets=[],
+        recent_items=[
+            ConversationItem(
+                id="item_compact",
+                conversation_id="conv_1",
+                turn_id="turn_1",
+                kind=ConversationItemKind.COMPACTION_MARKER,
+                summary="Compacted earlier architecture work.",
+                payload={
+                    "summary": (
+                        "Latest user focus: current field assistant architecture. "
+                        "Pending draft: Field Assistant Architecture Report."
+                    )
+                },
+            ),
+            ConversationItem(
+                id="item_steer",
+                conversation_id="conv_1",
+                turn_id="turn_1",
+                kind=ConversationItemKind.STEER,
+                summary="Keep the thread focused on architecture and product state.",
+                payload={
+                    "instruction": "Keep the thread focused on architecture and product state."
+                },
+            ),
+        ],
+    )
+
+    assert snapshot.active_compaction_summary is not None
+    assert "pending draft" in snapshot.active_compaction_summary.lower()
+    assert snapshot.active_steering_instruction == "Keep the thread focused on architecture and product state."
 
 
 def test_context_service_prefers_matching_output_kind_over_newer_pending_draft() -> None:

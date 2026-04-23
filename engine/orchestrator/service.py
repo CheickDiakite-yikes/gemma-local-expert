@@ -130,12 +130,17 @@ class OrchestratorService:
             turn.conversation_id,
             limit=self.settings.conversation_memory_limit,
         )
+        recent_items = self.store.list_items(
+            turn.conversation_id,
+            limit=64,
+        )
         attached_assets = self.store.list_assets(turn.asset_ids)
         provisional_context = self.context_service.build(
             turn_text=turn.text,
             transcript=prior_transcript,
             attached_assets=attached_assets,
             recent_memories=recent_memories,
+            recent_items=recent_items,
         )
         ranked_memories = recent_memories
         if not self._should_defer_memory_ranking(
@@ -156,6 +161,7 @@ class OrchestratorService:
                 transcript=prior_transcript,
                 attached_assets=attached_assets,
                 recent_memories=ranked_memories,
+                recent_items=recent_items,
             )
         )
         memory_focus = self.memory_service.resolve_focus(

@@ -196,6 +196,45 @@ def test_prompt_builder_includes_memory_focus_guidance_when_available() -> None:
     assert "Memory focus topic: Field Assistant Architecture Briefing" in user_prompt
 
 
+def test_prompt_builder_includes_compaction_and_steering_guidance() -> None:
+    builder = PromptBuilder()
+    context = builder.build(
+        turn=ConversationTurnRequest(
+            conversation_id="conv_compact",
+            mode=AssistantMode.GENERAL,
+            text="Keep going on the same architecture thread.",
+        ),
+        history=[],
+        assets=[],
+        context_assets=[],
+        conversation_context=ConversationContextSnapshot(
+            active_topic="Field Assistant Architecture Report",
+            active_compaction_summary=(
+                "Latest user focus: current field assistant architecture. "
+                "Pending draft: Field Assistant Architecture Report."
+            ),
+            active_steering_instruction="Keep the thread focused on architecture and product state.",
+        ),
+        specialist_analysis=None,
+        workspace_summary=None,
+        route=RouteDecision(interaction_kind="conversation", is_follow_up=True),
+        policy=PolicyDecision(),
+        model_selection=ModelRouteSelection(
+            assistant_model="gemma-4-e2b-it-4bit",
+            embedding_model="embeddinggemma-300m",
+        ),
+        results=[],
+        tool_result=None,
+    )
+
+    system_prompt = context.messages[0]["content"]
+    user_prompt = context.messages[-1]["content"]
+    assert "compaction summary" in system_prompt.lower()
+    assert "active thread steering note" in system_prompt.lower()
+    assert "Latest compaction summary:" in user_prompt
+    assert "Active thread steering:" in user_prompt
+
+
 def test_prompt_builder_adds_draft_follow_up_guidance() -> None:
     builder = PromptBuilder()
     context = builder.build(

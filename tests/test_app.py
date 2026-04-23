@@ -366,6 +366,50 @@ def test_rollback_endpoint_archives_source_and_restores_earlier_turn_state(
     assert rolled_back_state["messages"][-1]["approval"] is None
 
 
+def test_compact_and_steer_endpoints_append_thread_ops_to_conversation_state(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(database_path=str(tmp_path / "test-compact-steer-endpoints.db"))
+    client = TestClient(create_app(settings))
+    conversation = client.post("/v1/conversations", json={"title": "Compact/steer", "mode": "research"}).json()
+
+    turn_response = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Create a report summarizing the current field assistant architecture.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+    assert turn_response.status_code == 200
+    turns = client.get(f"/v1/conversations/{conversation['id']}/turns").json()
+
+    steer_response = client.post(
+        f"/v1/conversations/{conversation['id']}/steer",
+        json={"instruction": "Keep the thread focused on architecture and product state."},
+    )
+    compact_response = client.post(
+        f"/v1/conversations/{conversation['id']}/compact",
+        json={"up_to_turn_id": turns[0]["id"]},
+    )
+
+    assert steer_response.status_code == 200
+    assert compact_response.status_code == 200
+    assert steer_response.json()["kind"] == "steer"
+    assert compact_response.json()["kind"] == "compaction_marker"
+
+    state = client.get(f"/v1/conversations/{conversation['id']}/state").json()
+    steer_item = next(item for item in state["items"] if item["kind"] == "steer")
+    compact_item = next(item for item in state["items"] if item["kind"] == "compaction_marker")
+
+    assert steer_item["payload"]["instruction"] == "Keep the thread focused on architecture and product state."
+    assert compact_item["payload"]["up_to_turn_id"] == turns[0]["id"]
+    assert "pending draft" in compact_item["payload"]["summary"].lower()
+
+
 def test_conversation_listing_and_transcript_endpoints(tmp_path: Path) -> None:
     settings = Settings(database_path=str(tmp_path / "test-listing.db"))
     client = TestClient(create_app(settings))

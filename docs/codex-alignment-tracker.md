@@ -42,12 +42,12 @@ For each area, try to keep all three forms of evidence:
 | Thread / turn / item state | partial | turn ids everywhere; internal turn record + item ledger exist, are inspectable through API read paths, now back approval ownership/read state, and now feed a canonical conversation state surface | streaming and broader active work-product state are still not item/event-first |
 | Workspace binding | partial | workspace root exists; bounded workspace runs exist; turn policy now carries workspace binding; conversation state now persists thread-level workspace binding and fork lineage | no isolated background worktree model yet |
 | Turn policy | partial | explicit turn policy now exists and is inspectable through turn state | still minimal and not yet the single source of truth for all permission decisions |
-| Memory layering | partial | `AGENTS.md`, continuity snapshot, derived conversation memory, evidence memory, memory focus | no formal idle-thread memory lifecycle or eligibility rules |
+| Memory layering | partial | `AGENTS.md`, continuity snapshot, derived conversation memory, evidence memory, memory focus, and thread compaction summaries now exist | no formal idle-thread memory lifecycle or eligibility rules |
 | Permissions system | partial | engine policy + approval gating + bounded workspace root | not yet a full typed permission model comparable to Codex execpolicy + approval categories |
 | Document/canvas UX | partial | inline canvas is replacing preview-plus-hidden-editor patterns | still not a true document-first surface with selection-aware edits |
 | App-server style client seam | partial | current local API now exposes transcript, turns, items, approvals, runs, and a canonical `/state` surface; the web client now loads from that single state read on open/refresh | still too web-chat shaped and not yet item/event-first during streaming/live updates |
 | Worktree-backed background work | missing | bounded workspace agent exists | no true isolated worktree/local clone system |
-| Thread ops: fork/archive/rollback/compact | partial | delete, archive, conversation detail, fork, and safe rollback now exist | no compact or steer model yet |
+| Thread ops: fork/archive/rollback/compact | partial | delete, archive, conversation detail, fork, safe rollback, explicit compact, and explicit steer now exist | compact and steer are backend-first and still do not drive streaming/live control paths |
 
 ## Domain Checklists
 
@@ -190,11 +190,12 @@ Keep canonical thread state, derived memories, and explicit repo guidance separa
 - conversation memory entries
 - evidence-backed memory reuse
 - bounded `MemoryFocus`
+- thread compaction summaries that can feed future continuity snapshots
 
 ### Missing
 
 - explicit memory eligibility lifecycle for idle/completed threads
-- formal compaction or consolidation process
+- formal idle-thread memory eligibility and consolidation process
 - stronger distinction between short-horizon continuity vs durable memory extraction
 - multimodal memory extension comparable to Chronicle is still future work
 
@@ -330,12 +331,14 @@ Support stronger thread lifecycle than create/delete/list.
 - archive
 - fork
 - safe rollback built on lineage plus source-thread archiving
+- explicit compact operation that writes a compaction marker into thread state
+- explicit steer operation that writes active thread guidance into thread state
 - conversation detail/read path for thread lineage and workspace binding
 
 ### Missing
 
-- compact
-- steer
+- richer live control semantics for steer during active streaming/runs
+- compaction-aware pruning/selection beyond the current summary note
 
 ### Why this matters
 
@@ -346,8 +349,8 @@ single long thread.
 
 ### Next slice
 
-- define what `turn steer` should mean in this product before building it
-- add compact semantics on top of the new fork and rollback lineage
+- tie steer into richer active-run control semantics instead of only future-turn guidance
+- use compaction markers more explicitly when continuity windows are trimmed
 
 ## 9. Evaluation Discipline
 
@@ -384,7 +387,7 @@ For any important architecture or UX slice, try to maintain:
 - turn policy exists and is inspectable, but it is still minimal
 - item ledger exists, is inspectable, now backs approval ownership, and now feeds a canonical `/state` surface, but streaming/live-update paths still lean on transcript-era heuristics
 - we still do not have isolated background workspaces/worktrees
-- we still do not have richer thread operations like rollback/compact/steer
+- compact and steer now exist, but they are still backend-first thread controls rather than polished product operations
 
 ## Completed In This Slice
 
@@ -400,6 +403,7 @@ For any important architecture or UX slice, try to maintain:
 - moved approval/canvas ownership onto approval item snapshots in the persistence + web client path
 - added a canonical conversation `/state` surface and switched the web conversation open/refresh path to use it
 - added a safe rollback operation that restores an earlier turn into a replacement thread and archives the source thread
+- added explicit compact and steer thread operations and fed them into the continuity snapshot/prompting path
 
 ## Operating Rule Going Forward
 
