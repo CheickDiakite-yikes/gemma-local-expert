@@ -8,6 +8,7 @@ const state = {
   draftMessages: [],
   pendingAttachments: [],
   transcripts: new Map(),
+  conversationTurns: new Map(),
   conversationItems: new Map(),
   agentRuns: new Map(),
   approvals: new Map(),
@@ -103,6 +104,10 @@ function conversationTranscript(conversationId) {
 
 function itemsForConversation(conversationId) {
   return state.conversationItems.get(conversationId) ?? [];
+}
+
+function turnsForConversation(conversationId) {
+  return state.conversationTurns.get(conversationId) ?? [];
 }
 
 function canUseStorage() {
@@ -229,6 +234,7 @@ function purgeConversationUiState(conversationId) {
   }
 
   state.transcripts.delete(conversationId);
+  state.conversationTurns.delete(conversationId);
   state.conversationItems.delete(conversationId);
   state.agentRuns.delete(conversationId);
   state.medicalSessions.delete(conversationId);
@@ -240,6 +246,10 @@ function purgeConversationUiState(conversationId) {
 
 function runsForConversation(conversationId) {
   return state.agentRuns.get(conversationId) || [];
+}
+
+function setConversationTurns(conversationId, turns) {
+  state.conversationTurns.set(conversationId, Array.isArray(turns) ? turns : []);
 }
 
 function upsertAgentRun(conversationId, run) {
@@ -311,6 +321,47 @@ function hydrateApprovalsIntoMessages(conversationId) {
 function setConversationItems(conversationId, items) {
   state.conversationItems.set(conversationId, Array.isArray(items) ? items : []);
   hydrateApprovalsIntoMessages(conversationId);
+}
+
+function normalizeTranscriptMessage(message, runsByTurn = new Map()) {
+  return {
+    id: message.id,
+    role: message.role,
+    turnId: message.turn_id || null,
+    content: message.content,
+    assets: message.assets || [],
+    citations: [],
+    approval: message.approval || null,
+    proposedTool: message.approval?.tool_name || null,
+    process: [],
+    toolResult: message.approval?.result || null,
+    agentRun:
+      message.role === "assistant" && message.turn_id ? runsByTurn.get(message.turn_id) || null : null,
+    loading: false,
+  };
+}
+
+function applyConversationState(conversationId, snapshot) {
+  const runs = Array.isArray(snapshot?.runs) ? snapshot.runs : [];
+  const turns = Array.isArray(snapshot?.turns) ? snapshot.turns : [];
+  const items = Array.isArray(snapshot?.items) ? snapshot.items : [];
+  const messages = Array.isArray(snapshot?.messages) ? snapshot.messages : [];
+
+  state.agentRuns.set(conversationId, runs);
+  setConversationTurns(conversationId, turns);
+
+  const runsByTurn = new Map(
+    runs
+      .filter((run) => run?.turn_id)
+      .map((run) => [run.turn_id, run]),
+  );
+
+  state.transcripts.set(
+    conversationId,
+    messages.map((message) => normalizeTranscriptMessage(message, runsByTurn)),
+  );
+  setConversationItems(conversationId, items);
+  return state.transcripts.get(conversationId) || [];
 }
 
 function upsertApprovalItem(conversationId, approval, summary = "") {
@@ -2805,55 +2856,21 @@ async function refreshAgentRuns(conversationId) {
   return runs;
 }
 
-async function refreshConversationItems(conversationId) {
+async function refreshConversationState(conversationId) {
   if (!conversationId) {
-    return [];
+    return null;
   }
-  const items = await requestJson(`/v1/conversations/${conversationId}/items`);
-  setConversationItems(conversationId, items);
+  const snapshot = await requestJson(`/v1/conversations/${conversationId}/state`);
+  applyConversationState(conversationId, snapshot);
   render();
-  return items;
+  return snapshot;
 }
 
 async function openConversation(conversationId) {
   state.activeConversationId = conversationId;
   persistActiveConversation();
-  if (!state.transcripts.has(conversationId)) {
-    const [transcript, runs, items] = await Promise.all([
-      requestJson(`/v1/conversations/${conversationId}/messages`),
-      requestJson(`/v1/conversations/${conversationId}/runs`),
-      requestJson(`/v1/conversations/${conversationId}/items`),
-    ]);
-    state.agentRuns.set(conversationId, runs);
-    const runsByTurn = new Map(
-      runs
-        .filter((run) => run?.turn_id)
-        .map((run) => [run.turn_id, run]),
-    );
-    state.transcripts.set(
-      conversationId,
-      transcript.map((message) => ({
-        id: message.id,
-        role: message.role,
-        turnId: message.turn_id || null,
-        content: message.content,
-        assets: message.assets || [],
-        citations: [],
-        approval: message.approval || null,
-        proposedTool: message.approval?.tool_name || null,
-        process: [],
-        toolResult: message.approval?.result || null,
-        agentRun:
-          message.role === "assistant" && message.turn_id ? runsByTurn.get(message.turn_id) || null : null,
-        loading: false,
-      })),
-    );
-    setConversationItems(conversationId, items);
-    pruneResolvedApprovalDrafts(state.transcripts.get(conversationId));
-  } else {
-    await Promise.all([refreshAgentRuns(conversationId), refreshConversationItems(conversationId)]);
-    pruneResolvedApprovalDrafts(state.transcripts.get(conversationId));
-  }
+  await refreshConversationState(conversationId);
+  pruneResolvedApprovalDrafts(state.transcripts.get(conversationId));
   render();
 }
 
@@ -3609,15 +3626,7 @@ async function submitApprovalDecision(approvalId, action, editedPayload = {}) {
     state.approvalErrors.delete(approvalId);
     state.approvals.set(approvalId, approval);
     if (state.activeConversationId) {
-      upsertApprovalItem(
-        state.activeConversationId,
-        approval,
-        `Approval state updated for ${approval.tool_name || "draft"}.`,
-      );
-      await Promise.all([
-        refreshAgentRuns(state.activeConversationId),
-        refreshConversationItems(state.activeConversationId),
-      ]);
+      await refreshConversationState(state.activeConversationId);
     }
     render();
   } catch (error) {

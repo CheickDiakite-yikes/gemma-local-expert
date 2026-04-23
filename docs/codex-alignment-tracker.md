@@ -39,13 +39,13 @@ For each area, try to keep all three forms of evidence:
 
 | Area | Status | What exists now | Biggest gap |
 | --- | --- | --- | --- |
-| Thread / turn / item state | partial | turn ids everywhere; internal turn record + item ledger exist, are inspectable through API read paths, and now back approval ownership/read state | not yet the canonical public state contract for clients |
+| Thread / turn / item state | partial | turn ids everywhere; internal turn record + item ledger exist, are inspectable through API read paths, now back approval ownership/read state, and now feed a canonical conversation state surface | streaming and broader active work-product state are still not item/event-first |
 | Workspace binding | partial | workspace root exists; bounded workspace runs exist; turn policy now carries workspace binding; conversation state now persists thread-level workspace binding and fork lineage | no isolated background worktree model yet |
 | Turn policy | partial | explicit turn policy now exists and is inspectable through turn state | still minimal and not yet the single source of truth for all permission decisions |
 | Memory layering | partial | `AGENTS.md`, continuity snapshot, derived conversation memory, evidence memory, memory focus | no formal idle-thread memory lifecycle or eligibility rules |
 | Permissions system | partial | engine policy + approval gating + bounded workspace root | not yet a full typed permission model comparable to Codex execpolicy + approval categories |
 | Document/canvas UX | partial | inline canvas is replacing preview-plus-hidden-editor patterns | still not a true document-first surface with selection-aware edits |
-| App-server style client seam | partial | current local API now exposes transcript, turns, items, approvals, and runs as explicit state surfaces | still too web-chat shaped and not yet item/event-first |
+| App-server style client seam | partial | current local API now exposes transcript, turns, items, approvals, runs, and a canonical `/state` surface; the web client now loads from that single state read on open/refresh | still too web-chat shaped and not yet item/event-first during streaming/live updates |
 | Worktree-backed background work | missing | bounded workspace agent exists | no true isolated worktree/local clone system |
 | Thread ops: fork/archive/rollback/compact | partial | delete, archive, conversation detail, and fork now exist | no rollback, compact, or steer model yet |
 
@@ -78,11 +78,13 @@ Move from "messages plus side tables" toward a real internal ledger:
   - agent runs
 - approval items now carry full approval snapshots
 - transcript approval ownership is now rehydrated from approval items instead of only from approval table joins
+- public `ConversationState` now exposes conversation, messages, turns, items, and runs in one read model
+- the web chat now opens and refreshes conversations from that canonical `/state` surface instead of stitching together separate messages/runs/items fetches
 
 ### Missing
 
-- item ledger is not yet the canonical read model for clients
-- approvals/runs are still also reconstructed from legacy side-table joins
+- streaming/live-update paths are still not fully item/event-first
+- active work-product and canvas state are still only partially item-backed on the client
 - no item-level streaming/event replay contract yet
 
 ### Acceptance criteria for `done`
@@ -93,8 +95,8 @@ Move from "messages plus side tables" toward a real internal ledger:
 
 ### Next slice
 
-- add item-backed read helpers for approvals/canvas ownership
-- stop treating assistant message rows as the only anchor for active draft surfaces
+- keep moving the client toward the canonical `/state` surface for active work-product state
+- define item/event replay so live updates stop depending on transcript-shaped heuristics
 
 ## 2. Workspace Model
 
@@ -285,7 +287,7 @@ Stop letting the web chat surface define the state model.
 
 ### Current status
 
-`missing`
+`partial`
 
 ### Implemented
 
@@ -294,12 +296,14 @@ Stop letting the web chat surface define the state model.
 - turns API
 - items API
 - archive API
+- canonical `GET /v1/conversations/{conversation_id}/state`
+- web chat conversation load/refresh now consumes that state surface directly
 
 ### Missing
 
 - item/event-first thread contract
-- client-neutral state inspection model
 - richer thread operations
+- streaming/live updates still merge local heuristics with canonical state
 
 ### Acceptance criteria for `done`
 
@@ -308,7 +312,8 @@ Stop letting the web chat surface define the state model.
 
 ### Next slice
 
-- define an internal item/event read model before attempting a broader API refactor
+- extend the canonical state surface into streaming/live-update ownership
+- make one more client path consume the same state semantics without web-specific assumptions
 
 ## 8. Thread Operations
 
@@ -377,7 +382,7 @@ For any important architecture or UX slice, try to maintain:
 - inline canvas is much better than the old approval card, but still not truly document-first
 - workspace identity is now explicit per turn and persisted on the thread, but it is still not a full named-workspace/worktree model
 - turn policy exists and is inspectable, but it is still minimal
-- item ledger exists, is inspectable, and now backs approval ownership, but the client still mostly reconstructs broader state through older transcript conventions
+- item ledger exists, is inspectable, now backs approval ownership, and now feeds a canonical `/state` surface, but streaming/live-update paths still lean on transcript-era heuristics
 - we still do not have isolated background workspaces/worktrees
 - we still do not have richer thread operations like rollback/compact/steer
 
@@ -393,6 +398,7 @@ For any important architecture or UX slice, try to maintain:
 - added thread archiving as the first real thread lifecycle operation
 - added conversation detail and fork operations with thread lineage + workspace binding
 - moved approval/canvas ownership onto approval item snapshots in the persistence + web client path
+- added a canonical conversation `/state` surface and switched the web conversation open/refresh path to use it
 
 ## Operating Rule Going Forward
 

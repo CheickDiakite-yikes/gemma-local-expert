@@ -9,6 +9,7 @@ from engine.contracts.api import (
     ConversationCreateRequest,
     ConversationForkRequest,
     ConversationItem,
+    ConversationState,
     ConversationSummary,
     ConversationTurnRecord,
     ConversationTurnRequest,
@@ -47,6 +48,25 @@ async def get_conversation(
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found.")
     return conversation
+
+
+@router.get("/{conversation_id}/state", response_model=ConversationState)
+async def get_conversation_state(
+    conversation_id: str,
+    message_limit: int = Query(default=200, ge=1, le=500),
+    turn_limit: int = Query(default=100, ge=1, le=500),
+    item_limit: int = Query(default=500, ge=1, le=2000),
+    container: ServiceContainer = Depends(get_container),
+) -> ConversationState:
+    state = container.store.get_conversation_state(
+        conversation_id,
+        message_limit=message_limit,
+        turn_limit=turn_limit,
+        item_limit=item_limit,
+    )
+    if state is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return state
 
 
 @router.get("/{conversation_id}/messages", response_model=list[TranscriptMessage])

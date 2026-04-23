@@ -461,6 +461,14 @@ class AgentRun(StrictModel):
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+class ConversationState(StrictModel):
+    conversation: Conversation
+    messages: list[TranscriptMessage] = Field(default_factory=list)
+    turns: list[ConversationTurnRecord] = Field(default_factory=list)
+    items: list[ConversationItem] = Field(default_factory=list)
+    runs: list[AgentRun] = Field(default_factory=list)
+
+
 class SystemCapabilities(StrictModel):
     assistant_backend: str
     assistant_model: str

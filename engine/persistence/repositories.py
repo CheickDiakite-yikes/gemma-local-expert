@@ -29,6 +29,7 @@ from engine.contracts.api import (
     ConversationMessage,
     ConversationMemoryEntry,
     ConversationSummary,
+    ConversationState,
     ConversationCreateRequest,
     ConversationForkRequest,
     ConversationTurnRecord,
@@ -72,6 +73,15 @@ class PersistenceStore(Protocol):
     def create_conversation(self, request: ConversationCreateRequest) -> Conversation: ...
 
     def get_conversation(self, conversation_id: str) -> Conversation | None: ...
+
+    def get_conversation_state(
+        self,
+        conversation_id: str,
+        *,
+        message_limit: int = 200,
+        turn_limit: int = 100,
+        item_limit: int = 500,
+    ) -> ConversationState | None: ...
 
     def update_conversation_workspace_binding(
         self, conversation_id: str, workspace_binding: WorkspaceBinding
@@ -414,6 +424,25 @@ class SQLiteStore:
             (conversation_id,),
         )
         return self._row_to_conversation(row) if row else None
+
+    def get_conversation_state(
+        self,
+        conversation_id: str,
+        *,
+        message_limit: int = 200,
+        turn_limit: int = 100,
+        item_limit: int = 500,
+    ) -> ConversationState | None:
+        conversation = self.get_conversation(conversation_id)
+        if conversation is None:
+            return None
+        return ConversationState(
+            conversation=conversation,
+            messages=self.list_transcript(conversation_id, limit=message_limit),
+            turns=self.list_turn_records(conversation_id, limit=turn_limit),
+            items=self.list_items(conversation_id, limit=item_limit),
+            runs=self.list_agent_runs(conversation_id),
+        )
 
     def update_conversation_workspace_binding(
         self, conversation_id: str, workspace_binding: WorkspaceBinding

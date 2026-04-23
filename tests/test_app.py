@@ -157,6 +157,46 @@ def test_turn_and_item_endpoints_expose_internal_thread_state(tmp_path: Path) ->
     assert any(item["kind"] == "approval" for item in items)
 
 
+def test_conversation_state_endpoint_returns_coherent_thread_surface(tmp_path: Path) -> None:
+    settings = Settings(database_path=str(tmp_path / "test-conversation-state.db"))
+    client = TestClient(create_app(settings))
+    conversation = client.post("/v1/conversations", json={"title": "State", "mode": "general"}).json()
+
+    response = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "general",
+            "text": "Create a report summarizing the current field assistant architecture.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+    assert response.status_code == 200
+
+    state_response = client.get(f"/v1/conversations/{conversation['id']}/state")
+    assert state_response.status_code == 200
+    snapshot = state_response.json()
+
+    assert snapshot["conversation"]["id"] == conversation["id"]
+    assert [message["role"] for message in snapshot["messages"]] == ["user", "assistant"]
+    assert len(snapshot["turns"]) == 1
+    assert isinstance(snapshot["runs"], list)
+
+    assistant_message = snapshot["messages"][-1]
+    turn = snapshot["turns"][0]
+    approval_item = next(item for item in snapshot["items"] if item["kind"] == "approval")
+
+    assert assistant_message["approval"] is not None
+    assert assistant_message["approval"]["id"] == approval_item["payload"]["approval"]["id"]
+    assert turn["assistant_message_id"] == assistant_message["id"]
+    assert turn["route_kind"]
+    assert turn["policy"]["sandbox_mode"] == "workspace_write"
+    assert turn["policy"]["approval_mode"] == "durable_write"
+    assert approval_item["turn_id"] == assistant_message["turn_id"]
+
+
 def test_archive_endpoint_hides_conversation_from_default_list_but_keeps_transcript(tmp_path: Path) -> None:
     settings = Settings(database_path=str(tmp_path / "test-archive-endpoint.db"))
     app = create_app(settings)
@@ -776,6 +816,70 @@ def test_pending_report_follow_up_can_update_same_report_before_save(tmp_path: P
     assert (
         latest_approval_item["payload"]["approval"]["payload"]["content"]
         == approval_event["payload"]["payload"]["content"]
+    )
+
+
+def test_conversation_state_endpoint_reanchors_pending_approval_to_latest_revision_turn(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(database_path=str(tmp_path / "test-conversation-state-approval-owner.db"))
+    client = TestClient(create_app(settings))
+    conversation = client.post("/v1/conversations", json={"title": "State owner", "mode": "research"}).json()
+
+    first = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Create a report summarizing the current field assistant architecture.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+    assert first.status_code == 200
+
+    follow_up = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Keep the same report, but make it shorter before I save it.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+    assert follow_up.status_code == 200
+
+    snapshot_response = client.get(f"/v1/conversations/{conversation['id']}/state")
+    assert snapshot_response.status_code == 200
+    snapshot = snapshot_response.json()
+
+    original_assistant = next(
+        message
+        for message in snapshot["messages"]
+        if message["role"] == "assistant" and message["content"] == "I drafted a report here."
+    )
+    latest_assistant = next(
+        message
+        for message in snapshot["messages"]
+        if message["role"] == "assistant"
+        and 'I updated the report "Field Assistant Architecture Report" here.' in message["content"]
+    )
+    latest_turn = next(turn for turn in snapshot["turns"] if turn["id"] == latest_assistant["turn_id"])
+    latest_approval_item = [
+        item for item in snapshot["items"] if item["kind"] == "approval"
+    ][-1]
+
+    assert original_assistant.get("approval") is None
+    assert latest_assistant.get("approval") is not None
+    assert latest_assistant["approval"]["id"] == latest_approval_item["payload"]["approval"]["id"]
+    assert latest_approval_item["payload"]["approval"]["turn_id"] == latest_assistant["turn_id"]
+    assert latest_turn["assistant_message_id"] == latest_assistant["id"]
+    assert (
+        latest_assistant["approval"]["payload"]["content"]
+        == latest_approval_item["payload"]["approval"]["payload"]["content"]
     )
 
 

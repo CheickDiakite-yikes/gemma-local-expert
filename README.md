@@ -1419,6 +1419,7 @@ The current public local API is intentionally small but real.
 - `POST /v1/conversations`
 - `GET /v1/conversations`
 - `GET /v1/conversations/{conversation_id}`
+- `GET /v1/conversations/{conversation_id}/state`
 - `GET /v1/conversations/{conversation_id}/messages`
 - `GET /v1/conversations/{conversation_id}/turns`
 - `GET /v1/conversations/{conversation_id}/items`
@@ -1459,6 +1460,11 @@ The current public local API is intentionally small but real.
 ### Browser shell
 
 - `GET /chat/`
+
+`GET /v1/conversations/{conversation_id}/state` is the current canonical
+client read model. It returns the thread record plus its current messages,
+turns, items, and runs in one surface so clients do not have to reconstruct
+ownership from multiple stitched reads.
 
 ### Capabilities truthfulness
 
