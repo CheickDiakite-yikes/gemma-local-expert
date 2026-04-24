@@ -258,6 +258,18 @@ class PromptBuilder:
                 lines.append(
                     "If the continuity snapshot includes an active thread steering note, treat it as explicit thread guidance unless the current user turn clearly overrides it."
                 )
+            if conversation_context.turn_adaptation_kind == "casual_detour":
+                lines.append(
+                    "If the continuity snapshot marks this turn as a casual detour, answer the current turn naturally and do not drag the foreground draft, media, or earlier task back into the reply unless the user explicitly returns to it."
+                )
+            elif conversation_context.turn_adaptation_kind == "task_pivot":
+                lines.append(
+                    "If the continuity snapshot marks this turn as a task pivot, treat the current user turn as the new primary problem. Do not revive older draft, media, or steering context just because it exists."
+                )
+            elif conversation_context.turn_adaptation_kind == "return_to_anchor":
+                lines.append(
+                    "If the continuity snapshot marks this turn as a return to anchor, re-anchor to that earlier draft, media, or topic immediately."
+                )
             if conversation_context.selected_evidence_summary:
                 lines.append(
                     "If the continuity snapshot includes grounded evidence memory, prefer it over assistant prose. Reuse its facts directly and treat its uncertainty lines as hard limits."
@@ -399,8 +411,11 @@ class PromptBuilder:
                     + "\n- ".join(continuity_lines)
                 )
             if (
+                conversation_context.turn_adaptation_kind not in {"casual_detour", "task_pivot"}
+                and (
                 conversation_context.selected_referent_kind not in {"pending_output", "saved_output"}
                 and len(conversation_context.recent_outputs) > 1
+                )
             ):
                 title_lines = self._recent_output_title_lines(
                     conversation_context.recent_outputs
@@ -677,6 +692,19 @@ class PromptBuilder:
     ) -> list[str]:
         texts: list[str] = []
         if conversation_context:
+            if conversation_context.turn_adaptation_kind in {"casual_detour", "task_pivot"}:
+                texts = [
+                    text
+                    for text in (
+                        conversation_context.selected_referent_title,
+                        conversation_context.selected_referent_summary,
+                        conversation_context.selected_referent_excerpt,
+                        conversation_context.selected_context_summary,
+                        conversation_context.active_topic,
+                    )
+                    if text
+                ]
+                return self._keyword_list(texts)
             texts.extend(
                 text
                 for text in (
@@ -705,6 +733,23 @@ class PromptBuilder:
         elif route.interaction_kind == "vision":
             texts.extend(["image", "shortage", "lantern batteries"])
 
+        keywords: list[str] = []
+        seen: set[str] = set()
+        for text in texts:
+            lowered = text.lower().strip()
+            if lowered and len(lowered) <= 120 and lowered not in seen:
+                keywords.append(lowered)
+                seen.add(lowered)
+            for token in re.findall(r"[a-z0-9]{4,}", lowered):
+                if token in self._HISTORY_STOPWORDS or token in seen:
+                    continue
+                keywords.append(token)
+                seen.add(token)
+                if len(keywords) >= 10:
+                    return keywords
+        return keywords
+
+    def _keyword_list(self, texts: list[str]) -> list[str]:
         keywords: list[str] = []
         seen: set[str] = set()
         for text in texts:

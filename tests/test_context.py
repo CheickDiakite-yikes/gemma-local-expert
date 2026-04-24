@@ -200,6 +200,90 @@ def test_context_service_selects_pending_draft_referent() -> None:
     assert "bounded routing" in snapshot.selected_referent_excerpt.lower()
 
 
+def test_context_service_marks_casual_detour_away_from_pending_draft() -> None:
+    service = ConversationContextService()
+    approval = ApprovalState(
+        id="approval_1",
+        conversation_id="conv_1",
+        turn_id="turn_1",
+        tool_name="create_report",
+        reason="save locally",
+        status="pending",
+        payload={
+            "title": "Architecture report",
+            "content": "Field Assistant architecture overview\nUses bounded routing and explicit approvals.\n",
+        },
+    )
+
+    snapshot = service.build(
+        turn_text="Actually just talk normally with me for a second.",
+        transcript=[
+            TranscriptMessage(
+                id="msg1",
+                role="user",
+                content="Create a report summarizing the current field assistant architecture.",
+            ),
+            TranscriptMessage(
+                id="msg2",
+                role="assistant",
+                content="I drafted a report here.",
+                approval=approval,
+            ),
+        ],
+        attached_assets=[],
+    )
+
+    assert snapshot.foreground_anchor_kind == "pending_output"
+    assert snapshot.foreground_anchor_title == "Architecture report"
+    assert snapshot.turn_adaptation_kind == "casual_detour"
+    assert snapshot.turn_adaptation_reason is not None
+    prompt_lines = snapshot.prompt_lines()
+    assert any("Current turn adaptation: casual detour" in line for line in prompt_lines)
+    assert not any(line.startswith("Pending draft:") for line in prompt_lines)
+
+
+def test_context_service_marks_task_pivot_away_from_pending_draft() -> None:
+    service = ConversationContextService()
+    approval = ApprovalState(
+        id="approval_1",
+        conversation_id="conv_1",
+        turn_id="turn_1",
+        tool_name="create_report",
+        reason="save locally",
+        status="pending",
+        payload={
+            "title": "Architecture report",
+            "content": "Field Assistant architecture overview\nUses bounded routing and explicit approvals.\n",
+        },
+    )
+
+    snapshot = service.build(
+        turn_text="Actually, forget the report for a second. What's the real difference between memory and context here?",
+        transcript=[
+            TranscriptMessage(
+                id="msg1",
+                role="user",
+                content="Create a report summarizing the current field assistant architecture.",
+            ),
+            TranscriptMessage(
+                id="msg2",
+                role="assistant",
+                content="I drafted a report here.",
+                approval=approval,
+            ),
+        ],
+        attached_assets=[],
+    )
+
+    assert snapshot.foreground_anchor_kind == "pending_output"
+    assert snapshot.turn_adaptation_kind == "task_pivot"
+    assert snapshot.turn_adaptation_reason is not None
+    assert snapshot.selected_memory_summary is None
+    prompt_lines = snapshot.prompt_lines()
+    assert any("Current turn adaptation: task pivot" in line for line in prompt_lines)
+    assert not any(line.startswith("Pending draft:") for line in prompt_lines)
+
+
 def test_context_service_selects_last_saved_output_referent() -> None:
     service = ConversationContextService()
     approval = ApprovalState(

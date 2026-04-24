@@ -727,6 +727,9 @@ def test_teaching_follow_ups_keep_using_grounded_base_memory_after_short_paraphr
         "stop and escalate if you see worsening weakness, confusion, or inability to drink"
         in completed_texts[5].lower()
     )
+    assert "leave that aside for a minute" in completed_texts[2].lower()
+    assert "talk about lunch and coffee" in completed_texts[2].lower()
+    assert "new main thread" not in completed_texts[2].lower()
 
     memories = app.state.container.store.list_conversation_memories(conversation["id"])
     memory_summaries = [memory.summary.lower() for memory in memories]
@@ -994,6 +997,114 @@ def test_pending_report_follow_up_can_update_same_report_before_save(tmp_path: P
         latest_approval_item["payload"]["approval"]["payload"]["content"]
         == approval_event["payload"]["payload"]["content"]
     )
+
+
+def test_selected_canvas_text_edit_updates_pending_approval_and_items(tmp_path: Path) -> None:
+    settings = Settings(database_path=str(tmp_path / "test-selected-canvas-edit.db"))
+    client = TestClient(create_app(settings))
+    conversation = client.post(
+        "/v1/conversations", json={"title": "Selected canvas edit", "mode": "research"}
+    ).json()
+
+    first = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "Create a report summarizing the current field assistant architecture.",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+        },
+    )
+    assert first.status_code == 200
+    first_lines = [json.loads(line) for line in first.text.splitlines() if line.strip()]
+    initial_approval = next(line for line in first_lines if line["type"] == "approval.required")
+    approval_id = initial_approval["payload"]["id"]
+
+    selected_text = "We must make the strongest claims immediately."
+    visible_content = "\n".join(
+        [
+            "Field Assistant Architecture Report",
+            "",
+            "Local canvas edit: keep this concise, plain, and human.",
+            "",
+            selected_text,
+        ]
+    )
+    start = visible_content.index(selected_text)
+    revised = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "research",
+            "text": "make this selection more neutral",
+            "asset_ids": [],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "concise", "citations": True, "audio_reply": False},
+            "canvas_selection": {
+                "approval_id": approval_id,
+                "field_name": "content",
+                "start": start,
+                "end": start + len(selected_text),
+                "text": selected_text,
+                "visible_content": visible_content,
+                "action": "neutral",
+                "current_payload": {
+                    "title": "Field Assistant Architecture Report",
+                    "kind": "report",
+                    "content": visible_content,
+                },
+            },
+        },
+    )
+    assert revised.status_code == 200
+
+    revised_lines = [json.loads(line) for line in revised.text.splitlines() if line.strip()]
+    document_edit_event = next(line for line in revised_lines if line["type"] == "document.edited")
+    completed = next(line for line in revised_lines if line["type"] == "assistant.message.completed")
+    approval_event = next(line for line in revised_lines if line["type"] == "approval.required")
+    payload = approval_event["payload"]["payload"]
+
+    assert document_edit_event["payload"]["approval_id"] == approval_id
+    assert document_edit_event["payload"]["item"]["kind"] == "document_edit"
+    assert document_edit_event["payload"]["item"]["turn_id"] == document_edit_event["turn_id"]
+    assert document_edit_event["payload"]["before_text"] == selected_text
+    assert document_edit_event["payload"]["after_text"] == (
+        "We should make the best-supported points soon."
+    )
+    assert (
+        document_edit_event["payload"]["item"]["payload"]["visible_content_before"]
+        == visible_content
+    )
+    assert "We should make the best-supported points soon." in (
+        document_edit_event["payload"]["item"]["payload"]["visible_content_after"]
+    )
+    assert approval_event["payload"]["id"] == approval_id
+    assert "selected draft text in the canvas" in completed["payload"]["text"].lower()
+    assert "We should make the best-supported points soon." in payload["content"]
+    assert selected_text not in payload["content"]
+    assert "Local canvas edit: keep this concise, plain, and human." in payload["content"]
+    assert approval_event["payload"]["item"]["kind"] == "approval"
+    assert approval_event["payload"]["work_product_item"]["kind"] == "work_product"
+    assert (
+        approval_event["payload"]["work_product_item"]["payload"]["work_product"]["content"]
+        == payload["content"]
+    )
+
+    items = client.get(f"/v1/conversations/{conversation['id']}/items").json()
+    document_edit_item = next(item for item in items if item["kind"] == "document_edit")
+    assert document_edit_item["id"] == document_edit_event["payload"]["item"]["id"]
+    assert document_edit_item["payload"]["payload_after"]["content"] == payload["content"]
+    assert document_edit_item["payload"]["payload_before"]["content"] == visible_content
+
+    transcript = client.get(f"/v1/conversations/{conversation['id']}/messages").json()
+    latest_assistant = next(
+        message for message in reversed(transcript) if message["role"] == "assistant"
+    )
+    assert latest_assistant["content"] == completed["payload"]["text"]
+    assert latest_assistant["approval"]["id"] == approval_id
+    assert latest_assistant["approval"]["payload"]["content"] == payload["content"]
 
 
 def test_conversation_state_endpoint_reanchors_pending_approval_to_latest_revision_turn(
@@ -3405,6 +3516,11 @@ def test_long_horizon_mixed_conversation_keeps_earlier_image_after_history_cutof
         ("What was in that checklist again?", []),
         ("What was in the report again?", []),
         ("Compare the report title and export title for me.", []),
+        (
+            "Actually, forget the report for a second. "
+            "What's the real difference between memory and context here?",
+            [],
+        ),
         ("Go back to the earlier image for a second. Which shortage mattered most?", []),
     ]
 
@@ -3474,11 +3590,18 @@ def test_long_horizon_mixed_conversation_keeps_earlier_image_after_history_cutof
     assert pending_tool_names == ["create_checklist", "export_brief"]
     assert completed_texts[11] == "Of course. I'm here when you want to keep going."
     assert completed_texts[12] == "Hey. What's up?"
+    assert "leave that aside for a minute" in completed_texts[3].lower()
+    assert "talk about lunch and coffee" in completed_texts[3].lower()
+    assert "new main thread" not in completed_texts[3].lower()
     assert "field assistant architecture brief" in completed_texts[20].lower()
     assert "there is no current report yet" in completed_texts[22].lower()
-    assert "lantern batteries" in completed_texts[24].lower()
-    assert "pit edge" not in completed_texts[24].lower()
-    assert "mining clip" not in completed_texts[24].lower()
+    assert "context is the live working set" in completed_texts[24].lower()
+    assert "memory is older distilled state" in completed_texts[24].lower()
+    assert "mining video review report" not in completed_texts[24].lower()
+    assert "field assistant architecture brief" not in completed_texts[24].lower()
+    assert "lantern batteries" in completed_texts[25].lower()
+    assert "pit edge" not in completed_texts[25].lower()
+    assert "mining clip" not in completed_texts[25].lower()
 
 
 def test_follow_up_can_target_earlier_checklist_even_after_newer_export_draft(

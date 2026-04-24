@@ -182,7 +182,7 @@ And it is not trying to fake those things with copy.
 
 ## Current Status
 
-As of April 20, 2026, this repository is already runnable, testable, and
+As of April 23, 2026, this repository is already runnable, testable, and
 useful.
 
 It is best described as:
@@ -202,6 +202,7 @@ It is best described as:
 - workspace synthesis through a bounded agent run
 - approval-gated local notes, tasks, checklists, observations, and markdown exports
 - approval editing before save
+- selection-aware draft canvas edits with visible edit history, backend-streamed approval/work-product updates, and persisted document-edit state
 - reload-safe transcript and approval state
 - conversation deletion in the web shell
 
@@ -1385,6 +1386,7 @@ The repository uses local SQLite persistence with explicit domain objects.
 
 - conversations
 - transcript messages
+- conversation items, including approvals, work products, and document edits
 - approvals
 - notes
 - tasks
@@ -1667,6 +1669,7 @@ uv run python scripts/smoke_workspace_agent.py --mode summarize
 uv run python scripts/smoke_workspace_agent.py --mode brief
 uv run python scripts/smoke_thread_state_protocol.py
 uv run python scripts/smoke_deep_conversation.py
+bash scripts/live_browser_friend_turns_check.sh
 ```
 
 ### 9. Export OpenAPI
@@ -1804,8 +1807,26 @@ Current higher-value stress paths include:
 - image upload plus follow-up in the same thread
 - video review plus topic pivot back to normal conversation
 - longer mixed conversation with approval edit before save
+- friend-like/supportive turns while an inline draft canvas is open
+- selection-aware edits inside an active draft canvas
 - workspace export request after unrelated earlier media
 - work-product follow-ups like `what was in that draft again?`
+
+For the active draft/canvas continuity path, run:
+
+```bash
+bash scripts/live_browser_friend_turns_check.sh
+```
+
+The script starts an isolated mock local server, opens the real `/chat/` shell
+with Playwright, creates a pending report canvas, edits it locally, sends
+supportive and task-pivot conversational turns, returns to the draft, and
+verifies a selected canvas sentence can be edited in place from chat.
+The same run also checks visible edit history plus the live API's persisted
+`document_edit` item, so the proof covers both browser behavior and replayable
+thread state.
+It defaults to a headed browser for live QA; set
+`FIELD_ASSISTANT_BROWSER_HEADLESS=1` for CI-style runs.
 
 ### 6. Deep mixed conversation smoke
 

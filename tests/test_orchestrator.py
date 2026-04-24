@@ -19,7 +19,7 @@ from engine.contracts.api import (
     SourceDomain,
     StreamEventType,
 )
-from engine.models.runtime import AssistantGenerationResult
+from engine.models.runtime import AssistantGenerationRequest, AssistantGenerationResult
 from engine.models.document import DocumentAnalysisResult
 from engine.models.video import VideoAnalysisResult, VideoArtifact
 from engine.models.vision import VisionAnalysisResult
@@ -993,6 +993,80 @@ def test_orchestrator_conversation_shortcut_handles_colloquial_turn_during_pendi
         assert second_completed
         assert first_completed[0].payload["text"] == "I drafted a report here."
         assert second_completed[0].payload["text"] == "Hey. What's up?"
+    finally:
+        container.store.close()
+
+
+def test_orchestrator_task_pivot_during_pending_draft_uses_full_runtime(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(database_path=str(tmp_path / "orchestrator-task-pivot.db"))
+    container = build_container(settings)
+    try:
+        conversation = container.store.create_conversation(
+            ConversationCreateRequest(title="Pivot during draft", mode=AssistantMode.RESEARCH)
+        )
+        first = ConversationTurnRequest(
+            conversation_id=conversation.id,
+            mode=AssistantMode.RESEARCH,
+            text="Create a report summarizing the current field assistant architecture.",
+        )
+        asyncio.run(_collect_events(container, first))
+
+        captured_requests: list[AssistantGenerationRequest] = []
+
+        class FakeAssistantRuntime:
+            backend_name = "fake-assistant"
+
+            def generate(self, request):
+                captured_requests.append(request)
+                return AssistantGenerationResult(
+                    text="MODEL HANDLED THE PIVOT",
+                    backend=self.backend_name,
+                    model_name="fake-assistant",
+                    model_source=None,
+                )
+
+            def synthesize_memory(self, request):
+                return None
+
+            def rank_memories(self, request):
+                return None
+
+            def resolve_memory_focus(self, request):
+                return None
+
+        class FakeShortcutRuntime:
+            def generate(self, request):
+                return AssistantGenerationResult(
+                    text="SHORTCUT SHOULD NOT RUN",
+                    backend="deterministic",
+                    model_name="shortcut",
+                    model_source=None,
+                )
+
+        container.orchestrator.runtime = FakeAssistantRuntime()
+        container.orchestrator.conversation_shortcut_runtime = FakeShortcutRuntime()
+        container.orchestrator.memory_service = container.orchestrator.memory_service.__class__(
+            container.orchestrator.runtime
+        )
+
+        second = ConversationTurnRequest(
+            conversation_id=conversation.id,
+            mode=AssistantMode.RESEARCH,
+            text="Actually, forget the report for a second. What's the real difference between memory and context here?",
+        )
+
+        second_events = asyncio.run(_collect_events(container, second))
+        second_completed = [
+            event for event in second_events if event.type == StreamEventType.ASSISTANT_MESSAGE_COMPLETED
+        ]
+        assert second_completed
+        assert second_completed[0].payload["text"] == "MODEL HANDLED THE PIVOT"
+        assert captured_requests
+        assert captured_requests[0].turn_adaptation_kind == "task_pivot"
+        assert captured_requests[0].foreground_anchor_kind == "pending_output"
+        assert captured_requests[0].foreground_anchor_title == "Field Assistant Architecture Report"
     finally:
         container.store.close()
 

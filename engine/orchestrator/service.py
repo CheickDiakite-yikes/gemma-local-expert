@@ -19,6 +19,8 @@ from engine.contracts.api import (
     AssetAnalysisStatus,
     AssetKind,
     AssetSummary,
+    CanvasSelectionContext,
+    CanvasSelectionEditAction,
     EvidencePacket,
     EvidenceFact,
     EvidenceRef,
@@ -36,7 +38,12 @@ from engine.contracts.api import (
     ConversationTurnRecord,
     WorkspaceBinding,
 )
-from engine.contracts.api import ConversationStreamEvent, ConversationTurnRequest, StreamEventType, new_id
+from engine.contracts.api import (
+    ConversationStreamEvent,
+    ConversationTurnRequest,
+    StreamEventType,
+    new_id,
+)
 from engine.models.document import DocumentAnalysisRequest, DocumentAsset, DocumentRuntime
 from engine.models.gateway import ModelGateway
 from engine.models.runtime import (
@@ -230,6 +237,7 @@ class OrchestratorService:
         memory_referent_title: str | None = None
         memory_referent_excerpt: str | None = None
         draft_updated = False
+        canvas_selection_reply: str | None = None
         active_steering_instruction = self._active_steering_instruction(
             turn_text=turn.text,
             conversation_context=conversation_context,
@@ -262,10 +270,140 @@ class OrchestratorService:
                 payload={"message": warning},
             )
 
+        if turn.canvas_selection is not None:
+            selection = turn.canvas_selection
+            selection_approval = active_pending_approval
+            if selection_approval is None or selection_approval.id != selection.approval_id:
+                candidate = self.store.get_approval(selection.approval_id)
+                if (
+                    candidate is not None
+                    and candidate.status == "pending"
+                    and candidate.conversation_id == turn.conversation_id
+                ):
+                    selection_approval = candidate
+                    active_pending_approval = candidate
+                    approval_required = True
+
+            if selection_approval is None or selection_approval.id != selection.approval_id:
+                canvas_selection_reply = (
+                    "I couldn't update that selection because it is not attached to a pending "
+                    "canvas draft anymore. Reselect the current draft text and try again."
+                )
+            elif selection.action == CanvasSelectionEditAction.EXPLAIN:
+                canvas_selection_reply = self.tool_runtime.explain_selection_text(selection.text)
+            else:
+                try:
+                    revised_payload = self.tool_runtime.revise_pending_payload_selection(
+                        selection_approval.tool_name,
+                        selection_approval.payload,
+                        selection,
+                    )
+                except ValueError as exc:
+                    canvas_selection_reply = str(exc)
+                    yield ConversationStreamEvent(
+                        type=StreamEventType.WARNING,
+                        conversation_id=turn.conversation_id,
+                        turn_id=turn_id,
+                        payload={"message": str(exc)},
+                    )
+                else:
+                    if revised_payload and revised_payload != selection_approval.payload:
+                        replacement_text = self.tool_runtime.transform_selected_canvas_text(
+                            selection.text,
+                            selection.action,
+                        )
+                        revised_approval = self._persist_pending_draft_revision(
+                            approval=selection_approval,
+                            revised_payload=revised_payload,
+                            conversation_context=conversation_context,
+                            turn_id=turn_id,
+                        )
+                        draft_updated = True
+                        active_pending_approval = revised_approval
+                        memory_referent_excerpt = getattr(
+                            conversation_context, "selected_referent_excerpt", None
+                        )
+                        approval_required = True
+                        agent_run = (
+                            self.store.get_agent_run(revised_approval.run_id)
+                            if revised_approval.run_id
+                            else None
+                        )
+                        self.audit.record(
+                            "approval.updated",
+                            approval_id=revised_approval.id,
+                            tool_name=revised_approval.tool_name,
+                            conversation_id=turn.conversation_id,
+                            turn_id=turn_id,
+                            edit_action=selection.action.value,
+                        )
+                        yield self._status_event(
+                            conversation_id=turn.conversation_id,
+                            turn_id=turn_id,
+                            kind="tool",
+                            label="Updated selected draft text",
+                            detail=(
+                                "Revised the highlighted canvas text while keeping the local "
+                                "save gated."
+                            ),
+                            extra=self._agent_status_extra(
+                                conversation_id=turn.conversation_id,
+                                turn_id=turn_id,
+                                run=agent_run,
+                            ),
+                        )
+                        document_edit_item = self._append_document_edit_item(
+                            conversation_id=turn.conversation_id,
+                            turn_id=turn_id,
+                            approval=revised_approval,
+                            selection=selection,
+                            before_payload=selection.current_payload or selection_approval.payload,
+                            after_payload=revised_payload,
+                            after_text=replacement_text,
+                        )
+                        yield ConversationStreamEvent(
+                            type=StreamEventType.DOCUMENT_EDITED,
+                            conversation_id=turn.conversation_id,
+                            turn_id=turn_id,
+                            payload={
+                                "approval_id": revised_approval.id,
+                                "tool_name": revised_approval.tool_name,
+                                "action": selection.action.value,
+                                "field_name": selection.field_name,
+                                "range": {
+                                    "start": selection.start,
+                                    "end": selection.end,
+                                },
+                                "before_text": selection.text,
+                                "after_text": replacement_text,
+                                "item": document_edit_item.model_dump(mode="json"),
+                            },
+                        )
+                        yield ConversationStreamEvent(
+                            type=StreamEventType.APPROVAL_REQUIRED,
+                            conversation_id=turn.conversation_id,
+                            turn_id=turn_id,
+                            payload=self._approval_required_payload(
+                                conversation_id=turn.conversation_id,
+                                turn_id=turn_id,
+                                approval=revised_approval,
+                                agent_run=agent_run,
+                            ),
+                        )
+                        canvas_selection_reply = self._selected_canvas_update_reply(
+                            selection.action
+                        )
+                    else:
+                        canvas_selection_reply = (
+                            "I couldn't update that selected draft text because it no longer "
+                            "matches the current canvas. Reselect the passage and try again."
+                        )
+
         if (
             route.interaction_kind == "draft_follow_up"
             and active_pending_approval
             and getattr(conversation_context, "selected_referent_kind", None) == "pending_output"
+            and turn.canvas_selection is None
         ):
             revised_approval = self._apply_pending_draft_revision(
                 approval=active_pending_approval,
@@ -308,40 +446,12 @@ class OrchestratorService:
                     type=StreamEventType.APPROVAL_REQUIRED,
                     conversation_id=turn.conversation_id,
                     turn_id=turn_id,
-                    payload={
-                        **revised_approval.model_dump(mode="json"),
-                        "run": agent_run.model_dump(mode="json") if agent_run else None,
-                        "item": (
-                            self._latest_approval_item(
-                                turn.conversation_id,
-                                turn_id,
-                                revised_approval.id,
-                                ConversationItemKind.APPROVAL,
-                            ).model_dump(mode="json")
-                            if self._latest_approval_item(
-                                turn.conversation_id,
-                                turn_id,
-                                revised_approval.id,
-                                ConversationItemKind.APPROVAL,
-                            )
-                            else None
-                        ),
-                        "work_product_item": (
-                            self._latest_approval_item(
-                                turn.conversation_id,
-                                turn_id,
-                                revised_approval.id,
-                                ConversationItemKind.WORK_PRODUCT,
-                            ).model_dump(mode="json")
-                            if self._latest_approval_item(
-                                turn.conversation_id,
-                                turn_id,
-                                revised_approval.id,
-                                ConversationItemKind.WORK_PRODUCT,
-                            )
-                            else None
-                        ),
-                    },
+                    payload=self._approval_required_payload(
+                        conversation_id=turn.conversation_id,
+                        turn_id=turn_id,
+                        approval=revised_approval,
+                        agent_run=agent_run,
+                    ),
                 )
 
         if policy.blocked:
@@ -713,7 +823,9 @@ class OrchestratorService:
                     reason=str(exc),
                 )
 
-        planned_tool_name = prepared_tool_name or route.proposed_tool
+        planned_tool_name = None
+        if not (draft_updated or canvas_selection_reply):
+            planned_tool_name = prepared_tool_name or route.proposed_tool
         tool_feedback: str | None = None
         if planned_tool_name:
             allowed, tool_feedback = self._grounding_allows_tool(
@@ -1025,7 +1137,9 @@ class OrchestratorService:
             detail="Turning grounded context into the final response.",
         )
         deterministic_reply = None
-        if approval_required and planned_tool_name:
+        if canvas_selection_reply:
+            deterministic_reply = canvas_selection_reply
+        elif approval_required and planned_tool_name:
             deterministic_reply = self._pending_draft_reply(
                 planned_tool_name,
                 source_domain=route.source_domain,
@@ -1109,6 +1223,10 @@ class OrchestratorService:
                 memory_focus_confidence=conversation_context.memory_focus_confidence,
                 memory_focus_topic_frame=conversation_context.memory_focus_topic_frame,
                 memory_focus_clarifying_question=conversation_context.memory_focus_clarifying_question,
+                turn_adaptation_kind=conversation_context.turn_adaptation_kind,
+                turn_adaptation_reason=conversation_context.turn_adaptation_reason,
+                foreground_anchor_kind=conversation_context.foreground_anchor_kind,
+                foreground_anchor_title=conversation_context.foreground_anchor_title,
                 referent_kind=conversation_context.selected_referent_kind,
                 referent_tool=conversation_context.selected_referent_tool,
                 referent_title=conversation_context.selected_referent_title,
@@ -1142,6 +1260,7 @@ class OrchestratorService:
                 planned_tool_name=planned_tool_name,
                 tool_result=tool_result,
                 approval_required=approval_required,
+                conversation_context=conversation_context,
             ):
                 shortcut = self.conversation_shortcut_runtime.generate(generation_request)
                 generation = AssistantGenerationResult(
@@ -1559,6 +1678,17 @@ class OrchestratorService:
             return f"{base} The local evidence is still incomplete, so review it carefully."
         return base
 
+    def _selected_canvas_update_reply(self, action: CanvasSelectionEditAction) -> str:
+        action_copy = {
+            CanvasSelectionEditAction.SHORTEN: "shortened",
+            CanvasSelectionEditAction.NEUTRAL: "made more neutral",
+            CanvasSelectionEditAction.REWRITE: "rewritten",
+        }.get(action, "updated")
+        return (
+            f"I {action_copy} the selected draft text in the canvas. "
+            "It is still pending approval before anything is saved locally."
+        )
+
     def _draft_source_phrase(self, source_domain: SourceDomain | None) -> str:
         mapping = {
             SourceDomain.IMAGE: " from the attached image",
@@ -1788,6 +1918,79 @@ class OrchestratorService:
                 return item
         return None
 
+    def _approval_required_payload(
+        self,
+        *,
+        conversation_id: str,
+        turn_id: str,
+        approval,
+        agent_run: AgentRun | None = None,
+    ) -> dict[str, object]:
+        approval_item = self._latest_approval_item(
+            conversation_id,
+            turn_id,
+            approval.id,
+            ConversationItemKind.APPROVAL,
+        )
+        work_product_item = self._latest_approval_item(
+            conversation_id,
+            turn_id,
+            approval.id,
+            ConversationItemKind.WORK_PRODUCT,
+        )
+        return {
+            **approval.model_dump(mode="json"),
+            "run": agent_run.model_dump(mode="json") if agent_run else None,
+            "item": approval_item.model_dump(mode="json") if approval_item else None,
+            "work_product_item": (
+                work_product_item.model_dump(mode="json") if work_product_item else None
+            ),
+        }
+
+    def _append_document_edit_item(
+        self,
+        *,
+        conversation_id: str,
+        turn_id: str,
+        approval,
+        selection: CanvasSelectionContext,
+        before_payload: dict[str, object],
+        after_payload: dict[str, object],
+        after_text: str,
+    ):
+        field_name = selection.field_name or "content"
+        visible_before = selection.visible_content
+        visible_after = None
+        if isinstance(visible_before, str) and selection.end <= len(visible_before):
+            visible_after = (
+                visible_before[: selection.start]
+                + after_text
+                + visible_before[selection.end :]
+            )
+
+        return self._append_turn_item(
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            kind=ConversationItemKind.DOCUMENT_EDIT,
+            summary=f"Edited selected {field_name} text in the active draft.",
+            payload={
+                "approval_id": approval.id,
+                "tool_name": approval.tool_name,
+                "action": selection.action.value,
+                "field_name": field_name,
+                "range": {
+                    "start": selection.start,
+                    "end": selection.end,
+                },
+                "before_text": selection.text,
+                "after_text": after_text,
+                "visible_content_before": visible_before,
+                "visible_content_after": visible_after,
+                "payload_before": before_payload,
+                "payload_after": after_payload,
+            },
+        )
+
     def _append_turn_item(
         self,
         *,
@@ -1837,6 +2040,8 @@ class OrchestratorService:
         turn_text: str,
         conversation_context,
     ) -> str | None:
+        if getattr(conversation_context, "turn_adaptation_kind", None) == "task_pivot":
+            return None
         instruction = getattr(conversation_context, "active_steering_instruction", None)
         if not isinstance(instruction, str) or not instruction.strip():
             return None
@@ -1890,6 +2095,21 @@ class OrchestratorService:
         )
         if not revised_payload or revised_payload == approval.payload:
             return None
+        return self._persist_pending_draft_revision(
+            approval=approval,
+            revised_payload=revised_payload,
+            conversation_context=conversation_context,
+            turn_id=turn_id,
+        )
+
+    def _persist_pending_draft_revision(
+        self,
+        *,
+        approval,
+        revised_payload: dict[str, object],
+        conversation_context,
+        turn_id: str,
+    ):
         revised_approval = self.store.update_approval_payload(
             approval.id,
             revised_payload,
@@ -2283,19 +2503,31 @@ class OrchestratorService:
         planned_tool_name: str | None,
         tool_result: dict[str, object] | None,
         approval_required: bool,
+        conversation_context: ConversationContextSnapshot | None,
     ) -> bool:
         lowered = turn_text.lower().strip()
-        if not (
-            route.interaction_kind == "conversation"
-            or self._looks_like_gratitude_turn(lowered)
+        low_entropy_conversation = (
+            self._looks_like_gratitude_turn(lowered)
             or self._looks_like_casual_greeting_turn(lowered)
             or self._looks_like_plain_conversation_turn(lowered)
             or self._looks_like_supportive_turn(lowered)
-        ):
+        )
+        if not low_entropy_conversation:
             return False
         if results or evidence_packet or specialist_analysis_text or workspace_summary:
             return False
         if planned_tool_name or tool_result:
+            return False
+        if (
+            conversation_context
+            and conversation_context.turn_adaptation_kind == "task_pivot"
+            and not (
+                self._looks_like_gratitude_turn(lowered)
+                or self._looks_like_casual_greeting_turn(lowered)
+                or self._looks_like_plain_conversation_turn(lowered)
+                or self._looks_like_supportive_turn(lowered)
+            )
+        ):
             return False
         return True
 

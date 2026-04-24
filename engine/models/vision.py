@@ -6,9 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from mlx_vlm import generate as generate_vision
-from mlx_vlm import load as load_vision
-
 from engine.contracts.api import (
     AssetKind,
     AssistantMode,
@@ -21,6 +18,27 @@ from engine.contracts.api import (
     SourceDomain,
 )
 from engine.models.sources import resolve_local_model_source, resolve_model_source
+
+generate_vision = None
+load_vision = None
+
+
+def _mlx_vlm_generate():
+    global generate_vision
+    if generate_vision is None:
+        from mlx_vlm import generate as loaded_generate
+
+        generate_vision = loaded_generate
+    return generate_vision
+
+
+def _mlx_vlm_load():
+    global load_vision
+    if load_vision is None:
+        from mlx_vlm import load as loaded_load
+
+        load_vision = loaded_load
+    return load_vision
 
 
 @dataclass(slots=True)
@@ -148,7 +166,8 @@ class MLXVisionRuntime:
 
         try:
             model, processor = self._load_model(resolved_source)
-            result = generate_vision(
+            generate_vision_fn = _mlx_vlm_generate()
+            result = generate_vision_fn(
                 model,
                 processor,
                 prompt=_build_prompt(request),
@@ -212,7 +231,8 @@ class MLXVisionRuntime:
             cached = self._cache.get(source)
             if cached is not None:
                 return cached
-            model, processor = load_vision(source)
+            load_vision_fn = _mlx_vlm_load()
+            model, processor = load_vision_fn(source)
             self._cache[source] = (model, processor)
             return model, processor
 

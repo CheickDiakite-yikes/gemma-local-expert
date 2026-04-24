@@ -12,6 +12,8 @@ from engine.contracts.api import (
     AssetCareContext,
     AssetKind,
     AssetSummary,
+    CanvasSelectionContext,
+    CanvasSelectionEditAction,
     ConversationTurnRequest,
     EvidencePacket,
     GroundingStatus,
@@ -337,6 +339,88 @@ class ToolRuntime:
 
         merged = self.merge_edited_payload(tool_name, base_payload, edited)
         return merged if merged != base_payload else None
+
+    def revise_pending_payload_selection(
+        self,
+        tool_name: str,
+        base_payload: dict[str, object],
+        selection: CanvasSelectionContext,
+    ) -> dict[str, object] | None:
+        if selection.action == CanvasSelectionEditAction.EXPLAIN:
+            return None
+
+        field_name = selection.field_name or "content"
+        if field_name not in {"content", "details"}:
+            return None
+        if field_name == "details" and tool_name != "create_task":
+            return None
+        if field_name == "content" and tool_name == "create_task":
+            return None
+
+        current_payload = dict(selection.current_payload or {})
+        effective_payload = (
+            self.merge_edited_payload(tool_name, base_payload, current_payload)
+            if current_payload
+            else dict(base_payload)
+        )
+
+        target_text = (
+            selection.visible_content
+            if isinstance(selection.visible_content, str)
+            else str(effective_payload.get(field_name) or "")
+        )
+        if selection.end <= selection.start or selection.end > len(target_text):
+            return None
+        if target_text[selection.start : selection.end] != selection.text:
+            field_text = str(effective_payload.get(field_name) or "")
+            if (
+                selection.end > len(field_text)
+                or field_text[selection.start : selection.end] != selection.text
+            ):
+                return None
+            target_text = field_text
+
+        replacement = self.transform_selected_canvas_text(selection.text, selection.action)
+        if replacement == selection.text:
+            return None
+
+        next_text = (
+            target_text[: selection.start]
+            + replacement
+            + target_text[selection.end :]
+        )
+        edited_payload = dict(current_payload)
+        if field_name == "content":
+            edited_payload["content"] = self._compose_selected_canvas_content(
+                tool_name=tool_name,
+                base_payload=base_payload,
+                effective_payload=effective_payload,
+                next_visible_content=next_text,
+            )
+        else:
+            edited_payload[field_name] = next_text
+
+        merged = self.merge_edited_payload(tool_name, base_payload, edited_payload)
+        return merged if merged != base_payload else None
+
+    def transform_selected_canvas_text(
+        self,
+        text: str,
+        action: CanvasSelectionEditAction,
+    ) -> str:
+        if action == CanvasSelectionEditAction.SHORTEN:
+            return self._shorten_selection_text(text)
+        if action == CanvasSelectionEditAction.NEUTRAL:
+            return self._neutralize_selection_text(text)
+        if action == CanvasSelectionEditAction.REWRITE:
+            return self._rewrite_selection_text(text)
+        return text
+
+    def explain_selection_text(self, text: str) -> str:
+        clean = self._clean_selection_body(text)
+        if not clean:
+            return "That selection is empty, so there is nothing to explain yet."
+        return f"That selected text is saying: {self._ensure_terminal_punctuation(clean)}"
 
     def _title_from_request(self, text: str, *, fallback: str) -> str:
         cleaned = re.sub(r"^(create|make|build|write|log)\s+(a|an|the)?\s*", "", text, flags=re.I)
@@ -668,6 +752,141 @@ class ToolRuntime:
             if candidate:
                 return candidate[:120]
         return None
+
+    def _compose_selected_canvas_content(
+        self,
+        *,
+        tool_name: str,
+        base_payload: dict[str, object],
+        effective_payload: dict[str, object],
+        next_visible_content: str,
+    ) -> str:
+        if tool_name not in {"create_note", "create_report", "export_brief", "log_observation"}:
+            return next_visible_content
+        if not (
+            self._payload_uses_title_heading(base_payload)
+            or self._payload_uses_title_heading(effective_payload)
+        ):
+            return next_visible_content
+
+        title = str(effective_payload.get("title") or base_payload.get("title") or "").strip()
+        content = next_visible_content.replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not title or not content:
+            return next_visible_content
+
+        lines = content.split("\n")
+        first_meaningful_index = next(
+            (
+                index
+                for index, line in enumerate(lines)
+                if self._strip_markdown_to_text(line).strip()
+            ),
+            None,
+        )
+        if first_meaningful_index is not None:
+            first_raw = lines[first_meaningful_index].strip()
+            first_text = self._strip_markdown_to_text(first_raw).strip().lower()
+            if re.match(r"^#{1,6}\s+", first_raw) and first_text == title.lower():
+                return content
+
+        return f"# {title}\n\n{content}"
+
+    def _payload_uses_title_heading(self, payload: dict[str, object]) -> bool:
+        title = self._strip_markdown_to_text(str(payload.get("title") or "")).strip().lower()
+        content = str(payload.get("content") or "")
+        if not title or not content.strip():
+            return False
+        for line in content.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+            if not self._strip_markdown_to_text(line).strip():
+                continue
+            first_raw = line.strip()
+            first_text = self._strip_markdown_to_text(first_raw).strip().lower()
+            return bool(re.match(r"^#{1,6}\s+", first_raw)) and first_text == title
+        return False
+
+    def _split_selection_prefix(self, text: str) -> tuple[str, str]:
+        match = re.match(r"^(\s*(?:[-*+]\s+|\d+\.\s+|#{1,6}\s+|>\s*)?)([\s\S]*?)$", str(text or ""))
+        if not match:
+            return "", str(text or "")
+        return match.group(1), match.group(2)
+
+    def _sentence_case(self, text: str) -> str:
+        trimmed = str(text or "").strip()
+        if not trimmed:
+            return ""
+        return f"{trimmed[0].upper()}{trimmed[1:]}"
+
+    def _ensure_terminal_punctuation(self, text: str) -> str:
+        trimmed = str(text or "").strip()
+        if not trimmed or re.search(r"[.!?]$", trimmed):
+            return trimmed
+        return f"{trimmed}."
+
+    def _strip_markdown_to_text(self, text: str) -> str:
+        cleaned = str(text or "")
+        cleaned = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", cleaned)
+        cleaned = re.sub(r"`([^`]+)`", r"\1", cleaned)
+        cleaned = re.sub(r"^\s*#{1,6}\s+", "", cleaned, flags=re.MULTILINE)
+        cleaned = re.sub(r"^\s*>\s+", "", cleaned, flags=re.MULTILINE)
+        cleaned = re.sub(r"^\s*[-*+]\s+", "", cleaned, flags=re.MULTILINE)
+        cleaned = re.sub(r"^\s*\d+\.\s+", "", cleaned, flags=re.MULTILINE)
+        cleaned = cleaned.replace("*", "").replace("_", "").replace("~", "")
+        return cleaned
+
+    def _clean_selection_body(self, text: str) -> str:
+        return re.sub(
+            r"\s+([,.;:!?])",
+            r"\1",
+            re.sub(r"\s+", " ", self._strip_markdown_to_text(text)),
+        ).strip()
+
+    def _shorten_selection_text(self, text: str) -> str:
+        prefix, body = self._split_selection_prefix(text)
+        clean = self._clean_selection_body(body)
+        replacements = (
+            (r"\b(currently|really|very|clearly|basically|immediately|actually)\b", ""),
+            (
+                r"\b(main structure, responsibilities, and current constraints)\b",
+                "structure and constraints",
+            ),
+            (r"\bbefore (?:it is|it's|we are|we're)?\s*saved locally\b", "before saving"),
+            (r"\bif the audience needs a shorter version\b", "for the audience"),
+        )
+        for pattern, replacement in replacements:
+            clean = re.sub(pattern, replacement, clean, flags=re.IGNORECASE)
+        clean = re.sub(r"\s{2,}", " ", clean).strip()
+        first_sentence = re.split(r"(?<=[.!?])\s+", clean)[0] if clean else ""
+        if len(first_sentence) > 120:
+            first_sentence = f"{first_sentence[:117].rstrip()}..."
+        shortened = self._ensure_terminal_punctuation(first_sentence)
+        return f"{prefix}{self._sentence_case(shortened)}"
+
+    def _neutralize_selection_text(self, text: str) -> str:
+        prefix, body = self._split_selection_prefix(text)
+        clean = self._clean_selection_body(body)
+        replacements = (
+            (r"\bmust\b", "should"),
+            (r"\bwill\b", "may"),
+            (r"\bdefinitely\b", "may"),
+            (r"\bclearly\b", "carefully"),
+            (r"\bimmediately\b", "soon"),
+            (r"\bstrongest\b", "best-supported"),
+            (r"\bstrong\b", "well-supported"),
+            (r"\burgent\b", "important"),
+            (r"\bclaims?\b", "points"),
+            (r"\bprove\b", "support"),
+        )
+        for pattern, replacement in replacements:
+            clean = re.sub(pattern, replacement, clean, flags=re.IGNORECASE)
+        clean = re.sub(r"\s{2,}", " ", clean).strip()
+        return f"{prefix}{self._ensure_terminal_punctuation(self._sentence_case(clean))}"
+
+    def _rewrite_selection_text(self, text: str) -> str:
+        prefix, body = self._split_selection_prefix(text)
+        clean = self._ensure_terminal_punctuation(
+            self._sentence_case(self._clean_selection_body(body))
+        )
+        return f"{prefix}{clean}"
 
     def _tighten_title(self, title: str) -> str | None:
         revised = title

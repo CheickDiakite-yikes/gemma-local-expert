@@ -127,6 +127,7 @@ class ConversationItemKind(str, Enum):
     EVIDENCE_PACKET = "evidence_packet"
     APPROVAL = "approval"
     WORK_PRODUCT = "work_product"
+    DOCUMENT_EDIT = "document_edit"
     AGENT_RUN = "agent_run"
     TOOL_PROPOSAL = "tool_proposal"
     TOOL_RESULT = "tool_result"
@@ -142,6 +143,7 @@ class StreamEventType(str, Enum):
     TOOL_PROPOSED = "tool.proposed"
     TOOL_STARTED = "tool.started"
     TOOL_COMPLETED = "tool.completed"
+    DOCUMENT_EDITED = "document.edited"
     APPROVAL_REQUIRED = "approval.required"
     WARNING = "warning"
     ERROR = "error"
@@ -151,6 +153,13 @@ class ApprovalAction(str, Enum):
     APPROVE = "approve"
     REJECT = "reject"
     EDIT = "edit"
+
+
+class CanvasSelectionEditAction(str, Enum):
+    SHORTEN = "shorten"
+    NEUTRAL = "neutral"
+    REWRITE = "rewrite"
+    EXPLAIN = "explain"
 
 
 class AgentRunStatus(str, Enum):
@@ -323,6 +332,17 @@ class ConversationSteerRequest(StrictModel):
     instruction: str
 
 
+class CanvasSelectionContext(StrictModel):
+    approval_id: str
+    field_name: str = "content"
+    start: int = Field(ge=0)
+    end: int = Field(ge=0)
+    text: str
+    visible_content: str | None = None
+    action: CanvasSelectionEditAction
+    current_payload: dict[str, Any] = Field(default_factory=dict)
+
+
 class ConversationTurnRequest(StrictModel):
     conversation_id: str
     mode: AssistantMode = AssistantMode.GENERAL
@@ -331,6 +351,7 @@ class ConversationTurnRequest(StrictModel):
     enabled_knowledge_pack_ids: list[str] = Field(default_factory=list)
     response_preferences: ResponsePreferences = Field(default_factory=ResponsePreferences)
     medical_session_id: str | None = None
+    canvas_selection: CanvasSelectionContext | None = None
 
 
 class SearchResultItem(StrictModel):

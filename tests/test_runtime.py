@@ -33,6 +33,10 @@ def _request(**overrides) -> AssistantGenerationRequest:
         "memory_focus_confidence": 0.88,
         "memory_focus_topic_frame": "Architecture direction",
         "memory_focus_clarifying_question": None,
+        "turn_adaptation_kind": None,
+        "turn_adaptation_reason": None,
+        "foreground_anchor_kind": None,
+        "foreground_anchor_title": None,
         "referent_kind": None,
         "referent_tool": None,
         "referent_title": None,
@@ -125,6 +129,49 @@ def test_mock_runtime_can_answer_escalation_follow_up_from_memory() -> None:
 
     assert "stop and escalate if you see worsening weakness, confusion, or inability to drink" in result.text.lower()
     assert "ors guidance" in result.text.lower()
+
+
+def test_mock_runtime_handles_task_pivot_away_from_active_work() -> None:
+    runtime = MockAssistantRuntime()
+
+    result = runtime.generate(
+        _request(
+            user_text=(
+                "Actually, forget the report for a second. "
+                "What's the real difference between memory and context here?"
+            ),
+            selected_memory_topic=None,
+            selected_memory_summary=None,
+            turn_adaptation_kind="task_pivot",
+            turn_adaptation_reason="User is changing the problem instead of continuing the report.",
+            foreground_anchor_kind="pending_output",
+            foreground_anchor_title="Field Assistant Architecture Report",
+            active_topic="Field Assistant Architecture Report",
+        )
+    )
+
+    assert "sure." in result.text.lower()
+    assert "context is the live working set" in result.text.lower()
+    assert "memory is older distilled state" in result.text.lower()
+
+
+def test_mock_runtime_handles_lightweight_tangent_more_naturally() -> None:
+    runtime = MockAssistantRuntime()
+
+    result = runtime.generate(
+        _request(
+            user_text="Separate tangent about lunch and coffee for a second.",
+            turn_adaptation_kind="task_pivot",
+            turn_adaptation_reason="User is changing the problem instead of continuing the earlier teaching thread.",
+            foreground_anchor_kind="topic",
+            foreground_anchor_title="prepare oral rehydration solution in the field",
+            active_topic="prepare oral rehydration solution in the field",
+        )
+    )
+
+    assert "leave that aside for a minute" in result.text.lower()
+    assert "talk about lunch and coffee" in result.text.lower()
+    assert "new main thread" not in result.text.lower()
 
 
 def test_mock_runtime_uses_saved_output_referent_for_topic_reentry() -> None:

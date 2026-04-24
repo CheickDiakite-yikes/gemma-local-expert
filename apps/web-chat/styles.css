@@ -1135,6 +1135,13 @@ a {
   line-height: 1.4;
 }
 
+.approval-canvas-selection {
+  margin: -2px 0 0;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
 .approval-canvas-controls {
   display: inline-flex;
   align-items: center;
@@ -1146,6 +1153,71 @@ a {
 .approval-canvas-state {
   padding-inline: 8px;
   font-size: 0.68rem;
+}
+
+.approval-canvas-history {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.approval-canvas-history-header,
+.approval-canvas-history-meta,
+.approval-canvas-history-diff {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.approval-canvas-history-header {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.approval-canvas-history-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.approval-canvas-history-item {
+  display: grid;
+  gap: 6px;
+}
+
+.approval-canvas-history-meta {
+  justify-content: flex-start;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.approval-canvas-history-meta span:first-child {
+  color: var(--text);
+  font-weight: 650;
+}
+
+.approval-canvas-history-diff {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  color: var(--text-muted);
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
+.approval-canvas-history-after {
+  color: var(--text);
+}
+
+.approval-canvas-history-arrow {
+  color: var(--text-faint);
 }
 
 .approval-header {

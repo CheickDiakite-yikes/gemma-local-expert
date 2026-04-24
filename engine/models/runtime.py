@@ -5,9 +5,6 @@ import threading
 from dataclasses import dataclass
 from typing import Protocol
 
-from mlx_lm import generate, load
-from mlx_lm.sample_utils import make_sampler
-
 from engine.contracts.api import (
     AssistantMode,
     ConversationMemoryEntry,
@@ -19,6 +16,13 @@ from engine.contracts.api import (
     SourceDomain,
 )
 from engine.models.sources import resolve_model_source
+
+
+def _mlx_lm_runtime():
+    from mlx_lm import generate, load
+    from mlx_lm.sample_utils import make_sampler
+
+    return generate, load, make_sampler
 
 
 @dataclass(slots=True)
@@ -40,6 +44,10 @@ class AssistantGenerationRequest:
     memory_focus_confidence: float | None
     memory_focus_topic_frame: str | None
     memory_focus_clarifying_question: str | None
+    turn_adaptation_kind: str | None
+    turn_adaptation_reason: str | None
+    foreground_anchor_kind: str | None
+    foreground_anchor_title: str | None
     referent_kind: str | None
     referent_tool: str | None
     referent_title: str | None
@@ -429,6 +437,17 @@ class MockAssistantRuntime:
             return "Yes. We can just talk this through."
         if self._is_casual_greeting(lowered):
             return self._casual_greeting_response(lowered)
+        if request.turn_adaptation_kind == "casual_detour" and request.foreground_anchor_title:
+            return (
+                f"Sure. We can leave {request.foreground_anchor_title} aside for a second and just talk."
+            )
+        if request.turn_adaptation_kind == "task_pivot":
+            direct_pivot_response = self._task_pivot_direct_response(lowered)
+            if direct_pivot_response is not None:
+                return direct_pivot_response
+            if lowered.endswith("?") or lowered.startswith(("what ", "why ", "how ", "which ")):
+                return "Sure. We can focus on that directly."
+            return "Sure. We can leave that aside for a minute and focus on this instead."
         if request.is_follow_up:
             prior_topic = request.memory_focus_topic_frame or request.active_topic or self._recent_topic(
                 request.messages, request.user_text
@@ -535,6 +554,30 @@ class MockAssistantRuntime:
                 "break it into a few simple steps, explain the first step plainly, and check understanding before adding detail."
             )
         return "Yes. We can just talk this through."
+
+    def _task_pivot_direct_response(self, lowered: str) -> str | None:
+        if "memory" in lowered and "context" in lowered:
+            return (
+                "Sure. Context is the live working set for this turn. "
+                "Memory is older distilled state we only bring back when it helps."
+            )
+        if "tangent" in lowered or "for a second" in lowered:
+            topic = self._lightweight_tangent_topic(lowered)
+            if topic is not None:
+                return f"Sure. We can leave that aside for a minute and talk about {topic}."
+            return "Sure. We can leave that aside for a minute. What do you want to talk through?"
+        return None
+
+    def _lightweight_tangent_topic(self, lowered: str) -> str | None:
+        match = re.search(
+            r"(?:tangent|topic|question)\s+about\s+([a-z0-9 ,'\-]+?)(?:\s+for a second|\s+again|[?.!]|$)",
+            lowered,
+        )
+        if match:
+            topic = " ".join(match.group(1).split())
+            if topic:
+                return topic
+        return None
 
     def _work_product_follow_up(
         self, request: AssistantGenerationRequest, lowered: str
@@ -1192,6 +1235,7 @@ class MLXAssistantRuntime:
 
         model, tokenizer = self._load_model(resolved_source)
         prompt = self._build_prompt(tokenizer, request.messages)
+        generate, _, make_sampler = _mlx_lm_runtime()
         sampler = make_sampler(temp=request.temperature, top_p=request.top_p)
         text = generate(
             model,
@@ -1249,6 +1293,7 @@ class MLXAssistantRuntime:
                 return heuristic
             model, tokenizer = self._load_model(model_source)
             prompt = self._build_prompt(tokenizer, messages)
+            generate, _, make_sampler = _mlx_lm_runtime()
             sampler = make_sampler(temp=0.1, top_p=0.9)
             text = generate(
                 model,
@@ -1321,6 +1366,7 @@ class MLXAssistantRuntime:
                 return heuristic
             model, tokenizer = self._load_model(model_source)
             prompt = self._build_prompt(tokenizer, messages)
+            generate, _, make_sampler = _mlx_lm_runtime()
             sampler = make_sampler(temp=0.1, top_p=0.9)
             text = generate(
                 model,
@@ -1406,6 +1452,7 @@ class MLXAssistantRuntime:
                 return heuristic
             model, tokenizer = self._load_model(model_source)
             prompt = self._build_prompt(tokenizer, messages)
+            generate, _, make_sampler = _mlx_lm_runtime()
             sampler = make_sampler(temp=0.1, top_p=0.9)
             text = generate(
                 model,
@@ -1427,6 +1474,7 @@ class MLXAssistantRuntime:
             cached = self._cache.get(source)
             if cached is not None:
                 return cached
+            _, load, _ = _mlx_lm_runtime()
             model, tokenizer = load(source)
             self._cache[source] = (model, tokenizer)
             return model, tokenizer

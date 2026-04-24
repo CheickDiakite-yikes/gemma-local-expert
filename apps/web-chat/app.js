@@ -19,6 +19,7 @@ const state = {
   runPanels: new Map(),
   capabilities: null,
   medicalSessions: new Map(),
+  canvasSelection: null,
   processFeed: [],
   statusDetail: "Ready for the next turn.",
   camera: {
@@ -247,6 +248,9 @@ function purgeConversationUiState(conversationId) {
   state.conversationItems.delete(conversationId);
   state.agentRuns.delete(conversationId);
   state.medicalSessions.delete(conversationId);
+  if (state.canvasSelection?.approvalId && approvalIds.includes(state.canvasSelection.approvalId)) {
+    state.canvasSelection = null;
+  }
   persistApprovalDrafts();
   persistApprovalPanels();
   persistMessagePanels();
@@ -311,6 +315,52 @@ function workProductFromItem(item) {
     evidence_packet_id: payload.evidence_packet_id || approval.evidence_packet_id || null,
     workProductItem: item,
   };
+}
+
+function documentEditFromItem(item) {
+  if (!item || item.kind !== "document_edit") {
+    return null;
+  }
+  const payload = item.payload || {};
+  if (!payload.approval_id) {
+    return null;
+  }
+  return {
+    id: item.id,
+    createdAt: item.created_at || null,
+    approvalId: payload.approval_id,
+    toolName: payload.tool_name || null,
+    action: payload.action || "updated",
+    fieldName: payload.field_name || "content",
+    range: payload.range || null,
+    beforeText: payload.before_text || "",
+    afterText: payload.after_text || "",
+    visibleContentBefore: payload.visible_content_before || "",
+    visibleContentAfter: payload.visible_content_after || "",
+  };
+}
+
+function documentEditsForApproval(approvalId) {
+  if (!approvalId || !state.activeConversationId) {
+    return [];
+  }
+  return itemsForConversation(state.activeConversationId)
+    .map(documentEditFromItem)
+    .filter((edit) => edit?.approvalId === approvalId)
+    .sort((left, right) => String(left.createdAt || "").localeCompare(String(right.createdAt || "")));
+}
+
+function documentEditActionLabel(action) {
+  switch (action) {
+    case "shorten":
+      return "Shortened selection";
+    case "neutral":
+      return "Made selection more neutral";
+    case "rewrite":
+      return "Rewrote selection";
+    default:
+      return "Updated selection";
+  }
 }
 
 function hydrateApprovalsIntoMessages(conversationId) {
@@ -536,6 +586,190 @@ function approvalEffectivePayload(approval, overridePayload = undefined) {
     }
   }
   return approval.payload;
+}
+
+function selectedCanvasRangeFromField(field, approval) {
+  if (!field || !approval?.id || field.dataset.approvalField !== "content") {
+    return null;
+  }
+  const start = field.selectionStart;
+  const end = field.selectionEnd;
+  if (!Number.isInteger(start) || !Number.isInteger(end) || end <= start) {
+    return null;
+  }
+  const text = field.value.slice(start, end);
+  if (!text.trim()) {
+    return null;
+  }
+  return {
+    approvalId: approval.id,
+    fieldName: "content",
+    start,
+    end,
+    text,
+  };
+}
+
+function updateCanvasSelectionHint(container, selection) {
+  const hint = container.querySelector("[data-canvas-selection-hint]");
+  if (!hint) {
+    return;
+  }
+  if (!selection) {
+    hint.hidden = true;
+    hint.textContent = "";
+    return;
+  }
+  const wordCount = selection.text.trim().split(/\s+/).filter(Boolean).length;
+  hint.hidden = false;
+  hint.textContent = `Selected ${wordCount} word${wordCount === 1 ? "" : "s"}. Ask: shorten this, rewrite this, or make this more neutral.`;
+}
+
+function rememberCanvasSelection(container, field, approval) {
+  const selection = selectedCanvasRangeFromField(field, approval);
+  if (!selection) {
+    if (state.canvasSelection?.approvalId === approval?.id) {
+      state.canvasSelection = null;
+    }
+    updateCanvasSelectionHint(container, null);
+    return null;
+  }
+  state.canvasSelection = selection;
+  updateCanvasSelectionHint(container, selection);
+  return selection;
+}
+
+function currentCanvasSelection() {
+  const selection = state.canvasSelection;
+  if (!selection?.approvalId) {
+    return null;
+  }
+  const textarea = document.querySelector(
+    `[data-approval-editor="${CSS.escape(selection.approvalId)}"] [data-approval-field="content"]`,
+  );
+  if (!textarea || textarea.value.slice(selection.start, selection.end) !== selection.text) {
+    state.canvasSelection = null;
+    return null;
+  }
+  const container = textarea.closest(".message-row");
+  const approval = state.approvals.get(selection.approvalId);
+  if (!container || !approval || !approvalUsesInlineCanvas(approval)) {
+    state.canvasSelection = null;
+    return null;
+  }
+  return { ...selection, textarea, container, approval };
+}
+
+function selectedCanvasAction(prompt) {
+  const lowered = String(prompt || "").toLowerCase();
+  if (!/\b(this|selection|selected text|highlighted text|highlight)\b/.test(lowered)) {
+    return null;
+  }
+  if (/\b(explain|what does|what is this saying|what does this mean)\b/.test(lowered)) {
+    return "explain";
+  }
+  if (/\b(neutral|less certain|less dramatic|less strong|more careful|uncertainty)\b/.test(lowered)) {
+    return "neutral";
+  }
+  if (/\b(shorten|shorter|tighten|trim|condense|more concise)\b/.test(lowered)) {
+    return "shorten";
+  }
+  if (/\b(rewrite|rephrase|clean up|polish|clearer|more direct)\b/.test(lowered)) {
+    return "rewrite";
+  }
+  return null;
+}
+
+function splitSelectionPrefix(text) {
+  const match = String(text || "").match(/^(\s*(?:[-*+]\s+|\d+\.\s+|#{1,6}\s+|>\s*)?)([\s\S]*?)$/);
+  return {
+    prefix: match?.[1] || "",
+    body: match?.[2] || "",
+  };
+}
+
+function sentenceCase(text) {
+  const trimmed = String(text || "").trim();
+  if (!trimmed) {
+    return "";
+  }
+  return `${trimmed[0].toUpperCase()}${trimmed.slice(1)}`;
+}
+
+function ensureTerminalPunctuation(text) {
+  const trimmed = String(text || "").trim();
+  if (!trimmed || /[.!?]$/.test(trimmed)) {
+    return trimmed;
+  }
+  return `${trimmed}.`;
+}
+
+function cleanSelectionBody(text) {
+  return stripMarkdownToText(text)
+    .replace(/\s+/g, " ")
+    .replace(/\s+([,.;:!?])/g, "$1")
+    .trim();
+}
+
+function shortenSelectionText(text) {
+  const { prefix, body } = splitSelectionPrefix(text);
+  let clean = cleanSelectionBody(body);
+  clean = clean
+    .replace(/\b(currently|really|very|clearly|basically|immediately|actually)\b/gi, "")
+    .replace(/\b(main structure, responsibilities, and current constraints)\b/gi, "structure and constraints")
+    .replace(/\bbefore (?:it is|it's|we are|we're)?\s*saved locally\b/gi, "before saving")
+    .replace(/\bif the audience needs a shorter version\b/gi, "for the audience")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  const firstSentence = clean.split(/(?<=[.!?])\s+/)[0] || clean;
+  const shortened = ensureTerminalPunctuation(firstSentence.length <= 120 ? firstSentence : `${firstSentence.slice(0, 117).trimEnd()}...`);
+  return `${prefix}${sentenceCase(shortened)}`;
+}
+
+function neutralizeSelectionText(text) {
+  const { prefix, body } = splitSelectionPrefix(text);
+  let clean = cleanSelectionBody(body);
+  clean = clean
+    .replace(/\bmust\b/gi, "should")
+    .replace(/\bwill\b/gi, "may")
+    .replace(/\bdefinitely\b/gi, "may")
+    .replace(/\bclearly\b/gi, "carefully")
+    .replace(/\bimmediately\b/gi, "soon")
+    .replace(/\bstrongest\b/gi, "best-supported")
+    .replace(/\bstrong\b/gi, "well-supported")
+    .replace(/\burgent\b/gi, "important")
+    .replace(/\bclaims?\b/gi, "points")
+    .replace(/\bprove\b/gi, "support")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  return `${prefix}${ensureTerminalPunctuation(sentenceCase(clean))}`;
+}
+
+function rewriteSelectionText(text) {
+  const { prefix, body } = splitSelectionPrefix(text);
+  const clean = ensureTerminalPunctuation(sentenceCase(cleanSelectionBody(body)));
+  return `${prefix}${clean}`;
+}
+
+function explainSelectionText(text) {
+  const clean = cleanSelectionBody(text);
+  if (!clean) {
+    return "That selection is empty, so there is nothing to explain yet.";
+  }
+  return `That selected text is saying: ${ensureTerminalPunctuation(clean)}`;
+}
+
+function transformSelectedCanvasText(text, action) {
+  switch (action) {
+    case "shorten":
+      return shortenSelectionText(text);
+    case "neutral":
+      return neutralizeSelectionText(text);
+    case "rewrite":
+      return rewriteSelectionText(text);
+    default:
+      return text;
+  }
 }
 
 function approvalGroundingLabel(payload) {
@@ -1932,6 +2166,41 @@ function approvalCanvasOrigin(approval) {
   return reason;
 }
 
+function renderDocumentEditHistory(approval) {
+  const edits = documentEditsForApproval(approval?.id);
+  if (!edits.length) {
+    return "";
+  }
+  const latest = edits.slice(-3).reverse();
+  return `
+    <section class="approval-canvas-history" data-document-edit-history>
+      <div class="approval-canvas-history-header">
+        <span>Edit history</span>
+        <span>${edits.length} ${edits.length === 1 ? "edit" : "edits"}</span>
+      </div>
+      <ol class="approval-canvas-history-list">
+        ${latest
+          .map(
+            (edit) => `
+              <li class="approval-canvas-history-item" data-document-edit-item="${escapeHtml(edit.id)}">
+                <div class="approval-canvas-history-meta">
+                  <span>${escapeHtml(documentEditActionLabel(edit.action))}</span>
+                  <span>${escapeHtml(edit.fieldName)}</span>
+                </div>
+                <div class="approval-canvas-history-diff">
+                  <span class="approval-canvas-history-before">${escapeHtml(clipCopy(edit.beforeText, 96))}</span>
+                  <span class="approval-canvas-history-arrow" aria-hidden="true">-&gt;</span>
+                  <span class="approval-canvas-history-after">${escapeHtml(clipCopy(edit.afterText, 96))}</span>
+                </div>
+              </li>
+            `,
+          )
+          .join("")}
+      </ol>
+    </section>
+  `;
+}
+
 function renderApprovalCanvas(approval) {
   const payload = approvalEffectivePayload(approval);
   const isDirty = approvalHasDraftChanges(approval, payload);
@@ -1940,6 +2209,7 @@ function renderApprovalCanvas(approval) {
   const errorMessage = approvalErrorFor(approval.id);
   const canvasContent = approvalCanvasContent(approval, payload);
   const originCopy = approvalCanvasOrigin(approval);
+  const editHistory = renderDocumentEditHistory(approval);
 
   return `
     <section class="approval-canvas approval-canvas-${escapeHtml(approval.tool_name)}">
@@ -1971,6 +2241,7 @@ function renderApprovalCanvas(approval) {
       </div>
       ${groundingNotice ? `<p class="approval-grounding-note">${escapeHtml(groundingNotice)}</p>` : ""}
       <p class="approval-editor-error"${errorMessage ? "" : " hidden"} data-approval-error>${escapeHtml(errorMessage)}</p>
+      <p class="approval-canvas-selection" data-canvas-selection-hint hidden></p>
       <section class="approval-editor approval-editor-canvas" data-approval-editor="${approval.id}">
         <textarea
           class="approval-canvas-textarea"
@@ -1981,6 +2252,7 @@ function renderApprovalCanvas(approval) {
           placeholder="${escapeHtml(approvalCanvasPlaceholder(approval))}"
         >${escapeHtml(canvasContent)}</textarea>
       </section>
+      ${editHistory}
     </section>
   `;
 }
@@ -2652,9 +2924,17 @@ function wireApprovalActions(container, approval) {
   const editor = container.querySelector(`[data-approval-editor="${approval.id}"]`);
   if (editor) {
     for (const field of editor.querySelectorAll("[data-approval-field], [data-approval-json]")) {
+      if (field.dataset.approvalField === "content") {
+        field.addEventListener("select", () => rememberCanvasSelection(container, field, approval));
+        field.addEventListener("mouseup", () => rememberCanvasSelection(container, field, approval));
+        field.addEventListener("keyup", () => rememberCanvasSelection(container, field, approval));
+      }
       field.addEventListener("input", () => {
         if (state.approvalErrors.has(approval.id)) {
           state.approvalErrors.delete(approval.id);
+        }
+        if (field.dataset.approvalField === "content") {
+          rememberCanvasSelection(container, field, approval);
         }
         refreshApprovalCardState(container, approval);
         resizeApprovalTextareas(container);
@@ -3493,7 +3773,7 @@ function defaultPromptForAttachments(attachments) {
   return "Please review the attached file conservatively.";
 }
 
-async function submitTurn(prompt) {
+async function submitTurn(prompt, options = {}) {
   state.streaming = true;
   state.processFeed = [];
   updateStatus("thinking", "Thinking", "Preparing the next turn locally.");
@@ -3543,6 +3823,7 @@ async function submitTurn(prompt) {
         audio_reply: false,
       },
       medical_session_id: medicalSessionId,
+      canvas_selection: options.canvasSelection || null,
     }),
   });
 
@@ -3575,6 +3856,47 @@ async function submitTurn(prompt) {
   }
 
   await refreshConversations();
+}
+
+function selectedCanvasTurnContext(prompt) {
+  if (state.pendingAttachments.length || state.streaming) {
+    return null;
+  }
+  const action = selectedCanvasAction(prompt);
+  if (!action) {
+    return null;
+  }
+  const selection = currentCanvasSelection();
+  if (!selection) {
+    return null;
+  }
+
+  const collected = collectApprovalEdit(selection.container, selection.approval, { silent: true });
+  if (collected === null) {
+    return null;
+  }
+
+  const basePayload = approvalEffectivePayload(selection.approval);
+  const currentPayload = { ...basePayload, ...(collected || {}) };
+  currentPayload.content = selection.textarea.value;
+
+  const titleField = selection.container.querySelector(
+    `[data-approval-editor="${CSS.escape(selection.approval.id)}"] [data-approval-field="title"]`,
+  );
+  if (titleField) {
+    currentPayload.title = titleField.value;
+  }
+
+  return {
+    approval_id: selection.approvalId,
+    field_name: selection.fieldName,
+    start: selection.start,
+    end: selection.end,
+    text: selection.text,
+    visible_content: selection.textarea.value,
+    action,
+    current_payload: currentPayload,
+  };
 }
 
 function mergeAssets(existingAssets, newAssets) {
@@ -3686,6 +4008,19 @@ function handleStreamEvent(event) {
       detail,
     });
     recordProcessEvent("tool", "Local helper complete", detail);
+  } else if (event.type === "document.edited") {
+    if (!assistantMessage) {
+      render();
+      return;
+    }
+    assistantMessage.loading = true;
+    const detail = "Recorded the selected canvas edit in the thread item ledger.";
+    mergeMessageProcess(assistantMessage, {
+      kind: "tool",
+      label: "Document edit recorded",
+      detail,
+    });
+    recordProcessEvent("tool", "Document edit recorded", detail);
   } else if (event.type === "approval.required") {
     if (!assistantMessage) {
       render();
@@ -3696,6 +4031,9 @@ function handleStreamEvent(event) {
     const runPayload = approvalPayload.run || null;
     delete approvalPayload.run;
     clearApprovalDraft(approvalPayload.id);
+    if (state.canvasSelection?.approvalId === approvalPayload.id) {
+      state.canvasSelection = null;
+    }
     if (runPayload) {
       upsertAgentRun(event.conversation_id, runPayload);
     } else {
@@ -3823,8 +4161,9 @@ async function onSubmit(event) {
   resizeComposer();
 
   try {
-    await submitTurn(prompt);
-    updateStatus("ready", "Ready", "Response complete.");
+    const canvasSelection = selectedCanvasTurnContext(prompt);
+    await submitTurn(prompt, { canvasSelection });
+    updateStatus("ready", "Ready", canvasSelection ? "Canvas draft updated." : "Response complete.");
   } catch (error) {
     addSystemMessage(error.message || "Unable to complete turn.");
     updateStatus("error", "Error", error.message || "Unable to complete turn.");
@@ -3841,6 +4180,7 @@ function attachEventHandlers() {
     persistActiveConversation();
     state.draftMessages = [];
     state.processFeed = [];
+    state.canvasSelection = null;
     clearPendingAttachments();
     closeCameraPanel();
     updateStatus("ready", "Ready", "Ready for a new conversation.");

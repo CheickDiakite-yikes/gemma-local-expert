@@ -44,7 +44,7 @@ For each area, try to keep all three forms of evidence:
 | Turn policy | partial | explicit turn policy now exists and is inspectable through turn state, now carries typed permission classes, typed approval category, confirmation intent, and approval summary, and now cleanly distinguishes plain chat, durable writes, audited exports, workspace runs, and guarded medical specialist turns | policy is still not yet the single source of truth for all runtime permission decisions |
 | Memory layering | partial | `AGENTS.md`, continuity snapshot, derived conversation memory, evidence memory, memory focus, and thread compaction summaries now exist | no formal idle-thread memory lifecycle or eligibility rules |
 | Permissions system | partial | engine policy + approval gating + bounded workspace root, plus typed turn-level permission classes, typed approval categories, and approval metadata persisted on approval state, approval items, and tool descriptors | not yet a full typed permission model comparable to Codex execpolicy + approval categories |
-| Document/canvas UX | partial | inline canvas is replacing preview-plus-hidden-editor patterns | still not a true document-first surface with selection-aware edits |
+| Document/canvas UX | partial | inline canvas is replacing preview-plus-hidden-editor patterns, and selected canvas text can now be shortened, rewritten, neutralized, or explained from chat through backend-persisted approval/work-product revisions plus `document_edit` item events | still textarea-first and not yet a full rich document surface |
 | App-server style client seam | partial | current local API now exposes transcript, turns, items, approvals, runs, and a canonical `/state` surface; the web client now loads from that single state read on open/refresh, now consumes canonical item snapshots during key live stream events, now gets canonical approval item/run snapshots back from approval resolution, and now receives canonical tool proposal/result item snapshots too | still too web-chat shaped and not yet a true item/event replay protocol |
 | Worktree-backed background work | missing | bounded workspace agent exists | no true isolated worktree/local clone system |
 | Thread ops: fork/archive/rollback/compact | partial | delete, archive, conversation detail, fork, safe rollback, explicit compact, and explicit steer now exist; steer now influences workspace-agent planning and active run goals, and compaction summaries now get promoted more strongly when bounded history drops older topic cues | compact and steer still need richer live control semantics and stronger pruning/replay behavior |
@@ -89,6 +89,7 @@ Move from "messages plus side tables" toward a real internal ledger:
 - active draft canvases now have dedicated `work_product` items persisted alongside approval lifecycle changes
 - the web chat now hydrates active draft/canvas state from `work_product` items first, with approval rows as compatibility fallback
 - CLI headless smokes now assert these same state contracts across tool approvals, workspace draft refinement, thread controls, long mixed conversation recall, and canonical `work_product` ownership
+- live browser QA now verifies that active draft/canvas state stays stable through friend-like supportive detours, explicit task pivots, and return-to-draft turns
 
 ### Missing
 
@@ -202,6 +203,7 @@ Keep canonical thread state, derived memories, and explicit repo guidance separa
 - conversation memory entries
 - evidence-backed memory reuse
 - bounded `MemoryFocus`
+- explicit turn-adaptation classification for casual detours, true task pivots, and returns to the foreground anchor
 - thread compaction summaries that can feed future continuity snapshots
 
 ### Missing
@@ -274,12 +276,17 @@ Make draft work feel like document collaboration, not a permission workflow.
 - inline canvas direction exists
 - pending draft is visible by default
 - draft updates can re-anchor to the latest assistant turn
+- selected canvas text can be captured in the browser and sent as turn metadata
+- selected canvas edits now update pending approval/work-product state on the backend instead of only mutating local UI state
+- selected canvas edits now emit a dedicated `document_edit` item and `document.edited` stream event with before/after text and visible-content snapshots
+- the canvas now renders a compact edit-history strip from recent `document_edit` items
+- the visible canvas keeps save/export approval separate from ordinary draft edits
 
 ### Missing
 
-- no selection-aware edits
 - still textarea-first, not rich document-first
-- chat still duplicates too much of the drafting flow
+- selection-aware edits are deterministic document operations, not model-backed editing yet
+- document-edit history is visible but not yet interactive: no inspect drawer, restore action, or per-edit approval controls
 - toolbar and document surface are still heavier than they should be
 
 ### Acceptance criteria for `done`
@@ -291,7 +298,7 @@ Make draft work feel like document collaboration, not a permission workflow.
 ### Next slice
 
 - richer document rendering
-- selection-aware rewrite operations
+- model-backed selection-aware rewrite operations
 - optional side-by-side expanded canvas on desktop
 
 ## 7. Client-Neutral App-Server Seam
@@ -390,10 +397,16 @@ For any important architecture or UX slice, try to maintain:
 For state and continuity work, we should also keep a fourth proof:
 
 - `CLI headless green`
+- `live browser-shaped green`
 
 That means the smoke harnesses fail hard on broken item ownership, approval
 categories, thread controls, or long-horizon continuity instead of only dumping
 logs for manual reading.
+
+The new browser-shaped proof is especially important for draft/canvas work:
+headless API tests can prove the transcript contract, but they cannot prove the
+visible canvas stayed editable, preserved local edits, and let the user return
+to the foreground draft after a normal human detour.
 
 ### Missing
 
@@ -404,10 +417,13 @@ logs for manual reading.
 
 - add links from future eval docs back into this tracker
 - maintain a short "known live failures" block during active hardening
+- keep adding browser-shaped checks for product-critical flows where DOM state,
+  visible draft state, scroll, or responsive layout matter
 
 ## Known High-Priority Gaps Right Now
 
 - inline canvas is much better than the old approval card, but still not truly document-first
+- active draft continuity is now stronger, and selection-aware local canvas edits exist, but richer model-backed document editing is still next
 - workspace identity is now explicit per turn and persisted on the thread, but it is still not a full named-workspace/worktree model
 - turn policy exists and is inspectable, but it is still minimal
 - item ledger exists, is inspectable, now backs approval ownership, and now feeds a canonical `/state` surface, but streaming/live-update paths still lean on transcript-era heuristics
@@ -430,6 +446,68 @@ logs for manual reading.
 - added a safe rollback operation that restores an earlier turn into a replacement thread and archives the source thread
 - added explicit compact and steer thread operations and fed them into the continuity snapshot/prompting path
 - upgraded the CLI smoke harnesses so they now assert canonical item snapshots, grounded workspace draft refinement, thread protocol controls, and deep mixed conversation continuity
+- added explicit turn-adaptation classification for casual detours, true task pivots, and returns to a foreground anchor
+- added a live browser-shaped draft/canvas validation harness for friend-like conversational turns during active canvas work
+- made mock/browser QA boot without eager MLX/Metal initialization by lazily importing MLX runtimes only when selected
+- added first-pass selection-aware inline canvas edits that rewrite visible selected text locally from chat commands
+- moved selection-aware canvas edits through the turn API so the backend persists updated approval/work-product snapshots and transcript replies
+- added `document_edit` items and `document.edited` stream events for selected canvas edit replay/audit state
+
+## Last Thread Analysis: Active Draft / Friend-Like Turns
+
+The last thread strengthened a very specific product contract:
+
+- a user can have an active draft/canvas open
+- they can briefly talk like a person, ask for reassurance, or pivot to a different conceptual question
+- the assistant should answer that turn naturally instead of dragging the draft back into the reply
+- the draft/canvas should still be visible, editable, and available when the user returns
+
+That is a product-level distinction, not just a memory heuristic. It separates
+foreground ownership from response style: the system preserves the active work
+object while allowing the conversation to breathe.
+
+### What This Proves Now
+
+- continuity can preserve a foreground draft without forcing every reply to be about that draft
+- task pivots can suppress stale draft/media context without destroying the active anchor
+- local canvas edits survive the detour in the real browser surface
+- return-to-draft language still resolves back to the pending work product
+
+### Product Implication
+
+The next build slice should move from "the assistant remembers the draft" to
+"the assistant can operate on the draft like a document." That means the next
+highest-leverage UX work is selection-aware canvas editing and document-first
+draft actions, not another broad memory pass.
+
+### Completed Follow-On Slice
+
+- add selection capture in the inline canvas
+- expose small document actions such as rewrite selection, shorten selection,
+  make selection more neutral, and explain selection
+- send selected-canvas edit context through the turn API instead of treating it as a local-only UI shortcut
+- persist the revised pending draft through approval/work-product item snapshots
+- persist a dedicated document-edit event for the selected range, action, before text, after text, and visible draft before/after
+- keep approvals focused on durable save/export, not ordinary draft reading or editing
+- add a browser-shaped validation that selects text in the canvas, sends a chat
+  edit command, verifies the visible document changes in place, and confirms a
+  `document_edit` item exists through the live API
+
+### Next Slice After That
+
+- move selection-aware edits from deterministic local transforms to model-backed
+  draft operations with a grounded edit preview
+- make document-edit history interactive so users can inspect or restore recent edits
+- keep the visible canvas as the source of truth while streaming catches up to
+  a fuller item/event replay model
+
+### Gaps Noted After Live Testing
+
+- the live browser path now proves visual canvas preservation, selected-text editing, visible edit history, and backend `document_edit` item creation
+- edit history is now visible in the canvas, but it is read-only and compact rather than a full revision inspector
+- deterministic edit actions are useful for smoke coverage, but model-backed rewrites still need grounded preview/validation
+- `document_edit` currently covers selected canvas mutations, not arbitrary manual typing or title edits
+- browser automation for text selection should keep dispatching human-like select, mouse, and key events because a bare programmatic range update can miss the canvas selection hint path
 
 ## Operating Rule Going Forward
 

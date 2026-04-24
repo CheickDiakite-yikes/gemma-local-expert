@@ -28,6 +28,52 @@ _LOW_SIGNAL_USER_TURNS = {
     "thank you",
 }
 
+_PLAIN_CONVERSATION_PHRASES = {
+    "talk normally",
+    "just talk",
+    "just chat",
+    "chat normally",
+    "keep this conversational",
+    "just talk normally",
+    "just chat normally",
+}
+
+_SUPPORTIVE_CONVERSATION_PHRASES = {
+    "i'm anxious",
+    "i am anxious",
+    "i'm nervous",
+    "i am nervous",
+    "i'm overwhelmed",
+    "i am overwhelmed",
+    "i'm stressed",
+    "i am stressed",
+    "i'm worried",
+    "i am worried",
+    "calm me down",
+    "help me calm down",
+    "talk me down",
+    "reassure me",
+    "no checklist right now",
+    "like a normal person would",
+}
+
+_EXPLICIT_PROBLEM_CHANGE_PHRASES = {
+    "forget that",
+    "forget the draft",
+    "forget the report",
+    "forget the checklist",
+    "leave that aside",
+    "set that aside",
+    "different question",
+    "new question",
+    "another question",
+    "separate question",
+    "separate tangent",
+    "switch topics",
+    "switch gears",
+    "something else",
+}
+
 _IMAGE_REFERENCE_TOKENS = {
     "image",
     "picture",
@@ -333,6 +379,10 @@ class ConversationContextSnapshot:
     active_compaction_turn_id: str | None = None
     active_steering_instruction: str | None = None
     active_steering_turn_id: str | None = None
+    foreground_anchor_kind: str | None = None
+    foreground_anchor_title: str | None = None
+    turn_adaptation_kind: str | None = None
+    turn_adaptation_reason: str | None = None
     memory_focus_kind: str | None = None
     memory_focus_reason: str | None = None
     memory_focus_confidence: float | None = None
@@ -342,12 +392,31 @@ class ConversationContextSnapshot:
 
     def prompt_lines(self) -> list[str]:
         lines: list[str] = []
+        detour_mode = self.turn_adaptation_kind in {"casual_detour", "task_pivot"}
         if self.active_topic:
             lines.append(f"Active topic: {self.active_topic}")
         if self.active_domain:
             lines.append(f"Active domain: {self.active_domain}")
         if self.active_asset_labels:
             lines.append("Active asset set: " + ", ".join(self.active_asset_labels[:3]))
+        if self.foreground_anchor_kind and self.foreground_anchor_title:
+            lines.append(
+                "Foreground anchor: "
+                + self._format_referent(
+                    kind=self.foreground_anchor_kind,
+                    tool_name=self.pending_approval_tool
+                    if self.foreground_anchor_kind == "pending_output"
+                    else self.last_completed_output_tool
+                    if self.foreground_anchor_kind == "saved_output"
+                    else None,
+                    title=self.foreground_anchor_title,
+                )
+            )
+        if self.turn_adaptation_kind and self.turn_adaptation_reason:
+            lines.append(
+                f"Current turn adaptation: {self.turn_adaptation_kind.replace('_', ' ')}"
+            )
+            lines.append(f"Adaptation reason: {self.turn_adaptation_reason}")
         if self.recent_topics[1:]:
             recent = ", ".join(self.recent_topics[1:3])
             if recent:
@@ -387,6 +456,7 @@ class ConversationContextSnapshot:
         if (
             self.pending_approval_tool
             and self.selected_referent_kind not in {"pending_output", "saved_output"}
+            and not detour_mode
         ):
             lines.append(
                 "Pending draft: "
@@ -398,12 +468,13 @@ class ConversationContextSnapshot:
             )
             if self.pending_approval_excerpt:
                 lines.append(f"Pending draft preview: {self.pending_approval_excerpt}")
-        if self.active_draft_lineage:
+        if self.active_draft_lineage and not detour_mode:
             lines.append(f"Active draft lineage: {self.active_draft_lineage}")
         if (
             self.last_completed_output_tool
             and self.last_completed_output_title
             and self.selected_referent_kind not in {"pending_output", "saved_output"}
+            and not detour_mode
         ):
             lines.append(
                 "Most recent saved output: "
@@ -547,6 +618,8 @@ class ConversationContextService:
         recent_items: list[ConversationItem] | None = None,
     ) -> ConversationContextSnapshot:
         snapshot = ConversationContextSnapshot()
+        lowered_turn = turn_text.lower().strip()
+        suppress_prior_context = self._should_suppress_prior_context(lowered_turn)
         snapshot.recent_topics = self._recent_topics(transcript)
         snapshot.active_topic = snapshot.recent_topics[0] if snapshot.recent_topics else None
         snapshot.last_user_request = snapshot.active_topic
@@ -587,7 +660,13 @@ class ConversationContextService:
         snapshot.last_video_assets = video_reference_groups[0] if video_reference_groups else []
         snapshot.recent_evidence_memories = self._recent_evidence_memories(transcript)
 
-        if not attached_assets or self._should_mix_attached_assets_with_prior_context(turn_text):
+        if (
+            not suppress_prior_context
+            and (
+                not attached_assets
+                or self._should_mix_attached_assets_with_prior_context(turn_text)
+            )
+        ):
             (
                 snapshot.selected_context_assets,
                 snapshot.selected_context_kind,
@@ -606,9 +685,13 @@ class ConversationContextService:
                     assets=snapshot.selected_context_assets,
                     kind=snapshot.selected_context_kind,
                 )
-        selected_evidence = self._select_evidence_memory(
-            turn_text=turn_text,
-            snapshot=snapshot,
+        selected_evidence = (
+            None
+            if suppress_prior_context
+            else self._select_evidence_memory(
+                turn_text=turn_text,
+                snapshot=snapshot,
+            )
         )
         if selected_evidence is not None:
             snapshot.selected_evidence_summary = selected_evidence.summary
@@ -631,9 +714,13 @@ class ConversationContextService:
             snapshot.selected_referent_excerpt = media_summary
         elif snapshot.selected_referent_kind == "topic" and snapshot.active_topic:
             snapshot.selected_referent_summary = snapshot.active_topic
-        selected_memory = self._select_conversation_memory(
-            turn_text=turn_text,
-            snapshot=snapshot,
+        selected_memory = (
+            None
+            if suppress_prior_context
+            else self._select_conversation_memory(
+                turn_text=turn_text,
+                snapshot=snapshot,
+            )
         )
         if selected_memory is not None:
             snapshot.selected_memory_topic = selected_memory.topic
@@ -652,7 +739,120 @@ class ConversationContextService:
             snapshot.active_asset_ids = selected_evidence.asset_ids[:3]
             snapshot.active_asset_labels = selected_evidence.asset_labels[:3]
         snapshot.active_draft_lineage = snapshot.pending_approval_id
+        (
+            snapshot.foreground_anchor_kind,
+            snapshot.foreground_anchor_title,
+        ) = self._foreground_anchor(snapshot)
+        (
+            snapshot.turn_adaptation_kind,
+            snapshot.turn_adaptation_reason,
+        ) = self._turn_adaptation(
+            turn_text=turn_text,
+            snapshot=snapshot,
+        )
         return snapshot
+
+    def _should_suppress_prior_context(self, lowered: str) -> bool:
+        return self._looks_like_explicit_problem_change(lowered) or self._looks_like_conversation_detour(
+            lowered
+        )
+
+    def _looks_like_conversation_detour(self, lowered: str) -> bool:
+        if any(phrase in lowered for phrase in _PLAIN_CONVERSATION_PHRASES):
+            return True
+        if any(phrase in lowered for phrase in _SUPPORTIVE_CONVERSATION_PHRASES):
+            return True
+        return any(
+            phrase in lowered
+            for phrase in {
+                "just talk normally with me for a second",
+                "just chat with me for a second",
+                "talk normally for a second",
+                "chat normally for a second",
+                "talk normally again",
+                "chat normally again",
+            }
+        )
+
+    def _looks_like_explicit_problem_change(self, lowered: str) -> bool:
+        if any(phrase in lowered for phrase in _EXPLICIT_PROBLEM_CHANGE_PHRASES):
+            return True
+        if lowered.startswith("actually "):
+            return any(
+                token in lowered
+                for token in {
+                    "forget",
+                    "instead",
+                    "different question",
+                    "new question",
+                    "another question",
+                    "switch",
+                    "set that aside",
+                    "leave that aside",
+                    "something else",
+                }
+            )
+        return False
+
+    def _foreground_anchor(
+        self, snapshot: ConversationContextSnapshot
+    ) -> tuple[str | None, str | None]:
+        if snapshot.pending_approval_tool:
+            return "pending_output", snapshot.pending_approval_summary or self._tool_label(
+                snapshot.pending_approval_tool
+            )
+        if snapshot.last_completed_output_tool and snapshot.last_completed_output_title:
+            return "saved_output", snapshot.last_completed_output_title
+        if snapshot.last_video_assets:
+            return (
+                "video",
+                ", ".join(asset.display_name for asset in snapshot.last_video_assets[:2]),
+            )
+        if snapshot.last_image_assets:
+            return (
+                "image",
+                ", ".join(asset.display_name for asset in snapshot.last_image_assets[:2]),
+            )
+        if snapshot.active_topic:
+            return "topic", self._trim(snapshot.active_topic, 96)
+        return None, None
+
+    def _turn_adaptation(
+        self,
+        *,
+        turn_text: str,
+        snapshot: ConversationContextSnapshot,
+    ) -> tuple[str | None, str | None]:
+        lowered = turn_text.lower().strip()
+        anchor_kind = snapshot.foreground_anchor_kind
+        anchor_title = snapshot.foreground_anchor_title
+        if not anchor_kind or not anchor_title:
+            return None, None
+
+        if self._looks_like_conversation_detour(lowered):
+            return (
+                "casual_detour",
+                f"User is briefly stepping away from {anchor_title} without abandoning it.",
+            )
+        if self._looks_like_explicit_problem_change(lowered):
+            return (
+                "task_pivot",
+                f"User is changing the problem instead of continuing {anchor_title}.",
+            )
+        if snapshot.selected_referent_kind in {
+            "pending_output",
+            "saved_output",
+            "image",
+            "video",
+            "document",
+            "topic",
+        }:
+            if snapshot.selected_referent_kind == anchor_kind or anchor_kind == "topic":
+                return (
+                    "return_to_anchor",
+                    f"User explicitly returned to the earlier {self._tool_label(snapshot.selected_referent_tool) if snapshot.selected_referent_kind in {'pending_output', 'saved_output'} else anchor_kind} context.",
+                )
+        return None, None
 
     def _latest_compaction_summary(
         self,

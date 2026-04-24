@@ -89,6 +89,11 @@ def main() -> None:
             ("What was in that checklist again?", []),
             ("What was in the report again?", []),
             ("Compare the report title and export title for me.", []),
+            (
+                "Actually, forget the report for a second. "
+                "What's the real difference between memory and context here?",
+                [],
+            ),
             ("Go back to the earlier image for a second. Which shortage mattered most?", []),
             ("And now just talk normally again for a second.", []),
         ]
@@ -154,11 +159,18 @@ def main() -> None:
         assert "stop and escalate if you see worsening weakness, confusion, or inability to drink" in completed_texts[6].lower()
         assert completed_texts[11] == "Of course. I'm here when you want to keep going."
         assert completed_texts[12] == "Hey. What's up?"
+        assert "leave that aside for a minute" in completed_texts[3].lower()
+        assert "talk about lunch and coffee" in completed_texts[3].lower()
+        assert "new main thread" not in completed_texts[3].lower()
         assert "field assistant architecture brief" in completed_texts[20].lower()
         assert "local-first assistant built on gemma" in completed_texts[20].lower()
         assert "bounded routing" in completed_texts[20].lower()
-        assert "lantern batteries" in completed_texts[24].lower()
-        assert "pit edge" not in completed_texts[24].lower()
+        assert "context is the live working set" in completed_texts[24].lower()
+        assert "memory is older distilled state" in completed_texts[24].lower()
+        assert "mining video review report" not in completed_texts[24].lower()
+        assert "field assistant architecture brief" not in completed_texts[24].lower()
+        assert "lantern batteries" in completed_texts[25].lower()
+        assert "pit edge" not in completed_texts[25].lower()
 
         memory_summaries = [memory.summary.lower() for memory in memories]
         assert len(memory_summaries) <= 3

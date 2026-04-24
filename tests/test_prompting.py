@@ -235,6 +235,46 @@ def test_prompt_builder_includes_compaction_and_steering_guidance() -> None:
     assert "Active thread steering:" in user_prompt
 
 
+def test_prompt_builder_adds_task_pivot_guidance() -> None:
+    builder = PromptBuilder()
+    context = builder.build(
+        turn=ConversationTurnRequest(
+            conversation_id="conv_pivot",
+            mode=AssistantMode.GENERAL,
+            text="Actually, forget the report for a second. What's the real difference between memory and context here?",
+        ),
+        history=[],
+        assets=[],
+        context_assets=[],
+        conversation_context=ConversationContextSnapshot(
+            active_topic="Field Assistant Architecture Report",
+            foreground_anchor_kind="pending_output",
+            foreground_anchor_title="Field Assistant Architecture Report",
+            turn_adaptation_kind="task_pivot",
+            turn_adaptation_reason="User is changing the problem instead of continuing the report.",
+            pending_approval_tool="create_report",
+            pending_approval_summary="Field Assistant Architecture Report",
+            pending_approval_excerpt="Local-first assistant built on Gemma.",
+        ),
+        specialist_analysis=None,
+        workspace_summary=None,
+        route=RouteDecision(interaction_kind="conversation", is_follow_up=True),
+        policy=PolicyDecision(),
+        model_selection=ModelRouteSelection(
+            assistant_model="gemma-4-e2b-it-4bit",
+            embedding_model="embeddinggemma-300m",
+        ),
+        results=[],
+        tool_result=None,
+    )
+
+    system_prompt = context.messages[0]["content"]
+    user_prompt = context.messages[-1]["content"]
+    assert "new primary problem" in system_prompt.lower()
+    assert "Current turn adaptation: task pivot" in user_prompt
+    assert "Pending draft:" not in user_prompt
+
+
 def test_prompt_builder_promotes_compaction_section_when_history_is_trimmed() -> None:
     builder = PromptBuilder()
     history = [
