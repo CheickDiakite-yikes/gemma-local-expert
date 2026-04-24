@@ -4,6 +4,7 @@ const state = {
   currentMode: "general",
   streaming: false,
   mobileSidebarOpen: false,
+  mobileArtifactOpen: false,
   statusMenuOpen: false,
   draftMessages: [],
   pendingAttachments: [],
@@ -20,6 +21,8 @@ const state = {
   capabilities: null,
   medicalSessions: new Map(),
   canvasSelection: null,
+  artifactZoomActual: false,
+  artifactMode: "summary",
   processFeed: [],
   statusDetail: "Ready for the next turn.",
   camera: {
@@ -47,6 +50,9 @@ const STORAGE_KEYS = {
 };
 
 const elements = {
+  appShell: document.querySelector(".app-shell"),
+  artifactPanel: document.getElementById("artifact-panel"),
+  artifactToggle: document.getElementById("artifact-toggle"),
   attachmentButton: document.getElementById("attachment-button"),
   attachmentStrip: document.getElementById("attachment-strip"),
   backdrop: document.getElementById("sidebar-backdrop"),
@@ -82,6 +88,7 @@ const elements = {
   promptInput: document.getElementById("composer-input"),
   sendButton: document.getElementById("send-button"),
   sidebar: document.getElementById("sidebar"),
+  sidebarCommands: Array.from(document.querySelectorAll("[data-sidebar-command]")),
   sidebarToggle: document.getElementById("sidebar-toggle"),
   statusButton: document.getElementById("status-button"),
   statusDot: document.getElementById("status-dot"),
@@ -233,6 +240,7 @@ function purgeConversationUiState(conversationId) {
     state.approvalDrafts.delete(approvalId);
     state.approvalPanels.delete(approvalPanelKey(approvalId, "draft"));
     state.approvalPanels.delete(approvalPanelKey(approvalId, "edit"));
+    state.approvalPanels.delete(approvalPanelKey(approvalId, "canvasCollapsed"));
   }
   for (const messageId of messageIds) {
     state.messagePanels.delete(messagePanelKey(messageId, "context"));
@@ -855,6 +863,15 @@ function setApprovalSectionExpanded(approvalId, section, expanded) {
   if (section === "editor") {
     return;
   }
+  persistApprovalPanels();
+}
+
+function isApprovalCanvasCollapsed(approval) {
+  return approvalPanelPreference(approval.id, "canvasCollapsed") === true;
+}
+
+function setApprovalCanvasCollapsed(approvalId, collapsed) {
+  state.approvalPanels.set(approvalPanelKey(approvalId, "canvasCollapsed"), Boolean(collapsed));
   persistApprovalPanels();
 }
 
@@ -2210,9 +2227,11 @@ function renderApprovalCanvas(approval) {
   const canvasContent = approvalCanvasContent(approval, payload);
   const originCopy = approvalCanvasOrigin(approval);
   const editHistory = renderDocumentEditHistory(approval);
+  const canvasCollapsed = isApprovalCanvasCollapsed(approval);
+  const canvasPreview = canvasContent || approvalPayloadExcerpt(approval, payload) || approvalReasonCopy(approval);
 
   return `
-    <section class="approval-canvas approval-canvas-${escapeHtml(approval.tool_name)}">
+    <section class="approval-canvas approval-canvas-${escapeHtml(approval.tool_name)}${canvasCollapsed ? " is-collapsed" : ""}">
       <div class="approval-canvas-header">
         <div class="approval-canvas-toolbar">
           <div class="approval-canvas-meta">
@@ -2221,6 +2240,7 @@ function renderApprovalCanvas(approval) {
           </div>
           <div class="approval-canvas-controls">
             <span class="approval-editor-state approval-canvas-state${isDirty ? " is-dirty" : ""}" data-approval-draft-state>${draftStateText}</span>
+            <button class="approval-canvas-collapse-toggle" data-approval-canvas-collapse data-approval-id="${escapeHtml(approval.id)}" type="button">${canvasCollapsed ? "Expand canvas" : "Collapse"}</button>
             <button class="approval-editor-reset" data-approval-reset type="button"${isDirty ? "" : " disabled"}>Revert</button>
             <button class="approval-action reject" data-approval-action="reject" data-approval-id="${approval.id}" type="button">Dismiss</button>
             <button class="approval-action approve" data-approval-action="approve" data-approval-id="${approval.id}" type="button">${escapeHtml(approvalPrimaryActionLabel(approval))}</button>
@@ -2242,7 +2262,12 @@ function renderApprovalCanvas(approval) {
       ${groundingNotice ? `<p class="approval-grounding-note">${escapeHtml(groundingNotice)}</p>` : ""}
       <p class="approval-editor-error"${errorMessage ? "" : " hidden"} data-approval-error>${escapeHtml(errorMessage)}</p>
       <p class="approval-canvas-selection" data-canvas-selection-hint hidden></p>
-      <section class="approval-editor approval-editor-canvas" data-approval-editor="${approval.id}">
+      <section class="approval-canvas-collapsed-preview"${canvasCollapsed ? "" : " hidden"}>
+        <span>Canvas tucked away</span>
+        <p>${escapeHtml(clipCopy(canvasPreview, 220))}</p>
+        <button class="approval-canvas-collapse-toggle" data-approval-canvas-collapse data-approval-id="${escapeHtml(approval.id)}" type="button">Expand to edit</button>
+      </section>
+      <section class="approval-editor approval-editor-canvas" data-approval-editor="${approval.id}"${canvasCollapsed ? " hidden" : ""}>
         <textarea
           class="approval-canvas-textarea"
           data-approval-field="content"
@@ -2255,6 +2280,386 @@ function renderApprovalCanvas(approval) {
       ${editHistory}
     </section>
   `;
+}
+
+function latestArtifactApproval() {
+  const messages = activeMessages();
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const workProduct = messages[index].workProduct || messages[index].approval;
+    if (workProduct?.id) {
+      return workProduct;
+    }
+  }
+  return null;
+}
+
+function artifactFileKind(approval) {
+  switch (approval?.tool_name) {
+    case "create_report":
+      return "Report";
+    case "create_note":
+      return "Note";
+    case "create_message_draft":
+      return "Draft";
+    case "create_checklist":
+      return "Checklist";
+    case "export_brief":
+      return "Brief";
+    case "log_observation":
+      return "Observation";
+    case "create_task":
+      return "Task";
+    default:
+      return approvalSurfaceNoun(approval?.tool_name || "artifact");
+  }
+}
+
+function renderArtifactEditLedger(edits) {
+  if (!edits.length) {
+    return "";
+  }
+  return `
+    <section class="artifact-edit-ledger">
+      <div class="artifact-edit-ledger-header">
+        <span>Edit history</span>
+        <strong>${edits.length}</strong>
+      </div>
+      ${edits
+        .slice(0, 3)
+        .map(
+          (edit) => `
+            <div class="artifact-edit-row">
+              <span>${escapeHtml(documentEditActionLabel(edit.action))}</span>
+              <p>${escapeHtml(clipCopy(edit.afterText, 140))}</p>
+            </div>
+          `,
+        )
+        .join("")}
+    </section>
+  `;
+}
+
+function artifactPreviewLines(content, limit = 5) {
+  return approvalMeaningfulLines(content)
+    .filter((line) => !approvalLooksLikeInventoryLine(line))
+    .slice(0, limit);
+}
+
+function artifactChecklistItems(content, limit = 7) {
+  return String(content || "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .map((line) => {
+      const checklistMatch = line.match(/^[-*+]\s+\[([ xX])\]\s+(.+)$/);
+      if (checklistMatch) {
+        return { text: stripMarkdownToText(checklistMatch[2]), checked: checklistMatch[1].toLowerCase() === "x" };
+      }
+      const bulletMatch = line.match(/^[-*+]\s+(.+)$/) || line.match(/^\d+\.\s+(.+)$/);
+      return bulletMatch ? { text: stripMarkdownToText(bulletMatch[1]), checked: false } : null;
+    })
+    .filter((item) => item?.text)
+    .slice(0, limit);
+}
+
+function renderArtifactTypePreview({ approval, payload, title, kind, statusLabel, previewContent }) {
+  const content = previewContent || payload?.details || approvalPayloadExcerpt(approval, payload);
+  const lines = artifactPreviewLines(content, 5);
+  const lineMarkup = lines
+    .map((line) => `<li>${escapeHtml(clipCopy(line, 120))}</li>`)
+    .join("");
+  const meta = approvalPayloadMeta(approval, payload);
+  const metaMarkup = meta.length
+    ? `<div class="artifact-type-meta">${meta.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>`
+    : "";
+
+  switch (approval?.tool_name) {
+    case "create_checklist": {
+      const items = artifactChecklistItems(payload?.content || content, 7);
+      return `
+        <article class="artifact-type-card artifact-type-checklist">
+          <header>
+            <span>${escapeHtml(kind)}</span>
+            <strong>${escapeHtml(title)}</strong>
+          </header>
+          ${metaMarkup}
+          <ol class="artifact-checklist-preview">
+            ${(items.length ? items : [{ text: approvalPayloadExcerpt(approval, payload) || "Checklist is ready for review.", checked: false }])
+              .map(
+                (item) => `
+                  <li>
+                    <span class="artifact-check${item.checked ? " is-checked" : ""}" aria-hidden="true"></span>
+                    <span>${escapeHtml(clipCopy(item.text, 100))}</span>
+                  </li>
+                `,
+              )
+              .join("")}
+          </ol>
+        </article>
+      `;
+    }
+    case "create_message_draft": {
+      const body = lines.slice(0, 3).join(" ") || approvalPayloadExcerpt(approval, payload) || "Message draft ready.";
+      return `
+        <article class="artifact-type-card artifact-type-message">
+          <header>
+            <span>Message draft</span>
+            <strong>${escapeHtml(title)}</strong>
+          </header>
+          <div class="artifact-message-envelope">
+            <span>Drafted locally</span>
+            <p>${escapeHtml(clipCopy(body, 260))}</p>
+          </div>
+        </article>
+      `;
+    }
+    case "create_task": {
+      const details = payload?.details || approvalPayloadExcerpt(approval, payload) || "Task details are ready.";
+      return `
+        <article class="artifact-type-card artifact-type-task">
+          <header>
+            <span>Task</span>
+            <strong>${escapeHtml(title)}</strong>
+          </header>
+          <div class="artifact-task-board">
+            <span>${escapeHtml(statusLabel)}</span>
+            <p>${escapeHtml(clipCopy(details, 260))}</p>
+          </div>
+        </article>
+      `;
+    }
+    case "log_observation": {
+      return `
+        <article class="artifact-type-card artifact-type-observation">
+          <header>
+            <span>Observation</span>
+            <strong>${escapeHtml(title)}</strong>
+          </header>
+          <blockquote>${escapeHtml(clipCopy(lines.join(" ") || approvalPayloadExcerpt(approval, payload), 320))}</blockquote>
+        </article>
+      `;
+    }
+    case "export_brief": {
+      const headingCount = String(payload?.content || "")
+        .split(/\r?\n/)
+        .filter((line) => /^#{1,6}\s+/.test(line.trim())).length;
+      return `
+        <article class="artifact-type-card artifact-type-export">
+          <header>
+            <span>Markdown export</span>
+            <strong>${escapeHtml(title)}</strong>
+          </header>
+          <div class="artifact-export-grid">
+            <span>${headingCount || "Ready"} sections</span>
+            <span>${escapeHtml(statusLabel)}</span>
+          </div>
+          ${lineMarkup ? `<ul>${lineMarkup}</ul>` : ""}
+        </article>
+      `;
+    }
+    default:
+      return `
+        <article class="artifact-type-card artifact-type-generic">
+          <header>
+            <span>${escapeHtml(kind)}</span>
+            <strong>${escapeHtml(title)}</strong>
+          </header>
+          ${lineMarkup ? `<ul>${lineMarkup}</ul>` : `<p>${escapeHtml(approvalPayloadExcerpt(approval, payload) || "Ready for local review.")}</p>`}
+        </article>
+      `;
+  }
+}
+
+function renderArtifactSummarySurface({ approval, payload, title, kind, statusLabel, contentMarkup, editMarkup, previewContent }) {
+  const typePreview = renderArtifactTypePreview({ approval, payload, title, kind, statusLabel, previewContent });
+  return `
+    <div class="artifact-preview-scroll" data-artifact-mode-panel="summary">
+      ${typePreview}
+      <article class="artifact-page artifact-cover-page">
+        <div class="artifact-page-hero artifact-cover-hero">
+          <span>${escapeHtml(kind)}</span>
+          <h3>${escapeHtml(title)}</h3>
+          <p>${escapeHtml(approvalReasonCopy(approval))}</p>
+        </div>
+        <footer class="artifact-page-footer">
+          <span>${escapeHtml(statusLabel)}</span>
+          <strong>LOCAL ASSISTANT</strong>
+        </footer>
+      </article>
+      <article class="artifact-page artifact-content-page">
+        <div class="artifact-page-ribbon">
+          <strong>${escapeHtml(clip(title, 72))}</strong>
+        </div>
+        <section class="artifact-page-body rich-text">
+          ${contentMarkup}
+        </section>
+        <footer class="artifact-page-footer">
+          <span>Local workspace preview</span>
+          <strong>GEMMA LOCAL</strong>
+        </footer>
+      </article>
+      ${editMarkup}
+    </div>
+  `;
+}
+
+function renderArtifactCanvasSurface({ approval, payload, title, statusLabel, editMarkup }) {
+  const canvasContent = approvalCanvasContent(approval, payload) || approvalPreviewContent(approval, payload);
+  const bodyMarkup = canvasContent
+    ? renderMarkdownBlocks(canvasContent)
+    : `<p>This canvas is ready for drafting.</p>`;
+  return `
+    <div class="artifact-preview-scroll artifact-canvas-scroll" data-artifact-mode-panel="canvas">
+      <section class="artifact-canvas-workspace">
+        <header class="artifact-canvas-workspace-header">
+          <div>
+            <span>Canvas draft</span>
+            <h3>${escapeHtml(title)}</h3>
+          </div>
+          <div class="artifact-canvas-actions">
+            <span>${escapeHtml(statusLabel)}</span>
+            <button class="artifact-open" data-artifact-open="${escapeHtml(approval.id)}" type="button">Focus editor</button>
+          </div>
+        </header>
+        <article class="artifact-canvas-sheet">
+          <div class="artifact-canvas-paper-topline">
+            <span>${escapeHtml(artifactFileKind(approval))}</span>
+            <span>Live canvas</span>
+          </div>
+          <h4>${escapeHtml(title)}</h4>
+          <section class="artifact-canvas-body rich-text">
+            ${bodyMarkup}
+          </section>
+        </article>
+        ${editMarkup}
+      </section>
+    </div>
+  `;
+}
+
+function isArtifactDrawerLayout() {
+  return window.innerWidth <= 1500;
+}
+
+function setMobileArtifactOpen(open, { renderPanel = true } = {}) {
+  state.mobileArtifactOpen = Boolean(open);
+  if (renderPanel) {
+    renderArtifactPanel();
+  }
+}
+
+function renderArtifactPanel() {
+  if (!elements.artifactPanel || !elements.appShell) {
+    return;
+  }
+
+  const approval = latestArtifactApproval();
+  const hasArtifact = Boolean(approval?.id);
+  elements.appShell.classList.toggle("has-artifact", hasArtifact);
+  elements.artifactPanel.hidden = !hasArtifact;
+  if (elements.artifactToggle) {
+    elements.artifactToggle.hidden = !hasArtifact;
+  }
+  if (!hasArtifact) {
+    elements.artifactPanel.innerHTML = "";
+    elements.artifactPanel.classList.remove("is-mobile-open", "is-actual-size", "is-canvas-mode");
+    if (elements.artifactToggle) {
+      elements.artifactToggle.classList.remove("is-active");
+      elements.artifactToggle.setAttribute("aria-expanded", "false");
+    }
+    state.artifactMode = "summary";
+    state.mobileArtifactOpen = false;
+    return;
+  }
+
+  const payload = approvalEffectivePayload(approval);
+  const mode = state.artifactMode === "canvas" ? "canvas" : "summary";
+  const title = String(payload?.title || approvalHeadingText(approval, payload) || "Untitled workspace").trim();
+  const previewContent = approvalPreviewContent(approval, payload);
+  const previewSummary = approvalPayloadExcerpt(approval, payload);
+  const statusLabel = approvalStatusLabel(approval.status || "pending");
+  const kind = artifactFileKind(approval);
+  const edits = documentEditsForApproval(approval.id);
+  const drawerOpen = isArtifactDrawerLayout() && state.mobileArtifactOpen;
+  elements.artifactPanel.classList.toggle("is-actual-size", state.artifactZoomActual);
+  elements.artifactPanel.classList.toggle("is-canvas-mode", mode === "canvas");
+  elements.artifactPanel.classList.toggle("is-mobile-open", drawerOpen);
+  if (elements.artifactToggle) {
+    elements.artifactToggle.classList.toggle("is-active", drawerOpen);
+    elements.artifactToggle.setAttribute("aria-expanded", String(drawerOpen));
+  }
+  const contentMarkup = previewContent
+    ? renderMarkdownBlocks(previewContent)
+    : previewSummary
+      ? `<p>${escapeHtml(previewSummary)}</p>`
+      : `<p>This workspace item is ready for review.</p>`;
+  const editMarkup = renderArtifactEditLedger(edits);
+  const bodyMarkup =
+    mode === "canvas"
+      ? renderArtifactCanvasSurface({ approval, payload, title, statusLabel, editMarkup })
+      : renderArtifactSummarySurface({ approval, payload, title, kind, statusLabel, contentMarkup, editMarkup, previewContent });
+
+  elements.artifactPanel.innerHTML = `
+    <header class="artifact-header">
+      <div class="artifact-tabs" aria-label="Artifact navigation">
+        <button class="artifact-summary-tab artifact-mode-tab${mode === "summary" ? " is-active" : ""}" data-artifact-mode="summary" type="button">
+          <svg class="ui-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M4 7h11M4 12h7M4 17h11M18 9l3 3-3 3"/></svg>
+          Summary
+        </button>
+        <button class="artifact-file-tab artifact-mode-tab${mode === "canvas" ? " is-active" : ""}" data-artifact-mode="canvas" type="button">
+          <span class="artifact-file-badge">${escapeHtml(kind.slice(0, 3).toUpperCase())}</span>
+          Canvas
+        </button>
+        <span class="artifact-tab-plus" aria-hidden="true">＋</span>
+      </div>
+      <div class="artifact-toolbar">
+        <strong>${escapeHtml(clip(title, 42))}</strong>
+        <span>P1/1</span>
+        <button class="artifact-zoom" data-artifact-zoom type="button">Zoom to fit⌄</button>
+        <button class="artifact-open" data-artifact-open="${escapeHtml(approval.id)}" type="button">↗ Open</button>
+        <button class="artifact-close" data-artifact-close type="button" aria-label="Close workspace preview">Close</button>
+      </div>
+    </header>
+    ${bodyMarkup}
+  `;
+  wireArtifactPanelActions(approval);
+}
+
+function wireArtifactPanelActions(approval) {
+  const zoomButton = elements.artifactPanel.querySelector("[data-artifact-zoom]");
+  const closeButton = elements.artifactPanel.querySelector("[data-artifact-close]");
+  const openButtons = elements.artifactPanel.querySelectorAll("[data-artifact-open]");
+  const modeButtons = elements.artifactPanel.querySelectorAll("[data-artifact-mode]");
+  for (const modeButton of modeButtons) {
+    modeButton.addEventListener("click", () => {
+      state.artifactMode = modeButton.dataset.artifactMode === "canvas" ? "canvas" : "summary";
+      renderArtifactPanel();
+    });
+  }
+  if (zoomButton) {
+    zoomButton.addEventListener("click", () => {
+      state.artifactZoomActual = !state.artifactZoomActual;
+      renderArtifactPanel();
+    });
+  }
+  if (closeButton) {
+    closeButton.addEventListener("click", () => {
+      setMobileArtifactOpen(false);
+    });
+  }
+  for (const openButton of openButtons) {
+    openButton.addEventListener("click", () => {
+      const canvas = document.querySelector(`.approval-canvas-${CSS.escape(approval.tool_name)}`);
+      if (isArtifactDrawerLayout()) {
+        setMobileArtifactOpen(false);
+      }
+      if (canvas) {
+        canvas.scrollIntoView({ behavior: "smooth", block: "center" });
+        canvas.classList.add("is-attention");
+        window.setTimeout(() => canvas.classList.remove("is-attention"), 900);
+      }
+    });
+  }
 }
 
 function renderApprovalResult(result) {
@@ -2906,6 +3311,7 @@ function refreshApprovalCardState(container, approval, collected = undefined) {
   if (approveButton) {
     approveButton.disabled = false;
   }
+  renderArtifactPanel();
 }
 
 function resizeApprovalTextareas(container) {
@@ -2940,16 +3346,24 @@ function wireApprovalActions(container, approval) {
         resizeApprovalTextareas(container);
       });
     }
-    const resetButton = editor.querySelector("[data-approval-reset]");
-    if (resetButton) {
-      resetButton.addEventListener("click", () => {
-        state.approvalErrors.delete(approval.id);
-        clearApprovalDraft(approval.id);
-        render();
-      });
-    }
     resizeApprovalTextareas(container);
     refreshApprovalCardState(container, approval);
+  }
+
+  const resetButton = container.querySelector("[data-approval-reset]");
+  if (resetButton) {
+    resetButton.addEventListener("click", () => {
+      state.approvalErrors.delete(approval.id);
+      clearApprovalDraft(approval.id);
+      render();
+    });
+  }
+
+  for (const canvasToggle of container.querySelectorAll("[data-approval-canvas-collapse]")) {
+    canvasToggle.addEventListener("click", () => {
+      setApprovalCanvasCollapsed(approval.id, !isApprovalCanvasCollapsed(approval));
+      render({ preserveScroll: true });
+    });
   }
 
   for (const toggle of container.querySelectorAll("[data-approval-section-toggle]")) {
@@ -3023,52 +3437,59 @@ function renderCameraSheet() {
 
   elements.cameraStatusPill.textContent =
     camera.status === "recording"
-      ? "Recording locally"
+      ? "Recording"
       : camera.status === "watching"
-        ? "Watching locally"
+        ? "Watching"
       : camera.status === "ready"
-        ? "Camera ready"
+        ? "Ready"
         : camera.status === "captured"
           ? "Clip ready"
           : camera.status === "error"
-            ? "Camera unavailable"
-            : "Opening camera";
+            ? "Unavailable"
+            : "Opening";
   elements.cameraStatusCopy.textContent =
-    camera.error ||
-    (camera.status === "captured"
-      ? "Use the clip to attach it to the next turn, or retake it."
+    (camera.status === "error"
+      ? camera.error || "Camera access is unavailable. Use device capture or try live again."
+      : camera.status === "captured"
+        ? "Attach this clip to your next turn, or retake it."
       : camera.status === "watching"
-        ? `Sampling one frame every ${camera.cadenceSeconds}s on-device. Use a monitor frame or capture a fresh one for analysis.`
+        ? `Sampling locally every ${camera.cadenceSeconds}s. Tap a saved frame to attach it.`
       : camera.status === "recording"
-        ? "Recording stays on-device until you choose to attach it."
-        : "Previewing the local feed. Capture a frame, analyze it immediately, or fall back to native device capture.");
+        ? "Recording stays local until you attach the clip."
+      : camera.status === "ready"
+        ? "Capture a frame, analyze what is visible, or record a short clip."
+        : "Requesting camera permission. You can still use device capture.");
 
-  elements.cameraModeLabel.textContent = hasClip ? "Clip review" : "Live review";
+  elements.cameraModeLabel.textContent = hasClip ? "Clip" : "Live";
   elements.cameraCadenceLabel.textContent = isWatching
-    ? `${camera.cadenceSeconds}s sampling`
+    ? `${camera.cadenceSeconds}s`
     : "Manual";
   elements.cameraOutputLabel.textContent = hasClip
-    ? "Attach a recorded clip"
+    ? "Clip ready"
     : camera.status === "error"
-      ? "Use native capture or retry live"
+      ? "Use device capture"
     : isWatching
-      ? "Recent local watch frames"
-      : "Attach frames or clips";
+      ? "Watch frames"
+      : "Frame or clip";
 
   elements.cameraSheet.classList.toggle("is-recording", isRecording);
   elements.cameraSheet.classList.toggle("is-watching", isWatching);
-  elements.cameraLiveButton.textContent = hasLivePreview ? "Retry live" : "Open live";
+  elements.cameraSheet.classList.toggle("is-ready", hasLivePreview && !isRecording && !hasClip);
+  elements.cameraSheet.classList.toggle("is-captured", hasClip);
+  elements.cameraSheet.classList.toggle("is-error", camera.status === "error");
+  elements.cameraLiveButton.textContent = camera.status === "error" ? "Try live" : "Open live";
   elements.cameraWatchButton.textContent = isWatching ? "Stop watch" : "Start watch";
+  elements.cameraNativeButton.textContent = "Use device capture";
   const showLiveControls = hasLivePreview && !hasClip && !isRecording;
   const showRecoveryControls = !hasLivePreview && !hasClip && !isRecording;
 
-  elements.cameraLiveButton.hidden = hasClip || isRecording;
+  elements.cameraLiveButton.hidden = hasClip || isRecording || hasLivePreview;
   elements.cameraWatchButton.hidden = !showLiveControls;
   elements.cameraRecordButton.hidden = !showLiveControls;
   elements.cameraStopButton.hidden = !isRecording;
   elements.cameraRetakeButton.hidden = !hasClip;
   elements.cameraUseButton.hidden = !hasClip;
-  elements.cameraNativeButton.hidden = isRecording || hasClip === true;
+  elements.cameraNativeButton.hidden = isRecording || hasClip === true || hasLivePreview;
   elements.cameraSnapshotButton.hidden = !showLiveControls;
   elements.cameraAnalyzeButton.hidden = !showLiveControls;
   elements.cameraLiveButton.disabled = false;
@@ -3137,6 +3558,7 @@ function render(options = {}) {
   renderConversations();
   renderAttachmentStrip();
   renderMessages(options);
+  renderArtifactPanel();
   renderCameraSheet();
   renderStatusMenu();
   elements.sendButton.disabled =
@@ -4040,6 +4462,10 @@ function handleStreamEvent(event) {
       syncRunFromEvent(event.conversation_id, assistantMessage, event.payload);
     }
     state.approvals.set(approvalPayload.id, approvalPayload);
+    assistantMessage.approval = approvalPayload;
+    assistantMessage.workProduct = null;
+    assistantMessage.proposedTool = approvalPayload.tool_name;
+    assistantMessage.toolResult = approvalPayload.result || null;
     const detail = approvalReviewDetail(approvalPayload);
     mergeMessageProcess(assistantMessage, {
       kind: "tool",
@@ -4113,6 +4539,26 @@ function toggleSidebar() {
   }
 }
 
+function runSidebarCommand(command) {
+  switch (command) {
+    case "search":
+      elements.promptInput.focus();
+      updateStatus("ready", "Search ready", "Type in the composer to search or ask across this local workspace.");
+      break;
+    case "plugins":
+      addSystemMessage("Plugins will live here as local tools become installable from the workbench.");
+      updateStatus("ready", "Plugins", "Opened the plugins placeholder.");
+      break;
+    case "automations":
+      addSystemMessage("Automations will live here once scheduled local tasks are enabled for this workbench.");
+      updateStatus("ready", "Automations", "Opened the automations placeholder.");
+      break;
+    default:
+      return;
+  }
+  closeSidebar();
+}
+
 function resizeComposer() {
   elements.promptInput.style.height = "auto";
   elements.promptInput.style.height = `${Math.min(elements.promptInput.scrollHeight, 180)}px`;
@@ -4125,6 +4571,11 @@ function updateResponsiveChrome() {
   elements.promptInput.placeholder = window.innerWidth <= 640 ? "Ask locally" : "Ask the local assistant";
   if (window.innerWidth > 1080 && state.mobileSidebarOpen) {
     closeSidebar();
+  }
+  if (!isArtifactDrawerLayout() && state.mobileArtifactOpen) {
+    setMobileArtifactOpen(false);
+  } else {
+    renderArtifactPanel();
   }
 }
 
@@ -4187,6 +4638,11 @@ function attachEventHandlers() {
     render();
     closeSidebar();
   });
+  for (const commandButton of elements.sidebarCommands) {
+    commandButton.addEventListener("click", () => {
+      runSidebarCommand(commandButton.dataset.sidebarCommand);
+    });
+  }
   elements.promptInput.addEventListener("input", resizeComposer);
   elements.promptInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey) {
@@ -4196,9 +4652,26 @@ function attachEventHandlers() {
   });
   elements.sidebarToggle.addEventListener("click", toggleSidebar);
   elements.backdrop.addEventListener("click", closeSidebar);
+  if (elements.artifactToggle) {
+    elements.artifactToggle.addEventListener("click", () => {
+      setMobileArtifactOpen(!state.mobileArtifactOpen);
+    });
+  }
   elements.statusButton.addEventListener("click", (event) => {
     event.stopPropagation();
     toggleStatusMenu();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") {
+      return;
+    }
+    if (state.mobileSidebarOpen) {
+      closeSidebar();
+    }
+    if (state.mobileArtifactOpen) {
+      setMobileArtifactOpen(false);
+    }
+    toggleStatusMenu(false);
   });
   document.addEventListener("click", (event) => {
     if (!elements.statusMenu.contains(event.target) && !elements.statusButton.contains(event.target)) {

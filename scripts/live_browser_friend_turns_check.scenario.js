@@ -95,7 +95,33 @@ async (page) => {
   });
 
   await page.goto(`${baseUrl}/chat/`, { waitUntil: "domcontentloaded" });
+  await page.setViewportSize({ width: 2048, height: 1208 });
   await page.locator("#composer-input").waitFor({ state: "visible", timeout: 30000 });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: {
+        getUserMedia: () => Promise.reject(new DOMException("Permission denied", "NotAllowedError")),
+      },
+    });
+  });
+  await page.locator("#camera-button").click();
+  const cameraSheet = page.locator("#camera-sheet");
+  await cameraSheet.waitFor({ state: "visible", timeout: 30000 });
+  await assertTextMatches(
+    cameraSheet,
+    /Capture for review[\s\S]*Unavailable[\s\S]*Use device capture/i,
+    "minimal mobile camera unavailable sheet",
+  );
+  await page.screenshot({
+    path: "output/playwright/friend-turns/camera-mobile-ui.png",
+    fullPage: false,
+  });
+  await page.locator("#camera-close-button").click();
+  await waitUntil(async () => await cameraSheet.isHidden(), "camera sheet closes");
+  await page.setViewportSize({ width: 2048, height: 1208 });
 
   await sendTurn("Create a report summarizing the current field assistant architecture.");
 
@@ -111,6 +137,59 @@ async (page) => {
     /Field Assistant Architecture Report/i,
     "report canvas title",
   );
+  const artifactPanel = page.locator("[data-artifact-panel]");
+  await artifactPanel.waitFor({ state: "visible", timeout: 30000 });
+  await assertTextMatches(
+    artifactPanel,
+    /Field Assistant Architecture Report[\s\S]*Local workspace preview/i,
+    "right artifact workspace preview",
+  );
+  await artifactPanel.locator('[data-artifact-mode="canvas"]').click();
+  await assertTextMatches(
+    artifactPanel,
+    /Canvas draft[\s\S]*Field Assistant Architecture Report/i,
+    "right artifact canvas surface",
+  );
+  await artifactPanel.locator('[data-artifact-mode="summary"]').click();
+  await assertTextMatches(
+    artifactPanel,
+    /Local workspace preview/i,
+    "right artifact summary surface",
+  );
+  await artifactPanel.locator("[data-artifact-zoom]").click();
+  await waitUntil(
+    async () => /is-actual-size/.test(await artifactPanel.getAttribute("class")),
+    "artifact preview zoom toggle",
+  );
+  await artifactPanel.locator("[data-artifact-zoom]").click();
+  await waitUntil(
+    async () => !/is-actual-size/.test(await artifactPanel.getAttribute("class")),
+    "artifact preview zoom reset",
+  );
+  await artifactPanel.locator("[data-artifact-open]").click();
+  await waitUntil(
+    async () => /is-attention/.test(await canvas.getAttribute("class")),
+    "artifact open focuses canvas",
+  );
+  await canvas.locator("[data-approval-canvas-collapse]").first().click();
+  await waitUntil(
+    async () => /is-collapsed/.test(await canvas.getAttribute("class")),
+    "inline canvas collapse",
+  );
+  await assertTextMatches(
+    canvas.locator(".approval-canvas-collapsed-preview"),
+    /Canvas tucked away[\s\S]*Field Assistant Architecture/i,
+    "collapsed canvas preview",
+  );
+  await canvas.locator("[data-approval-canvas-collapse]").first().click();
+  await waitUntil(
+    async () => !/is-collapsed/.test(await canvas.getAttribute("class")),
+    "inline canvas expand",
+  );
+  await page.screenshot({
+    path: "output/playwright/friend-turns/artifact-split-ui.png",
+    fullPage: false,
+  });
 
   await canvas.locator('[data-approval-field="content"]').fill(
     [
@@ -126,6 +205,45 @@ async (page) => {
     /^Edited$/,
     "edited canvas state",
   );
+  await artifactPanel.locator('[data-artifact-mode="canvas"]').click();
+  await assertTextMatches(
+    artifactPanel,
+    /Canvas draft[\s\S]*Local canvas edit: keep this concise, plain, and human\./i,
+    "right canvas pane reflects edited canvas",
+  );
+  await page.screenshot({
+    path: "output/playwright/friend-turns/artifact-canvas-ui.png",
+    fullPage: false,
+  });
+  await artifactPanel.locator(".artifact-canvas-actions [data-artifact-open]").click();
+  await waitUntil(
+    async () => /is-attention/.test(await canvas.getAttribute("class")),
+    "canvas pane focus editor action",
+  );
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.locator("#artifact-toggle").waitFor({ state: "visible", timeout: 30000 });
+  await page.locator("#artifact-toggle").click();
+  await waitUntil(
+    async () => /is-mobile-open/.test(await artifactPanel.getAttribute("class")),
+    "mobile artifact drawer opens",
+  );
+  await page.waitForTimeout(250);
+  await assertTextMatches(
+    artifactPanel,
+    /Canvas draft[\s\S]*Local canvas edit: keep this concise, plain, and human\./i,
+    "mobile artifact canvas drawer reflects edited canvas",
+  );
+  await page.screenshot({
+    path: "output/playwright/friend-turns/mobile-artifact-ui.png",
+    fullPage: false,
+  });
+  await artifactPanel.locator("[data-artifact-close]").click();
+  await waitUntil(
+    async () => !/is-mobile-open/.test(await artifactPanel.getAttribute("class")),
+    "mobile artifact drawer closes",
+  );
+  await page.setViewportSize({ width: 2048, height: 1208 });
+  await artifactPanel.locator('[data-artifact-mode="summary"]').click();
 
   await sendTurn(
     "Honestly I'm a little anxious. No checklist right now, just help me calm down for a second.",
@@ -251,6 +369,52 @@ async (page) => {
     /Local canvas edit: keep this concise, plain, and human\./,
     "document_edit item preserved visible draft content",
   );
+  await page.locator('[data-sidebar-command="plugins"]').click();
+  await assertTextMatches(
+    page.locator(".message-row.system").last(),
+    /Plugins will live here/i,
+    "plugins sidebar command feedback",
+  );
+  await page.locator('[data-sidebar-command="search"]').click();
+  await waitUntil(
+    async () => (await page.evaluate(() => document.activeElement?.id)) === "composer-input",
+    "search command focuses composer",
+  );
+  await page.locator("#new-chat-button").click();
+  await waitUntil(async () => await artifactPanel.isHidden(), "new chat hides artifact preview");
+
+  await sendTurn("Create a checklist for final phone UX QA before shipping.");
+  const checklistCanvas = page.locator(".approval-canvas-create_checklist").last();
+  await checklistCanvas.waitFor({ state: "visible", timeout: 30000 });
+  await artifactPanel.waitFor({ state: "visible", timeout: 30000 });
+  await assertTextMatches(
+    artifactPanel,
+    /Checklist[\s\S]*final phone ux qa/i,
+    "artifact checklist type card",
+  );
+  await assertTextMatches(
+    artifactPanel.locator(".artifact-type-checklist"),
+    /Confirm destination and route|Prepare translation and contact materials|Pack supplies and backup power/i,
+    "rich checklist artifact preview",
+  );
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.locator("#artifact-toggle").waitFor({ state: "visible", timeout: 30000 });
+  await page.locator("#artifact-toggle").click();
+  await waitUntil(
+    async () => /is-mobile-open/.test(await artifactPanel.getAttribute("class")),
+    "mobile checklist artifact drawer opens",
+  );
+  await page.waitForTimeout(250);
+  await page.screenshot({
+    path: "output/playwright/friend-turns/checklist-artifact-mobile-ui.png",
+    fullPage: false,
+  });
+  await artifactPanel.locator("[data-artifact-close]").click();
+  await waitUntil(
+    async () => !/is-mobile-open/.test(await artifactPanel.getAttribute("class")),
+    "mobile checklist artifact drawer closes",
+  );
+  await page.setViewportSize({ width: 2048, height: 1208 });
 
   if (browserErrors.length > 0) {
     throw new Error(`Browser errors during scenario:\n${browserErrors.join("\n")}`);
