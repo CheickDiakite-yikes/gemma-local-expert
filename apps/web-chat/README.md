@@ -28,6 +28,21 @@ Then open:
 http://127.0.0.1:8000/chat/
 ```
 
+## Product screenshots
+
+These screenshots are copied from the live browser QA flow and show the current
+shape of the product surface.
+
+<p>
+  <img src="../../docs/screenshots/web-chat-desktop-artifact-split.png" alt="Desktop web chat showing a conversation, editable approval canvas, and artifact preview pane" width="760">
+</p>
+
+<p>
+  <img src="../../docs/screenshots/web-chat-mobile-canvas-artifact.png" alt="Mobile artifact drawer showing a live canvas draft" width="220">
+  <img src="../../docs/screenshots/web-chat-mobile-checklist-artifact.png" alt="Mobile artifact drawer showing a checklist artifact preview" width="220">
+  <img src="../../docs/screenshots/web-chat-mobile-camera.png" alt="Mobile camera capture sheet with unavailable fallback" width="220">
+</p>
+
 ## Current capabilities
 
 - conversation list and switching

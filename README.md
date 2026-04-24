@@ -33,6 +33,7 @@ If you want the shortest mental model, it is this:
 - [What This Repository Is](#what-this-repository-is)
 - [What This Repository Is Not](#what-this-repository-is-not)
 - [Current Status](#current-status)
+- [Product Screenshots](#product-screenshots)
 - [Capability Snapshot](#capability-snapshot)
 - [Product Principles](#product-principles)
 - [Architecture Overview](#architecture-overview)
@@ -222,6 +223,30 @@ It is best described as:
 - robust local segmentation and tracking specialists
 - clinically serious medical workflows
 - general-purpose autonomous shell behavior
+
+## Product Screenshots
+
+These screenshots are from the live browser QA path for `apps/web-chat`, the
+current reference product surface.
+
+<p>
+  <img src="docs/screenshots/web-chat-desktop-artifact-split.png" alt="Desktop web chat showing the conversation, editable approval canvas, session rail, and right-side artifact preview pane" width="860">
+</p>
+
+**Desktop agentic workbench.** The primary surface combines the conversation,
+session rail, editable approval canvas, and right-side artifact preview without
+turning the product into a debug dashboard.
+
+<p>
+  <img src="docs/screenshots/web-chat-mobile-canvas-artifact.png" alt="Mobile artifact drawer showing a live canvas draft" width="260">
+  <img src="docs/screenshots/web-chat-mobile-checklist-artifact.png" alt="Mobile artifact drawer showing a checklist artifact preview" width="260">
+  <img src="docs/screenshots/web-chat-mobile-camera.png" alt="Mobile camera capture sheet with a clear unavailable fallback" width="260">
+</p>
+
+**Phone-ready artifact and capture flows.** On narrow screens, the artifact
+pane becomes a focused drawer, typed outputs such as checklists get their own
+preview shape, and the camera workspace keeps unavailable live capture states
+plain and actionable.
 
 ## Capability Snapshot
 
