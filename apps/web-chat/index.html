@@ -78,7 +78,14 @@
       <main class="chat-pane">
         <header class="chat-header">
           <div class="header-left">
-            <button class="icon-button" id="sidebar-toggle" type="button" aria-label="Toggle sessions">
+            <button
+              class="icon-button"
+              id="sidebar-toggle"
+              type="button"
+              aria-label="Toggle sessions"
+              aria-controls="sidebar"
+              aria-expanded="false"
+            >
               ☰
             </button>
             <div class="title-block">
@@ -91,18 +98,25 @@
               id="artifact-toggle"
               type="button"
               aria-label="Toggle workspace preview"
+              aria-controls="artifact-panel"
               aria-expanded="false"
               hidden
             >
               ◧
             </button>
             <div class="topbar-actions" aria-hidden="true">
-              <button class="topbar-icon" type="button">⌘</button>
-              <button class="topbar-icon" type="button">▱</button>
-              <button class="topbar-icon topbar-icon-active" type="button">◧</button>
+              <span class="topbar-icon">⌘</span>
+              <span class="topbar-icon">▱</span>
+              <span class="topbar-icon topbar-icon-active">◧</span>
             </div>
             <div class="status-wrap">
-              <button class="status-trigger" id="status-button" type="button" aria-expanded="false">
+              <button
+                class="status-trigger"
+                id="status-button"
+                type="button"
+                aria-controls="status-menu"
+                aria-expanded="false"
+              >
                 <span class="status-dot" id="status-dot"></span>
                 <span class="status-trigger-label" id="status-pill">Ready</span>
                 <span class="status-trigger-caret">▾</span>
@@ -253,7 +267,13 @@
               </div>
               <div class="composer-actions">
                 <span class="composer-model-pill" aria-hidden="true">◐ ⚡ 5.4 Extra High⌄</span>
-                <button class="icon-button composer-icon" id="voice-button" type="button" aria-label="Voice coming later">
+                <button
+                  class="icon-button composer-icon"
+                  id="voice-button"
+                  type="button"
+                  aria-label="Voice capture coming later"
+                  title="Voice capture coming later"
+                >
                   ◉
                 </button>
                 <button class="send-button" id="send-button" type="submit" aria-label="Send">

@@ -816,6 +816,7 @@ def _extract_video_ocr_facts(
                 ["tesseract", str(frame_path), "stdout", "--psm", "6"],
                 check=False,
                 capture_output=True,
+                errors="replace",
                 text=True,
                 timeout=20,
             )

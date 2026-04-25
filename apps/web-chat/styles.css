@@ -3122,6 +3122,8 @@ body::before {
 }
 
 .artifact-header {
+  position: relative;
+  z-index: 6;
   display: grid;
   border-bottom: 1px solid rgba(232, 227, 240, 0.07);
   background: rgba(33, 30, 49, 0.97);
@@ -3230,12 +3232,19 @@ body::before {
 
 .artifact-open,
 .artifact-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   min-height: 40px;
+  min-width: 86px;
   padding: 0 14px;
   border: 1px solid rgba(232, 227, 240, 0.08);
   border-radius: 12px;
   color: rgba(232, 227, 240, 0.82);
   background: rgba(255, 255, 255, 0.03);
+  font-weight: 650;
+  line-height: 1;
+  touch-action: manipulation;
 }
 
 .artifact-close {
@@ -3622,6 +3631,11 @@ body::before {
   color: rgba(232, 227, 240, 0.86);
 }
 
+.topbar-actions .topbar-icon {
+  cursor: default;
+  pointer-events: none;
+}
+
 .artifact-toggle {
   display: none;
 }
@@ -3962,6 +3976,13 @@ body::before {
     will-change: transform;
   }
 
+  .app-shell.has-artifact .artifact-header {
+    position: sticky;
+    top: 0;
+    z-index: 8;
+    box-shadow: 0 14px 32px rgba(10, 7, 18, 0.22);
+  }
+
   .app-shell.has-artifact .artifact-pane.is-mobile-open {
     transform: translateX(0);
   }
@@ -4035,8 +4056,12 @@ body::before {
 
   .artifact-open,
   .artifact-close {
-    min-height: 36px;
-    padding-inline: 11px;
+    min-height: 44px;
+    min-width: 76px;
+    padding-inline: 13px;
+    border-color: rgba(232, 227, 240, 0.14);
+    background: rgba(255, 255, 255, 0.06);
+    box-shadow: 0 10px 26px rgba(8, 5, 17, 0.2);
   }
 
   .artifact-preview-scroll {

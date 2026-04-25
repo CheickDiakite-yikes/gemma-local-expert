@@ -97,8 +97,40 @@ async (page) => {
   await page.goto(`${baseUrl}/chat/`, { waitUntil: "domcontentloaded" });
   await page.setViewportSize({ width: 2048, height: 1208 });
   await page.locator("#composer-input").waitFor({ state: "visible", timeout: 30000 });
+  const decorativeTopbarButtons = await page.locator(".topbar-actions button").count();
+  if (decorativeTopbarButtons !== 0) {
+    throw new Error(`Expected decorative topbar controls not to be buttons, found ${decorativeTopbarButtons}`);
+  }
 
   await page.setViewportSize({ width: 390, height: 844 });
+  await page.locator("#status-button").click();
+  await waitUntil(
+    async () =>
+      (await page.locator("#status-menu").isVisible()) &&
+      (await page.locator("#status-button").getAttribute("aria-expanded")) === "true",
+    "mobile status menu opens with expanded state",
+  );
+  await page.keyboard.press("Escape");
+  await waitUntil(
+    async () =>
+      (await page.locator("#status-menu").isHidden()) &&
+      (await page.locator("#status-button").getAttribute("aria-expanded")) === "false",
+    "mobile status menu closes with collapsed state",
+  );
+  await page.locator("#sidebar-toggle").click();
+  await waitUntil(
+    async () =>
+      /is-open/.test(await page.locator("#sidebar").getAttribute("class")) &&
+      (await page.locator("#sidebar-toggle").getAttribute("aria-expanded")) === "true",
+    "mobile sidebar opens with expanded state",
+  );
+  await page.locator("#sidebar-backdrop").click();
+  await waitUntil(
+    async () =>
+      !/is-open/.test(await page.locator("#sidebar").getAttribute("class")) &&
+      (await page.locator("#sidebar-toggle").getAttribute("aria-expanded")) === "false",
+    "mobile sidebar closes with collapsed state",
+  );
   await page.evaluate(() => {
     Object.defineProperty(navigator, "mediaDevices", {
       configurable: true,
@@ -123,6 +155,24 @@ async (page) => {
   await waitUntil(async () => await cameraSheet.isHidden(), "camera sheet closes");
   await page.setViewportSize({ width: 2048, height: 1208 });
 
+  await sendTurn("What does local-first mean in this product, in plain English?");
+  let reply = await latestAssistantText();
+  assertMatches(reply, /run on this machine/i, "local-first direct explanation");
+  assertMatches(reply, /weak internet/i, "local-first weak internet explanation");
+  assertNotMatches(reply, /Yes\. We can just talk this through/i, "local-first reply should not be generic filler");
+
+  await sendTurn(
+    "Can we talk normally while you help me think through a field visit tomorrow? Keep it conversational.",
+  );
+  reply = await latestAssistantText();
+  assertMatches(reply, /keep it conversational/i, "field visit conversational opening");
+  assertMatches(reply, /rough shape of tomorrow/i, "field visit next prompt");
+
+  await sendTurn("Teach me how to prepare oral rehydration solution in the field for a new volunteer.");
+  reply = await latestAssistantText();
+  assertMatches(reply, /clean water/i, "ORS concrete safety guidance");
+  assertMatches(reply, /escalate quickly/i, "ORS escalation guidance");
+
   await sendTurn("Create a report summarizing the current field assistant architecture.");
 
   let canvas = page.locator(".approval-canvas-create_report").last();
@@ -144,6 +194,16 @@ async (page) => {
     /Field Assistant Architecture Report[\s\S]*Local workspace preview/i,
     "right artifact workspace preview",
   );
+  await assertTextMatches(
+    artifactPanel.locator("[data-artifact-zoom]"),
+    /Actual size/i,
+    "artifact zoom button starts with useful action",
+  );
+  await assertTextMatches(
+    artifactPanel.locator("[data-artifact-open]"),
+    /Focus/i,
+    "artifact focus action is honestly labeled",
+  );
   await artifactPanel.locator('[data-artifact-mode="canvas"]').click();
   await assertTextMatches(
     artifactPanel,
@@ -161,15 +221,42 @@ async (page) => {
     async () => /is-actual-size/.test(await artifactPanel.getAttribute("class")),
     "artifact preview zoom toggle",
   );
+  await assertTextMatches(
+    artifactPanel.locator("[data-artifact-zoom]"),
+    /Zoom to fit/i,
+    "artifact zoom button offers return-to-fit action",
+  );
   await artifactPanel.locator("[data-artifact-zoom]").click();
   await waitUntil(
     async () => !/is-actual-size/.test(await artifactPanel.getAttribute("class")),
     "artifact preview zoom reset",
   );
+  await assertTextMatches(
+    artifactPanel.locator("[data-artifact-zoom]"),
+    /Actual size/i,
+    "artifact zoom button resets to actual-size action",
+  );
   await artifactPanel.locator("[data-artifact-open]").click();
   await waitUntil(
     async () => /is-attention/.test(await canvas.getAttribute("class")),
     "artifact open focuses canvas",
+  );
+  await canvas.locator('[data-approval-field="title"]').fill("Temporary title for revert check");
+  await assertTextMatches(
+    canvas.locator("[data-approval-draft-state]"),
+    /^Edited$/,
+    "canvas revert check marks local edits",
+  );
+  await canvas.locator("[data-approval-reset]").click();
+  await assertInputValueMatches(
+    canvas.locator('[data-approval-field="title"]'),
+    /Field Assistant Architecture Report/i,
+    "canvas revert restores original title",
+  );
+  await assertTextMatches(
+    canvas.locator("[data-approval-draft-state]"),
+    /^Unsaved$/,
+    "canvas revert returns to clean pending state",
   );
   await canvas.locator("[data-approval-canvas-collapse]").first().click();
   await waitUntil(
@@ -248,7 +335,7 @@ async (page) => {
   await sendTurn(
     "Honestly I'm a little anxious. No checklist right now, just help me calm down for a second.",
   );
-  let reply = await latestAssistantText();
+  reply = await latestAssistantText();
   assertMatches(
     reply,
     /take a breath|slow this down|one piece at a time/i,

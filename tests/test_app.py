@@ -1897,7 +1897,8 @@ def test_long_mixed_conversation_handles_general_follow_up_and_workspace_action(
         },
     )
     assert first.status_code == 200
-    assert "just talk this through" in first.text.lower()
+    assert "keep it conversational" in first.text.lower()
+    assert "rough shape" in first.text.lower()
 
     second = client.post(
         f"/v1/conversations/{conversation['id']}/turns",
@@ -1911,7 +1912,7 @@ def test_long_mixed_conversation_handles_general_follow_up_and_workspace_action(
         },
     )
     assert second.status_code == 200
-    assert "keep this conversational" in second.text.lower()
+    assert "keep it conversational" in second.text.lower()
 
     third = client.post(
         f"/v1/conversations/{conversation['id']}/turns",

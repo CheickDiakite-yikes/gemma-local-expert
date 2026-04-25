@@ -4,7 +4,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from engine.contracts.api import AssetKind, AssistantMode
-from engine.models.vision import MLXVisionRuntime, VisionAnalysisRequest, VisionAsset
+from engine.models.vision import (
+    MLXVisionRuntime,
+    VisionAnalysisRequest,
+    VisionAsset,
+    _extract_ocr_text,
+)
 
 
 def test_low_signal_visual_output_uses_ocr_augmentation(
@@ -60,6 +65,19 @@ def test_low_signal_visual_output_uses_ocr_augmentation(
     assert result.backend == "mlx+tesseract"
     assert "Village Visit Supply Board" in result.text
     assert "Lantern batteries LOW" in result.text
+
+
+def test_tesseract_ocr_uses_lossy_decode_for_non_utf8_output(monkeypatch, tmp_path: Path) -> None:
+    image_path = tmp_path / "field_supply_board.png"
+    image_path.write_bytes(_tiny_png_bytes())
+
+    def fake_run(*args, **kwargs):
+        assert kwargs["errors"] == "replace"
+        return SimpleNamespace(stdout="Village Visit Supply Board\nLantern batteries LOW")
+
+    monkeypatch.setattr("engine.models.vision.subprocess.run", fake_run)
+
+    assert "Village Visit Supply Board" in _extract_ocr_text([str(image_path)])
 
 
 def _tiny_png_bytes() -> bytes:

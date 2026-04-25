@@ -229,8 +229,18 @@ class MockAssistantRuntime:
         lowered = request.user_text.lower().strip()
         primary = self._preferred_retrieval_primary(request.citations, lowered)
 
+        synthesis_reply = self._conversation_synthesis_response(request, lowered)
+        if synthesis_reply:
+            return synthesis_reply
+
+        direct_reply = self._direct_general_response(request, lowered)
+        if direct_reply:
+            return direct_reply
+
         if request.interaction_kind == "teaching":
             topic = self._topic_from_request(request.user_text)
+            if self._is_oral_rehydration_topic(topic):
+                return self._oral_rehydration_teaching_response(primary.label)
             return (
                 f"{self._teaching_intro(topic)} start with the core action from "
                 f"[{primary.label}] {primary.excerpt}"
@@ -433,6 +443,9 @@ class MockAssistantRuntime:
                 "We can slow this down and handle one piece at a time. "
                 "If you want, tell me what feels heaviest and we will just work that one part."
             )
+        direct_reply = self._direct_general_response(request, lowered)
+        if direct_reply:
+            return direct_reply
         if self._is_plain_conversation_request(lowered):
             return "Yes. We can just talk this through."
         if self._is_casual_greeting(lowered):
@@ -544,16 +557,126 @@ class MockAssistantRuntime:
                 return (
                     "Start with the most practical first point: state the goal plainly, show the first action once, and repeat the safety check."
                 )
+            if self._is_escalation_follow_up(lowered) and self._conversation_mentions(
+                request, "oral rehydration"
+            ):
+                return (
+                    "Stop and escalate if you see worsening weakness, confusion, or inability to drink. "
+                    "That comes from [ORS guidance]."
+                )
             if prior_topic:
                 return "Staying with that, I would keep the next step simple and concrete."
             return "I would keep the next step simple and concrete."
         if request.interaction_kind == "teaching":
             topic = self._topic_from_request(request.user_text)
+            if self._is_oral_rehydration_topic(topic):
+                return self._oral_rehydration_teaching_response()
             return (
                 f"{self._teaching_intro(topic)} start with the immediate goal, "
                 "break it into a few simple steps, explain the first step plainly, and check understanding before adding detail."
             )
         return "Yes. We can just talk this through."
+
+    def _direct_general_response(
+        self, request: AssistantGenerationRequest, lowered: str
+    ) -> str | None:
+        synthesis_reply = self._conversation_synthesis_response(request, lowered)
+        if synthesis_reply:
+            return synthesis_reply
+
+        if "local-first" in lowered or "local first" in lowered:
+            return (
+                "Local-first means the useful parts of the assistant run on this machine before depending on the cloud. "
+                "In weak internet, that matters because notes, drafts, attachments, and basic review can keep working even when the connection is slow or gone."
+            )
+
+        if self._is_plain_conversation_request(lowered) and any(
+            phrase in lowered
+            for phrase in {
+                "field visit",
+                "field work",
+                "tomorrow",
+                "think through",
+                "help me think",
+            }
+        ):
+            return (
+                "Yes. We can keep it conversational. Tell me the rough shape of tomorrow first: where you are going, "
+                "who you need to support, and what would make the day feel successful."
+            )
+
+        if "difference between memory and context" in lowered or (
+            "memory" in lowered and "context" in lowered and lowered.startswith(("what", "explain", "how"))
+        ):
+            return (
+                "Sure. Context is the live working set for this turn. "
+                "Memory is older distilled state we only bring back when it helps."
+            )
+
+        return None
+
+    def _conversation_synthesis_response(
+        self, request: AssistantGenerationRequest, lowered: str
+    ) -> str | None:
+        wants_synthesis = (
+            "summarize what you know" in lowered
+            or "summarise what you know" in lowered
+            or ("what you know" in lowered and ("what you do not know" in lowered or "what you don't know" in lowered))
+        )
+        wants_next_action = "safest next action" in lowered or "safe next action" in lowered
+        if not wants_synthesis:
+            return None
+
+        next_action = (
+            "Safest next action: verify the critical supplies and plan manually before departure, then use the app for drafts, notes, and conservative review."
+            if wants_next_action
+            else "Next action: keep the plan conservative and verify anything operational before relying on it."
+        )
+        return (
+            "What I know: you are preparing for field work, you want the app to stay conversational, "
+            "and the current local profile can keep a draft/canvas open while you switch topics. "
+            "The image path is honest but limited when no local vision model is available; the video path can sample frames and create a contact sheet. "
+            "What I do not know: the real site conditions, true supply levels, or whether stronger local vision/tracking models are installed for this run. "
+            f"{next_action}"
+        )
+
+    def _is_oral_rehydration_topic(self, topic: str) -> bool:
+        return "oral rehydration" in topic.lower() or "ors" in topic.lower()
+
+    def _oral_rehydration_teaching_response(self, source_label: str | None = None) -> str:
+        source = f" Grounded in [{source_label}]." if source_label else ""
+        return (
+            "For a new volunteer, keep ORS simple: use clean water, follow the packet or local clinic instructions exactly, "
+            "stir until fully dissolved, and label when it was prepared. Offer small frequent sips, and escalate quickly if the person is confused, very weak, cannot drink, or is getting worse."
+            f"{source}"
+        )
+
+    def _is_escalation_follow_up(self, lowered: str) -> bool:
+        return any(
+            phrase in lowered
+            for phrase in {
+                "what should make me stop",
+                "what should make you stop",
+                "what should make us stop",
+                "what should i watch for",
+                "what would make me stop",
+                "what would make me escalate",
+                "what should make me escalate",
+                "stop and escalate",
+            }
+        )
+
+    def _conversation_mentions(self, request: AssistantGenerationRequest, phrase: str) -> bool:
+        lowered_phrase = phrase.lower()
+        parts = [
+            request.active_topic,
+            request.conversation_context_summary,
+            request.selected_memory_topic,
+            request.selected_memory_summary,
+            request.memory_focus_topic_frame,
+        ]
+        parts.extend(str(message.get("content") or "") for message in request.messages)
+        return lowered_phrase in " ".join(part for part in parts if part).lower()
 
     def _task_pivot_direct_response(self, lowered: str) -> str | None:
         if "memory" in lowered and "context" in lowered:

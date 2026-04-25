@@ -122,6 +122,26 @@ def test_extract_video_ocr_facts_adds_timestamp_refs(monkeypatch, tmp_path: Path
     assert any(ref.ref == "00:10" for ref in facts[0].refs)
 
 
+def test_video_ocr_uses_lossy_decode_for_non_utf8_output(monkeypatch, tmp_path: Path) -> None:
+    frame = tmp_path / "frame-01.jpg"
+    frame.write_bytes(b"fake")
+
+    class CompletedProcess:
+        stdout = "North gate camera"
+
+    def fake_run(*args, **kwargs):
+        assert kwargs["errors"] == "replace"
+        return CompletedProcess()
+
+    monkeypatch.setattr("engine.models.video.shutil.which", lambda name: "/usr/bin/tesseract")
+    monkeypatch.setattr("engine.models.video.subprocess.run", fake_run)
+
+    facts = _extract_video_ocr_facts([frame], {"sample_points": [{"time_seconds": 5.0}]})
+
+    assert facts
+    assert "North gate camera" in facts[0].summary
+
+
 def test_ffmpeg_video_runtime_combines_two_videos_for_comparison(tmp_path: Path) -> None:
     if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
         pytest.skip("ffmpeg/ffprobe are required for local video sampling tests")

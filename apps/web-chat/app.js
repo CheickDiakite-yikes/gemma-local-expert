@@ -1956,7 +1956,12 @@ function renderMessageContent(message, overrideContent = undefined) {
       <div class="message-content${richTextRoles.has(message.role) ? " rich-text" : ""}">${body}</div>
       ${
         collapsible
-          ? `<button class="message-content-toggle" data-message-content-toggle="${escapeHtml(messagePanelKey(message, "context"))}" type="button">${expanded ? "Show less" : "Show more"}</button>`
+          ? `<button
+              class="message-content-toggle"
+              data-message-content-toggle="${escapeHtml(messagePanelKey(message, "context"))}"
+              type="button"
+              aria-expanded="${String(expanded)}"
+            >${expanded ? "Show less" : "Show more"}</button>`
           : ""
       }
     </div>
@@ -2229,6 +2234,8 @@ function renderApprovalCanvas(approval) {
   const editHistory = renderDocumentEditHistory(approval);
   const canvasCollapsed = isApprovalCanvasCollapsed(approval);
   const canvasPreview = canvasContent || approvalPayloadExcerpt(approval, payload) || approvalReasonCopy(approval);
+  const editorId = `approval-editor-${approval.id}`;
+  const collapseLabel = canvasCollapsed ? "Expand canvas" : "Collapse canvas";
 
   return `
     <section class="approval-canvas approval-canvas-${escapeHtml(approval.tool_name)}${canvasCollapsed ? " is-collapsed" : ""}">
@@ -2240,7 +2247,15 @@ function renderApprovalCanvas(approval) {
           </div>
           <div class="approval-canvas-controls">
             <span class="approval-editor-state approval-canvas-state${isDirty ? " is-dirty" : ""}" data-approval-draft-state>${draftStateText}</span>
-            <button class="approval-canvas-collapse-toggle" data-approval-canvas-collapse data-approval-id="${escapeHtml(approval.id)}" type="button">${canvasCollapsed ? "Expand canvas" : "Collapse"}</button>
+            <button
+              class="approval-canvas-collapse-toggle"
+              data-approval-canvas-collapse
+              data-approval-id="${escapeHtml(approval.id)}"
+              type="button"
+              aria-controls="${escapeHtml(editorId)}"
+              aria-expanded="${String(!canvasCollapsed)}"
+              title="${escapeHtml(collapseLabel)}"
+            >${escapeHtml(collapseLabel)}</button>
             <button class="approval-editor-reset" data-approval-reset type="button"${isDirty ? "" : " disabled"}>Revert</button>
             <button class="approval-action reject" data-approval-action="reject" data-approval-id="${approval.id}" type="button">Dismiss</button>
             <button class="approval-action approve" data-approval-action="approve" data-approval-id="${approval.id}" type="button">${escapeHtml(approvalPrimaryActionLabel(approval))}</button>
@@ -2265,9 +2280,22 @@ function renderApprovalCanvas(approval) {
       <section class="approval-canvas-collapsed-preview"${canvasCollapsed ? "" : " hidden"}>
         <span>Canvas tucked away</span>
         <p>${escapeHtml(clipCopy(canvasPreview, 220))}</p>
-        <button class="approval-canvas-collapse-toggle" data-approval-canvas-collapse data-approval-id="${escapeHtml(approval.id)}" type="button">Expand to edit</button>
+        <button
+          class="approval-canvas-collapse-toggle"
+          data-approval-canvas-collapse
+          data-approval-id="${escapeHtml(approval.id)}"
+          type="button"
+          aria-controls="${escapeHtml(editorId)}"
+          aria-expanded="false"
+          title="Expand canvas to edit"
+        >Expand to edit</button>
       </section>
-      <section class="approval-editor approval-editor-canvas" data-approval-editor="${approval.id}"${canvasCollapsed ? " hidden" : ""}>
+      <section
+        class="approval-editor approval-editor-canvas"
+        id="${escapeHtml(editorId)}"
+        data-approval-editor="${approval.id}"
+        ${canvasCollapsed ? "hidden" : ""}
+      >
         <textarea
           class="approval-canvas-textarea"
           data-approval-field="content"
@@ -2581,6 +2609,11 @@ function renderArtifactPanel() {
   const kind = artifactFileKind(approval);
   const edits = documentEditsForApproval(approval.id);
   const drawerOpen = isArtifactDrawerLayout() && state.mobileArtifactOpen;
+  const zoomLabel = state.artifactZoomActual ? "Zoom to fit" : "Actual size";
+  const zoomTitle = state.artifactZoomActual
+    ? "Fit the preview back inside the artifact pane"
+    : "Show the artifact preview at actual size";
+  const focusTitle = "Focus the inline editor for this draft";
   elements.artifactPanel.classList.toggle("is-actual-size", state.artifactZoomActual);
   elements.artifactPanel.classList.toggle("is-canvas-mode", mode === "canvas");
   elements.artifactPanel.classList.toggle("is-mobile-open", drawerOpen);
@@ -2602,11 +2635,11 @@ function renderArtifactPanel() {
   elements.artifactPanel.innerHTML = `
     <header class="artifact-header">
       <div class="artifact-tabs" aria-label="Artifact navigation">
-        <button class="artifact-summary-tab artifact-mode-tab${mode === "summary" ? " is-active" : ""}" data-artifact-mode="summary" type="button">
+        <button class="artifact-summary-tab artifact-mode-tab${mode === "summary" ? " is-active" : ""}" data-artifact-mode="summary" type="button" aria-pressed="${String(mode === "summary")}">
           <svg class="ui-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M4 7h11M4 12h7M4 17h11M18 9l3 3-3 3"/></svg>
           Summary
         </button>
-        <button class="artifact-file-tab artifact-mode-tab${mode === "canvas" ? " is-active" : ""}" data-artifact-mode="canvas" type="button">
+        <button class="artifact-file-tab artifact-mode-tab${mode === "canvas" ? " is-active" : ""}" data-artifact-mode="canvas" type="button" aria-pressed="${String(mode === "canvas")}">
           <span class="artifact-file-badge">${escapeHtml(kind.slice(0, 3).toUpperCase())}</span>
           Canvas
         </button>
@@ -2615,8 +2648,8 @@ function renderArtifactPanel() {
       <div class="artifact-toolbar">
         <strong>${escapeHtml(clip(title, 42))}</strong>
         <span>P1/1</span>
-        <button class="artifact-zoom" data-artifact-zoom type="button">Zoom to fit⌄</button>
-        <button class="artifact-open" data-artifact-open="${escapeHtml(approval.id)}" type="button">↗ Open</button>
+        <button class="artifact-zoom" data-artifact-zoom type="button" aria-pressed="${String(state.artifactZoomActual)}" title="${escapeHtml(zoomTitle)}">${escapeHtml(zoomLabel)}⌄</button>
+        <button class="artifact-open" data-artifact-open="${escapeHtml(approval.id)}" type="button" aria-label="${escapeHtml(`Focus editor for ${title}`)}" title="${escapeHtml(focusTitle)}">↗ Focus</button>
         <button class="artifact-close" data-artifact-close type="button" aria-label="Close workspace preview">Close</button>
       </div>
     </header>
@@ -2643,12 +2676,16 @@ function wireArtifactPanelActions(approval) {
     });
   }
   if (closeButton) {
-    closeButton.addEventListener("click", () => {
+    closeButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
       setMobileArtifactOpen(false);
     });
   }
   for (const openButton of openButtons) {
-    openButton.addEventListener("click", () => {
+    openButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
       const canvas = document.querySelector(`.approval-canvas-${CSS.escape(approval.tool_name)}`);
       if (isArtifactDrawerLayout()) {
         setMobileArtifactOpen(false);
@@ -3236,7 +3273,7 @@ function collectApprovalEdit(container, approval, { silent = false } = {}) {
   }
 
   const editedPayload = {};
-  for (const field of editor.querySelectorAll("[data-approval-field]")) {
+  for (const field of container.querySelectorAll("[data-approval-field]")) {
     const name = field.dataset.approvalField;
     if (!name) {
       continue;
@@ -3329,7 +3366,7 @@ function resizeApprovalTextareas(container) {
 function wireApprovalActions(container, approval) {
   const editor = container.querySelector(`[data-approval-editor="${approval.id}"]`);
   if (editor) {
-    for (const field of editor.querySelectorAll("[data-approval-field], [data-approval-json]")) {
+    for (const field of container.querySelectorAll("[data-approval-field], [data-approval-json]")) {
       if (field.dataset.approvalField === "content") {
         field.addEventListener("select", () => rememberCanvasSelection(container, field, approval));
         field.addEventListener("mouseup", () => rememberCanvasSelection(container, field, approval));
@@ -4523,12 +4560,14 @@ function closeSidebar() {
   state.mobileSidebarOpen = false;
   elements.sidebar.classList.remove("is-open");
   elements.backdrop.classList.remove("is-open");
+  elements.sidebarToggle.setAttribute("aria-expanded", "false");
 }
 
 function openSidebar() {
   state.mobileSidebarOpen = true;
   elements.sidebar.classList.add("is-open");
   elements.backdrop.classList.add("is-open");
+  elements.sidebarToggle.setAttribute("aria-expanded", "true");
 }
 
 function toggleSidebar() {

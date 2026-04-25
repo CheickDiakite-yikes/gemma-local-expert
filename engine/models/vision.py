@@ -328,6 +328,7 @@ def _extract_ocr_text(image_paths: list[str]) -> str | None:
                 ["tesseract", image_path, "stdout", "--psm", "6"],
                 check=False,
                 capture_output=True,
+                errors="replace",
                 text=True,
                 timeout=20,
             )

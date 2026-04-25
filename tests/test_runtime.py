@@ -2,6 +2,7 @@ from engine.contracts.api import (
     AssistantMode,
     ConversationMemoryEntry,
     ConversationMemoryKind,
+    SearchResultItem,
     SourceDomain,
 )
 from engine.models.runtime import (
@@ -172,6 +173,122 @@ def test_mock_runtime_handles_lightweight_tangent_more_naturally() -> None:
     assert "leave that aside for a minute" in result.text.lower()
     assert "talk about lunch and coffee" in result.text.lower()
     assert "new main thread" not in result.text.lower()
+
+
+def test_mock_runtime_explains_local_first_directly() -> None:
+    runtime = MockAssistantRuntime()
+
+    result = runtime.generate(
+        _request(
+            user_text="What does local-first mean in this product, in plain English?",
+            is_follow_up=False,
+            selected_memory_topic=None,
+            selected_memory_summary=None,
+            active_topic=None,
+        )
+    )
+
+    assert "run on this machine" in result.text.lower()
+    assert "weak internet" in result.text.lower()
+    assert "yes. we can just talk this through" not in result.text.lower()
+
+
+def test_mock_runtime_explains_local_first_before_retrieval_fallback() -> None:
+    runtime = MockAssistantRuntime()
+
+    result = runtime.generate(
+        _request(
+            user_text="What does local-first mean in this product, in plain English?",
+            citations=[
+                SearchResultItem(
+                    asset_id="asset_1",
+                    chunk_id="chunk_1",
+                    label="Architecture Notes",
+                    excerpt="Local-first assistant built on Gemma.",
+                    score=0.9,
+                )
+            ],
+            is_follow_up=False,
+            selected_memory_topic=None,
+            selected_memory_summary=None,
+            active_topic=None,
+        )
+    )
+
+    assert "run on this machine" in result.text.lower()
+    assert "the clearest local point here" not in result.text.lower()
+
+
+def test_mock_runtime_plain_field_visit_request_gives_useful_next_prompt() -> None:
+    runtime = MockAssistantRuntime()
+
+    result = runtime.generate(
+        _request(
+            user_text=(
+                "Can we talk normally while you help me think through a field visit tomorrow? "
+                "Keep it conversational."
+            ),
+            is_follow_up=False,
+            selected_memory_topic=None,
+            selected_memory_summary=None,
+            active_topic=None,
+        )
+    )
+
+    assert "keep it conversational" in result.text.lower()
+    assert "rough shape of tomorrow" in result.text.lower()
+    assert "yes. we can just talk this through" not in result.text.lower()
+
+
+def test_mock_runtime_teaches_oral_rehydration_more_concretely_and_safely() -> None:
+    runtime = MockAssistantRuntime()
+
+    result = runtime.generate(
+        _request(
+            user_text="Teach me how to prepare oral rehydration solution in the field for a new volunteer.",
+            interaction_kind="teaching",
+            is_follow_up=False,
+            selected_memory_topic=None,
+            selected_memory_summary=None,
+            active_topic=None,
+        )
+    )
+
+    assert "use clean water" in result.text.lower()
+    assert "follow the packet or local clinic instructions exactly" in result.text.lower()
+    assert "escalate quickly" in result.text.lower()
+    assert "start with the immediate goal" not in result.text.lower()
+
+
+def test_mock_runtime_synthesizes_long_conversation_before_retrieval_fallback() -> None:
+    runtime = MockAssistantRuntime()
+
+    result = runtime.generate(
+        _request(
+            user_text=(
+                "Given everything in this same conversation, summarize what you know, "
+                "what you do not know, and the safest next action before tomorrow."
+            ),
+            citations=[
+                SearchResultItem(
+                    asset_id="asset_1",
+                    chunk_id="chunk_1",
+                    label="Community Visit Notes",
+                    excerpt="Use simple language and document follow-up dates.",
+                    score=0.9,
+                )
+            ],
+            is_follow_up=True,
+            selected_memory_topic=None,
+            selected_memory_summary=None,
+            active_topic="field visit tomorrow",
+        )
+    )
+
+    assert "what i know" in result.text.lower()
+    assert "what i do not know" in result.text.lower()
+    assert "safest next action" in result.text.lower()
+    assert "the clearest local point here" not in result.text.lower()
 
 
 def test_mock_runtime_uses_saved_output_referent_for_topic_reentry() -> None:
