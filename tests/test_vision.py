@@ -80,6 +80,27 @@ def test_tesseract_ocr_uses_lossy_decode_for_non_utf8_output(monkeypatch, tmp_pa
     assert "Village Visit Supply Board" in _extract_ocr_text([str(image_path)])
 
 
+def test_tesseract_ocr_retries_uploaded_temp_file_via_stdin(monkeypatch, tmp_path: Path) -> None:
+    image_path = tmp_path / "uploaded-board.png"
+    image_path.write_bytes(_tiny_png_bytes())
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        if args[0:2] == ["tesseract", "stdin"]:
+            assert kwargs["input"].startswith(b"\x89PNG")
+            return SimpleNamespace(stdout=b"Village Visit Supply Board\nTranslator phone credits NEEDS TOP-UP")
+        return SimpleNamespace(stdout="", returncode=1)
+
+    monkeypatch.setattr("engine.models.vision.subprocess.run", fake_run)
+
+    text = _extract_ocr_text([str(image_path)])
+
+    assert "Translator phone credits" in text
+    assert calls[0][1] == str(image_path)
+    assert calls[1][1] == "stdin"
+
+
 def _tiny_png_bytes() -> bytes:
     return (
         b"\x89PNG\r\n\x1a\n"

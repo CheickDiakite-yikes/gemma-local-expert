@@ -291,6 +291,56 @@ def test_mock_runtime_synthesizes_long_conversation_before_retrieval_fallback() 
     assert "the clearest local point here" not in result.text.lower()
 
 
+def test_mock_runtime_turns_ocr_board_text_into_urgent_items() -> None:
+    runtime = MockAssistantRuntime()
+
+    result = runtime.generate(
+        _request(
+            user_text="Describe the attached supply image conservatively.",
+            specialist_analysis_text=(
+                "Visible text extracted from the image:\n"
+                "Village Visit Supply Board\n"
+                "ORS packets 18\n"
+                "Lantern batteries LOW\n"
+                "Translator phone credits _ NEEDS TOP-UP\n"
+                "Action note: Buy batteries and top up translator credit before leaving base."
+            ),
+            is_follow_up=False,
+            selected_memory_topic=None,
+            selected_memory_summary=None,
+            active_topic=None,
+        )
+    )
+
+    assert "clearest urgent items" in result.text.lower()
+    assert "lantern batteries" in result.text.lower()
+    assert "translator phone credits" in result.text.lower()
+    assert "buy batteries and top up translator credit" in result.text.lower()
+
+
+def test_mock_runtime_prioritizes_ocr_need_top_up_as_shortage() -> None:
+    runtime = MockAssistantRuntime()
+
+    result = runtime.generate(
+        _request(
+            user_text="Which two shortages matter most before departure?",
+            specialist_analysis_text=(
+                "Visible text extracted from the image:\n"
+                "Lantern batteries LOW\n"
+                "Translator phone credits _ NEEDS TOP-UP"
+            ),
+            is_follow_up=True,
+            active_topic="Describe the attached supply image conservatively.",
+            selected_memory_topic=None,
+            selected_memory_summary=None,
+        )
+    )
+
+    assert "two clearest shortages" in result.text.lower()
+    assert "lantern batteries" in result.text.lower()
+    assert "translator phone credits" in result.text.lower()
+
+
 def test_mock_runtime_uses_saved_output_referent_for_topic_reentry() -> None:
     runtime = MockAssistantRuntime()
 

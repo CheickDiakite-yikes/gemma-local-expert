@@ -1820,6 +1820,19 @@ a {
   font-size: 0.78rem;
 }
 
+.attachment-draft-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(240, 194, 184, 0.14);
+  background: rgba(240, 194, 184, 0.07);
+  color: rgba(240, 194, 184, 0.9) !important;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
 .attachment-draft select {
   width: 100%;
   margin-top: 6px;

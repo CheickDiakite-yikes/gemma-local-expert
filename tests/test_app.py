@@ -1,6 +1,8 @@
 import json
+import shutil
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from engine.api.app import build_container, create_app
@@ -829,6 +831,49 @@ def test_conversational_image_turn_does_not_force_tool_output(tmp_path: Path) ->
     assert response.status_code == 200
     assert "From the image" in response.text
     assert '"type":"approval.required"' not in response.text
+
+
+def test_ocr_backend_extracts_field_supply_board_shortages_from_uploaded_image(
+    tmp_path: Path,
+) -> None:
+    if shutil.which("tesseract") is None:
+        pytest.skip("tesseract is required for the local OCR integration test")
+
+    sample_path = Path(__file__).resolve().parents[1] / "data" / "test-assets" / "field_supply_board.png"
+    settings = Settings(
+        database_path=str(tmp_path / "test-ocr-field-board.db"),
+        asset_storage_dir=str(tmp_path / "uploads"),
+        specialist_backend="ocr",
+    )
+    client = TestClient(create_app(settings))
+    image_asset = client.post(
+        "/v1/assets/upload",
+        data={"care_context": "general"},
+        files={"file": ("field_supply_board.png", sample_path.read_bytes(), "image/png")},
+    ).json()["asset"]
+    conversation = client.post(
+        "/v1/conversations",
+        json={"title": "OCR board", "mode": "general"},
+    ).json()
+
+    describe = client.post(
+        f"/v1/conversations/{conversation['id']}/turns",
+        json={
+            "conversation_id": conversation["id"],
+            "mode": "general",
+            "text": "Describe the attached supply image conservatively.",
+            "asset_ids": [image_asset["id"]],
+            "enabled_knowledge_pack_ids": [],
+            "response_preferences": {"style": "normal", "citations": True, "audio_reply": False},
+        },
+    )
+
+    assert describe.status_code == 200
+    lowered = describe.text.lower()
+    assert "clearest urgent items" in lowered
+    assert "lantern batteries" in lowered
+    assert "translator phone credits" in lowered
+    assert "action note" in lowered
 
 
 def test_transcript_rehydrates_executed_approval_state(tmp_path: Path) -> None:
@@ -2907,7 +2952,8 @@ def test_multimodal_conversation_handles_topic_pivots_follow_ups_and_workspace_o
     assert "ors guidance" in turn_responses[1].lower()
     assert "most practical first point" in turn_responses[2].lower()
     assert "from the image" in turn_responses[3].lower()
-    assert "lantern batteries low" in turn_responses[3].lower()
+    assert "clearest urgent items" in turn_responses[3].lower()
+    assert "lantern batteries" in turn_responses[3].lower()
     assert "two clearest shortages" in turn_responses[4].lower()
     assert "translator phone credits" in turn_responses[4].lower()
     assert "just talk this through" in turn_responses[5].lower()
@@ -3008,7 +3054,8 @@ def test_checklist_follow_up_reuses_earlier_image_summary_when_current_vision_is
         },
     )
     assert describe.status_code == 200
-    assert "lantern batteries low" in describe.text.lower()
+    assert "clearest urgent items" in describe.text.lower()
+    assert "lantern batteries" in describe.text.lower()
 
     shortages = client.post(
         f"/v1/conversations/{conversation['id']}/turns",

@@ -154,6 +154,17 @@ async (page) => {
   await page.locator("#camera-close-button").click();
   await waitUntil(async () => await cameraSheet.isHidden(), "camera sheet closes");
   await page.setViewportSize({ width: 2048, height: 1208 });
+  await page.locator("#file-input").setInputFiles("data/test-assets/field_supply_board.png");
+  await assertTextMatches(
+    page.locator("#attachment-strip"),
+    /field_supply_board\.png[\s\S]*Local OCR after send/i,
+    "image attachment draft shows local OCR route",
+  );
+  await page.locator("[data-remove-attachment]").click();
+  await waitUntil(
+    async () => (await page.locator(".attachment-draft").count()) === 0,
+    "attachment draft can be removed",
+  );
 
   await sendTurn("What does local-first mean in this product, in plain English?");
   let reply = await latestAssistantText();

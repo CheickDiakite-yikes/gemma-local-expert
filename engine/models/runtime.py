@@ -314,6 +314,8 @@ class MockAssistantRuntime:
         lowered = request.user_text.lower().strip()
         cleaned = self._clean_specialist_text(request.specialist_analysis_text or "")
         low_items = self._low_items_from_analysis(cleaned)
+        urgent_items = self._urgent_items_from_analysis(cleaned)
+        priority_items = urgent_items or low_items
         if self._looks_like_video_sampling_summary(cleaned):
             if any(
                 token in lowered
@@ -339,8 +341,8 @@ class MockAssistantRuntime:
                 "prioritize before departure",
                 "prioritise before departure",
             }
-        ) and len(low_items) >= 2:
-            first, second = low_items[:2]
+        ) and len(priority_items) >= 2:
+            first, second = priority_items[:2]
             return (
                 f"The two clearest shortages are {first} and {second}. "
                 "Those matter most before departure because the local review marks them low and both affect basic field operations."
@@ -356,18 +358,22 @@ class MockAssistantRuntime:
                 "what stood out first",
                 "which shortage stood out first",
             }
-        ) and low_items:
-            first = low_items[0]
+        ) and priority_items:
+            first = priority_items[0]
             return (
                 f"The clearest shortage is {first}. "
                 "It stands out first because the local review marks it low and frames it like an immediate field-readiness risk."
             )
 
         if "visible text" in (request.specialist_analysis_text or "").lower():
-            if low_items:
-                return "From the image, the clearest visible items are: " + "; ".join(
-                    f"{item} low" for item in low_items[:3]
+            if priority_items:
+                response = "From the image, the clearest urgent items are: " + "; ".join(
+                    priority_items[:3]
                 ) + "."
+                action_note = self._action_note_from_analysis(cleaned)
+                if action_note:
+                    response += f" Action note: {action_note}"
+                return response
             return f"From the image, I can read: {cleaned}"
 
         if any(
@@ -423,6 +429,16 @@ class MockAssistantRuntime:
             if packet.grounding_status == GroundingStatus.UNAVAILABLE:
                 return packet.summary
             if packet.facts:
+                fact_text = "\n".join(fact.summary for fact in packet.facts)
+                urgent_items = self._urgent_items_from_analysis(fact_text)
+                if urgent_items:
+                    response = "From the image, the clearest urgent items are: " + "; ".join(
+                        urgent_items[:3]
+                    ) + "."
+                    action_note = self._action_note_from_analysis(fact_text)
+                    if action_note:
+                        response += f" Action note: {action_note}"
+                    return response
                 return "From the image, here is what stands out:\n" + "\n".join(
                     f"- {fact.summary}" for fact in packet.facts[:4]
                 )
@@ -1254,6 +1270,48 @@ class MockAssistantRuntime:
                     seen.add(normalized)
                     items.append(item)
         return items
+
+    def _urgent_items_from_analysis(self, cleaned_text: str) -> list[str]:
+        items: list[str] = []
+        seen: set[str] = set()
+
+        for line in cleaned_text.splitlines():
+            stripped = " ".join(line.strip().rstrip(".").split())
+            if not stripped:
+                continue
+            lowered = stripped.lower()
+            if lowered.startswith("action note"):
+                continue
+            item = None
+            if lowered.endswith(" low"):
+                item = stripped[:-4].strip()
+            elif " low" in lowered:
+                item = re.split(r"\blow\b", stripped, flags=re.IGNORECASE)[0].strip(" :-_")
+            elif "needs top" in lowered or "needs top-" in lowered or "needs top_" in lowered:
+                item = re.split(r"\bneeds\b", stripped, flags=re.IGNORECASE)[0].strip(" :-_")
+            elif "need top" in lowered:
+                item = re.split(r"\bneed\b", stripped, flags=re.IGNORECASE)[0].strip(" :-_")
+            elif "shortage" in lowered:
+                item = stripped
+
+            if not item:
+                continue
+            normalized = item.lower()
+            if normalized not in seen:
+                seen.add(normalized)
+                items.append(item)
+
+        if items:
+            return items
+        return self._low_items_from_analysis(cleaned_text)
+
+    def _action_note_from_analysis(self, cleaned_text: str) -> str | None:
+        for line in cleaned_text.splitlines():
+            stripped = " ".join(line.strip().split())
+            if stripped.lower().startswith("action note"):
+                note = re.sub(r"^action note\s*:?\s*", "", stripped, flags=re.IGNORECASE).strip()
+                return note or None
+        return None
 
     def _looks_like_video_sampling_summary(self, cleaned_text: str) -> bool:
         lowered = cleaned_text.lower()

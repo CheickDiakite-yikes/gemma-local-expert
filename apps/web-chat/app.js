@@ -2993,8 +2993,9 @@ function renderAttachmentStrip() {
               <option value="medical"${attachment.careContext === "medical" ? " selected" : ""}>Medical image</option>
             </select>
           </label>
+          <span class="attachment-draft-status">${attachment.careContext === "medical" ? "Medical route after send" : "Local OCR after send"}</span>
         `
-        : `<span>${attachment.kind === "video" ? "Video upload" : "Local file"}</span>`;
+        : `<span class="attachment-draft-status">${attachment.kind === "video" ? "Video sampling after send" : "Local file attached"}</span>`;
     card.innerHTML = `
       ${previewMarkup}
       <div class="attachment-draft-header">

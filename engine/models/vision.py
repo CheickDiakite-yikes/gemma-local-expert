@@ -336,12 +336,31 @@ def _extract_ocr_text(image_paths: list[str]) -> str | None:
             return None
 
         text = completed.stdout.strip()
+        if not text and getattr(completed, "returncode", 0) != 0:
+            text = _extract_ocr_text_from_stdin(image_path)
         if text:
             snippets.append(text)
 
     if not snippets:
         return None
     return "\n\n".join(snippets)
+
+
+def _extract_ocr_text_from_stdin(image_path: str) -> str | None:
+    try:
+        image_bytes = Path(image_path).read_bytes()
+        completed = subprocess.run(
+            ["tesseract", "stdin", "stdout", "--psm", "6"],
+            input=image_bytes,
+            check=False,
+            capture_output=True,
+            timeout=20,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return None
+
+    text = completed.stdout.decode("utf-8", errors="replace").strip()
+    return text or None
 
 
 def _request_prefers_text_extraction(request: VisionAnalysisRequest) -> bool:
@@ -411,7 +430,7 @@ def _vision_packet(
         if lowered.startswith(("visible text extracted", "visual observations", "vision specialist routing selected")):
             continue
         facts.append(EvidenceFact(summary=line))
-        if len(facts) == 6:
+        if len(facts) == 10:
             break
 
     execution_mode = ExecutionMode.FULL if backend == "mlx" else ExecutionMode.FALLBACK
