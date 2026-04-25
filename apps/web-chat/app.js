@@ -5,6 +5,7 @@ const state = {
   streaming: false,
   mobileSidebarOpen: false,
   mobileArtifactOpen: false,
+  dragActive: false,
   statusMenuOpen: false,
   draftMessages: [],
   pendingAttachments: [],
@@ -78,6 +79,7 @@ const elements = {
   cameraUseButton: document.getElementById("camera-use-button"),
   cameraWatchButton: document.getElementById("camera-watch-button"),
   composer: document.getElementById("composer"),
+  composerModelPill: document.getElementById("composer-model-pill"),
   conversationList: document.getElementById("conversation-list"),
   conversationTitle: document.getElementById("conversation-title"),
   emptyState: document.getElementById("empty-state"),
@@ -516,11 +518,60 @@ function capabilitySummary(capabilities) {
   if (!capabilities) {
     return "Capabilities unavailable.";
   }
-  const binaryBits = [];
-  binaryBits.push(capabilities.tesseract_available ? "tesseract" : "no tesseract");
-  binaryBits.push(capabilities.ffmpeg_available ? "ffmpeg" : "no ffmpeg");
-  const profile = capabilities.low_memory_profile ? "low-memory profile" : "full profile";
-  return `${capabilities.assistant_backend} / ${capabilities.embedding_backend} / ${capabilities.specialist_backend} / ${capabilities.tracking_backend} • ${binaryBits.join(" • ")} • ${profile}`;
+  return [
+    capabilityBackendLabel("Assistant", capabilities.assistant_backend, capabilities.assistant_model_available),
+    capabilityBackendLabel("Images", capabilities.specialist_backend, capabilities.vision_model_available, {
+      ocrAvailable: capabilities.tesseract_available,
+    }),
+    capabilityBackendLabel("Video", capabilities.tracking_backend, capabilities.tracking_model_available, {
+      ffmpegAvailable: capabilities.ffmpeg_available,
+    }),
+    capabilities.low_memory_profile ? "low-memory profile" : "full local profile",
+  ].join(" • ");
+}
+
+function capabilityBackendLabel(label, backend, modelAvailable, options = {}) {
+  const normalized = String(backend || "unknown").toLowerCase();
+  if (normalized === "mock") {
+    return `${label}: mock responses`;
+  }
+  if (normalized === "ocr") {
+    return `${label}: OCR${options.ocrAvailable ? "" : " unavailable"}`;
+  }
+  if (normalized === "hash") {
+    return `${label}: hash fallback`;
+  }
+  if (normalized === "fallback") {
+    return `${label}: fallback mode`;
+  }
+  if (normalized === "none") {
+    return `${label}: unavailable`;
+  }
+  if (normalized.includes("mock")) {
+    return `${label}: mock responses`;
+  }
+  if (normalized.includes("mlx") || normalized.includes("local")) {
+    return `${label}: ${modelAvailable ? "local model ready" : "configured, model missing"}`;
+  }
+  if (label === "Video" && options.ffmpegAvailable && !modelAvailable) {
+    return `${label}: sampling fallback`;
+  }
+  return `${label}: ${normalized}${modelAvailable ? " ready" : " fallback"}`;
+}
+
+function capabilityPillCopy(capabilities) {
+  if (!capabilities) {
+    return "◐ Local status⌄";
+  }
+  const assistant = String(capabilities.assistant_backend || "").toLowerCase();
+  const specialist = String(capabilities.specialist_backend || "").toLowerCase();
+  if (assistant === "mock") {
+    return specialist === "ocr" ? "◐ Mock + OCR⌄" : "◐ Mock local⌄";
+  }
+  if (capabilities.assistant_model_available) {
+    return "◐ Local model⌄";
+  }
+  return "◐ Fallback local⌄";
 }
 
 function approvalDraftFor(approvalId) {
@@ -1536,6 +1587,39 @@ function formatBytes(byteSize) {
     return `${(byteSize / 1024).toFixed(1)} KB`;
   }
   return `${(byteSize / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function attachmentRouteCopy(attachment) {
+  if (attachment.kind === "image") {
+    return attachment.careContext === "medical" ? "Medical route after send" : "Local OCR after send";
+  }
+  if (attachment.kind === "video") {
+    return "Video sampling after send";
+  }
+  if (String(attachment.displayName || "").toLowerCase().endsWith(".pdf")) {
+    return "PDF context after send";
+  }
+  return "Local file attached";
+}
+
+function attachmentStatusCopy(attachment) {
+  if (attachment.uploadState === "uploading") {
+    return `Uploading ${Math.round((attachment.uploadProgress || 0) * 100)}%`;
+  }
+  if (attachment.uploadState === "done") {
+    return "Saved locally";
+  }
+  if (attachment.uploadState === "failed") {
+    return "Upload failed";
+  }
+  return "Queued for local review";
+}
+
+function attachmentProgressValue(attachment) {
+  if (attachment.uploadState === "done" || attachment.uploadState === "failed") {
+    return 1;
+  }
+  return Math.max(0, Math.min(1, attachment.uploadProgress || 0));
 }
 
 function guessAssetKind(mediaType, displayName) {
@@ -2565,6 +2649,133 @@ function renderArtifactCanvasSurface({ approval, payload, title, statusLabel, ed
   `;
 }
 
+function activeWorkspaceAssets(limit = 8) {
+  const assets = [];
+  const seen = new Set();
+  for (const message of [...activeMessages()].reverse()) {
+    for (const asset of [...(message.assets || [])].reverse()) {
+      if (!asset?.id || seen.has(asset.id)) {
+        continue;
+      }
+      seen.add(asset.id);
+      assets.push(asset);
+      if (assets.length >= limit) {
+        return assets;
+      }
+    }
+  }
+  return assets;
+}
+
+function artifactAssetKindLabel(asset) {
+  if (!asset) {
+    return "File";
+  }
+  const mediaType = String(asset.media_type || "").toLowerCase();
+  if (asset.kind === "image") {
+    return asset.care_context === "medical" ? "Medical image" : "Image";
+  }
+  if (asset.kind === "video") {
+    return "Video";
+  }
+  if (mediaType.includes("pdf") || String(asset.display_name || "").toLowerCase().endsWith(".pdf")) {
+    return "PDF";
+  }
+  if (mediaType.includes("markdown") || String(asset.display_name || "").toLowerCase().endsWith(".md")) {
+    return "Markdown";
+  }
+  if (mediaType.includes("text")) {
+    return "Text file";
+  }
+  return "File";
+}
+
+function artifactAssetRouteLabel(asset) {
+  if (asset.kind === "image") {
+    return asset.care_context === "medical" ? "Medical review route" : "Local OCR route";
+  }
+  if (asset.kind === "video") {
+    return "Video sampling route";
+  }
+  return "Local file context";
+}
+
+function artifactFilePreviewMarkup(asset, { hero = false } = {}) {
+  const href = escapeHtml(asset.content_url || "#");
+  const name = escapeHtml(asset.display_name || "Attachment");
+  const mediaType = escapeHtml(asset.media_type || asset.kind || "file");
+  const size = asset.byte_size ? ` • ${escapeHtml(formatBytes(asset.byte_size))}` : "";
+  if (asset.kind === "image" && asset.preview_url) {
+    return `<img class="${hero ? "artifact-file-hero-media" : "artifact-file-thumb"}" src="${escapeHtml(asset.preview_url)}" alt="${name}" />`;
+  }
+  if (asset.kind === "video" && asset.preview_url) {
+    return `<video class="${hero ? "artifact-file-hero-media" : "artifact-file-thumb"}" src="${escapeHtml(asset.preview_url)}" controls playsinline preload="metadata"></video>`;
+  }
+  return `
+    <div class="${hero ? "artifact-file-hero-placeholder" : "artifact-file-thumb-placeholder"}">
+      <span>${escapeHtml(artifactAssetKindLabel(asset).slice(0, 4).toUpperCase())}</span>
+      ${asset.content_url ? `<a href="${href}" target="_blank" rel="noreferrer">Open locally</a>` : ""}
+      <small>${mediaType}${size}</small>
+    </div>
+  `;
+}
+
+function renderArtifactFilesSurface({ assets, approval, title }) {
+  const primary = assets[0];
+  const fileCount = assets.length;
+  if (!primary) {
+    return `
+      <div class="artifact-preview-scroll artifact-files-scroll" data-artifact-mode-panel="files">
+        <section class="artifact-files-empty">
+          <span>Files</span>
+          <h3>No attached files yet</h3>
+          <p>Drop an image, video, PDF, Markdown, or text file into the composer and it will appear here as local workspace context.</p>
+        </section>
+      </div>
+    `;
+  }
+  return `
+    <div class="artifact-preview-scroll artifact-files-scroll" data-artifact-mode-panel="files">
+      <section class="artifact-files-workspace">
+        <header class="artifact-files-header">
+          <div>
+            <span>Workspace files</span>
+            <h3>${escapeHtml(primary.display_name || title || "Attached file")}</h3>
+            <p>${escapeHtml(artifactAssetRouteLabel(primary))} • ${escapeHtml(primary.media_type || primary.kind || "file")}${primary.byte_size ? ` • ${escapeHtml(formatBytes(primary.byte_size))}` : ""}</p>
+          </div>
+          <strong>${fileCount} file${fileCount === 1 ? "" : "s"}</strong>
+        </header>
+        <article class="artifact-file-hero">
+          ${artifactFilePreviewMarkup(primary, { hero: true })}
+          <div class="artifact-file-hero-copy">
+            <span>${escapeHtml(artifactAssetKindLabel(primary))}</span>
+            <h4>${escapeHtml(primary.display_name || "Attachment")}</h4>
+            <p>${escapeHtml(primary.analysis_summary || "Stored locally and ready for grounded review in this conversation.")}</p>
+            ${primary.content_url ? `<a class="artifact-open" href="${escapeHtml(primary.content_url)}" target="_blank" rel="noreferrer">↗ Open</a>` : ""}
+          </div>
+        </article>
+        <div class="artifact-file-rail" aria-label="Attached workspace files">
+          ${assets
+            .map(
+              (asset) => `
+                <article class="artifact-file-row">
+                  ${artifactFilePreviewMarkup(asset)}
+                  <div>
+                    <strong>${escapeHtml(clip(asset.display_name || "Attachment", 42))}</strong>
+                    <span>${escapeHtml(artifactAssetKindLabel(asset))} • ${escapeHtml(artifactAssetRouteLabel(asset))}</span>
+                    ${asset.analysis_summary ? `<p>${escapeHtml(clipCopy(asset.analysis_summary, 150))}</p>` : ""}
+                  </div>
+                </article>
+              `,
+            )
+            .join("")}
+        </div>
+        ${approval ? `<p class="artifact-files-link-note">Canvas and files are linked in this workspace. Use the tabs above to move between the draft and its supporting attachments.</p>` : ""}
+      </section>
+    </div>
+  `;
+}
+
 function isArtifactDrawerLayout() {
   return window.innerWidth <= 1500;
 }
@@ -2582,7 +2793,8 @@ function renderArtifactPanel() {
   }
 
   const approval = latestArtifactApproval();
-  const hasArtifact = Boolean(approval?.id);
+  const workspaceAssets = activeWorkspaceAssets();
+  const hasArtifact = Boolean(approval?.id || workspaceAssets.length);
   elements.appShell.classList.toggle("has-artifact", hasArtifact);
   elements.artifactPanel.hidden = !hasArtifact;
   if (elements.artifactToggle) {
@@ -2600,14 +2812,27 @@ function renderArtifactPanel() {
     return;
   }
 
-  const payload = approvalEffectivePayload(approval);
-  const mode = state.artifactMode === "canvas" ? "canvas" : "summary";
-  const title = String(payload?.title || approvalHeadingText(approval, payload) || "Untitled workspace").trim();
-  const previewContent = approvalPreviewContent(approval, payload);
-  const previewSummary = approvalPayloadExcerpt(approval, payload);
-  const statusLabel = approvalStatusLabel(approval.status || "pending");
-  const kind = artifactFileKind(approval);
-  const edits = documentEditsForApproval(approval.id);
+  const payload = approval ? approvalEffectivePayload(approval) : {};
+  const requestedMode = state.artifactMode;
+  const mode =
+    requestedMode === "files" && workspaceAssets.length
+      ? "files"
+      : requestedMode === "canvas" && approval
+        ? "canvas"
+        : approval
+          ? "summary"
+          : "files";
+  state.artifactMode = mode;
+  const title = String(
+    approval
+      ? payload?.title || approvalHeadingText(approval, payload) || "Untitled workspace"
+      : workspaceAssets[0]?.display_name || "Workspace files",
+  ).trim();
+  const previewContent = approval ? approvalPreviewContent(approval, payload) : "";
+  const previewSummary = approval ? approvalPayloadExcerpt(approval, payload) : "";
+  const statusLabel = approval ? approvalStatusLabel(approval.status || "pending") : "Attached";
+  const kind = approval ? artifactFileKind(approval) : artifactAssetKindLabel(workspaceAssets[0]);
+  const edits = approval ? documentEditsForApproval(approval.id) : [];
   const drawerOpen = isArtifactDrawerLayout() && state.mobileArtifactOpen;
   const zoomLabel = state.artifactZoomActual ? "Zoom to fit" : "Actual size";
   const zoomTitle = state.artifactZoomActual
@@ -2628,28 +2853,52 @@ function renderArtifactPanel() {
       : `<p>This workspace item is ready for review.</p>`;
   const editMarkup = renderArtifactEditLedger(edits);
   const bodyMarkup =
-    mode === "canvas"
-      ? renderArtifactCanvasSurface({ approval, payload, title, statusLabel, editMarkup })
-      : renderArtifactSummarySurface({ approval, payload, title, kind, statusLabel, contentMarkup, editMarkup, previewContent });
+    mode === "files"
+      ? renderArtifactFilesSurface({ assets: workspaceAssets, approval, title })
+      : mode === "canvas"
+        ? renderArtifactCanvasSurface({ approval, payload, title, statusLabel, editMarkup })
+        : renderArtifactSummarySurface({ approval, payload, title, kind, statusLabel, contentMarkup, editMarkup, previewContent });
 
-  elements.artifactPanel.innerHTML = `
-    <header class="artifact-header">
-      <div class="artifact-tabs" aria-label="Artifact navigation">
+  const tabMarkup = [
+    approval
+      ? `
         <button class="artifact-summary-tab artifact-mode-tab${mode === "summary" ? " is-active" : ""}" data-artifact-mode="summary" type="button" aria-pressed="${String(mode === "summary")}">
           <svg class="ui-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M4 7h11M4 12h7M4 17h11M18 9l3 3-3 3"/></svg>
           Summary
         </button>
+      `
+      : "",
+    approval
+      ? `
         <button class="artifact-file-tab artifact-mode-tab${mode === "canvas" ? " is-active" : ""}" data-artifact-mode="canvas" type="button" aria-pressed="${String(mode === "canvas")}">
           <span class="artifact-file-badge">${escapeHtml(kind.slice(0, 3).toUpperCase())}</span>
           Canvas
         </button>
+      `
+      : "",
+    workspaceAssets.length
+      ? `
+        <button class="artifact-file-tab artifact-mode-tab${mode === "files" ? " is-active" : ""}" data-artifact-mode="files" type="button" aria-pressed="${String(mode === "files")}">
+          <span class="artifact-file-badge artifact-file-badge-files">${workspaceAssets.length}</span>
+          Files
+        </button>
+      `
+      : "",
+  ]
+    .filter(Boolean)
+    .join("");
+
+  elements.artifactPanel.innerHTML = `
+    <header class="artifact-header">
+      <div class="artifact-tabs" aria-label="Artifact navigation">
+        ${tabMarkup}
         <span class="artifact-tab-plus" aria-hidden="true">＋</span>
       </div>
       <div class="artifact-toolbar">
         <strong>${escapeHtml(clip(title, 42))}</strong>
-        <span>P1/1</span>
+        <span>${mode === "files" ? `${workspaceAssets.length} file${workspaceAssets.length === 1 ? "" : "s"}` : "P1/1"}</span>
         <button class="artifact-zoom" data-artifact-zoom type="button" aria-pressed="${String(state.artifactZoomActual)}" title="${escapeHtml(zoomTitle)}">${escapeHtml(zoomLabel)}⌄</button>
-        <button class="artifact-open" data-artifact-open="${escapeHtml(approval.id)}" type="button" aria-label="${escapeHtml(`Focus editor for ${title}`)}" title="${escapeHtml(focusTitle)}">↗ Focus</button>
+        ${approval ? `<button class="artifact-open" data-artifact-open="${escapeHtml(approval.id)}" type="button" aria-label="${escapeHtml(`Focus editor for ${title}`)}" title="${escapeHtml(focusTitle)}">↗ Focus</button>` : ""}
         <button class="artifact-close" data-artifact-close type="button" aria-label="Close workspace preview">Close</button>
       </div>
     </header>
@@ -2976,7 +3225,9 @@ function renderAttachmentStrip() {
 
   for (const attachment of state.pendingAttachments) {
     const card = document.createElement("section");
-    card.className = "attachment-draft";
+    const uploadState = attachment.uploadState || "queued";
+    const progress = attachmentProgressValue(attachment);
+    card.className = `attachment-draft is-${uploadState}`;
     const previewMarkup =
       attachment.kind === "image" && attachment.previewUrl
         ? `<img src="${escapeHtml(attachment.previewUrl)}" alt="${escapeHtml(attachment.displayName)}" />`
@@ -2993,9 +3244,9 @@ function renderAttachmentStrip() {
               <option value="medical"${attachment.careContext === "medical" ? " selected" : ""}>Medical image</option>
             </select>
           </label>
-          <span class="attachment-draft-status">${attachment.careContext === "medical" ? "Medical route after send" : "Local OCR after send"}</span>
+          <span class="attachment-draft-status">${escapeHtml(attachmentRouteCopy(attachment))}</span>
         `
-        : `<span class="attachment-draft-status">${attachment.kind === "video" ? "Video sampling after send" : "Local file attached"}</span>`;
+        : `<span class="attachment-draft-status">${escapeHtml(attachmentRouteCopy(attachment))}</span>`;
     card.innerHTML = `
       ${previewMarkup}
       <div class="attachment-draft-header">
@@ -3008,6 +3259,10 @@ function renderAttachmentStrip() {
       <div class="attachment-draft-footer">
         ${footerMarkup}
       </div>
+      <div class="attachment-progress" aria-label="${escapeHtml(attachmentStatusCopy(attachment))}">
+        <span style="width: ${Math.round(progress * 100)}%"></span>
+      </div>
+      <p class="attachment-status-copy">${escapeHtml(attachmentStatusCopy(attachment))}${attachment.uploadError ? ` · ${escapeHtml(attachment.uploadError)}` : ""}</p>
     `;
     elements.attachmentStrip.append(card);
   }
@@ -3589,6 +3844,10 @@ function render(options = {}) {
   const activeConversation = state.conversations.find(
     (conversation) => conversation.id === state.activeConversationId,
   );
+  elements.composer.classList.toggle("is-dragging", state.dragActive);
+  if (elements.composerModelPill) {
+    elements.composerModelPill.textContent = capabilityPillCopy(state.capabilities);
+  }
   elements.conversationTitle.textContent = activeConversation
     ? clip(conversationLabel(activeConversation), 44)
     : "New conversation";
@@ -3843,18 +4102,37 @@ async function uploadAttachment(attachment) {
   formData.append("file", attachment.file, attachment.displayName);
   formData.append("care_context", attachment.careContext);
 
-  const response = await fetch("/v1/assets/upload", {
-    method: "POST",
-    body: formData,
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("POST", "/v1/assets/upload");
+    request.upload.addEventListener("progress", (event) => {
+      if (!event.lengthComputable) {
+        attachment.uploadProgress = Math.max(attachment.uploadProgress || 0, 0.12);
+      } else {
+        attachment.uploadProgress = event.loaded / event.total;
+      }
+      render();
+    });
+    request.addEventListener("load", () => {
+      if (request.status < 200 || request.status >= 300) {
+        reject(new Error(request.responseText || `Attachment upload failed with status ${request.status}`));
+        return;
+      }
+      try {
+        const payload = JSON.parse(request.responseText || "{}");
+        resolve(payload.asset);
+      } catch (error) {
+        reject(new Error("Attachment upload completed, but the response was unreadable."));
+      }
+    });
+    request.addEventListener("error", () => {
+      reject(new Error("Attachment upload failed before reaching the local engine."));
+    });
+    request.addEventListener("abort", () => {
+      reject(new Error("Attachment upload was cancelled."));
+    });
+    request.send(formData);
   });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || `Attachment upload failed with status ${response.status}`);
-  }
-
-  const payload = await response.json();
-  return payload.asset;
 }
 
 async function uploadPendingAttachments() {
@@ -3866,7 +4144,22 @@ async function uploadPendingAttachments() {
   recordProcessEvent("upload", "Uploading attachments", "Saving files locally before analysis.");
   const uploadedAssets = [];
   for (const attachment of state.pendingAttachments) {
-    uploadedAssets.push(await uploadAttachment(attachment));
+    attachment.uploadState = "uploading";
+    attachment.uploadProgress = 0;
+    attachment.uploadError = "";
+    render();
+    try {
+      const uploaded = await uploadAttachment(attachment);
+      attachment.uploadState = "done";
+      attachment.uploadProgress = 1;
+      uploadedAssets.push(uploaded);
+      render();
+    } catch (error) {
+      attachment.uploadState = "failed";
+      attachment.uploadError = error.message || "Unable to upload this file.";
+      render();
+      throw error;
+    }
   }
   return uploadedAssets;
 }
@@ -4500,6 +4793,7 @@ function handleStreamEvent(event) {
       syncRunFromEvent(event.conversation_id, assistantMessage, event.payload);
     }
     state.approvals.set(approvalPayload.id, approvalPayload);
+    state.artifactMode = "summary";
     assistantMessage.approval = approvalPayload;
     assistantMessage.workProduct = null;
     assistantMessage.proposedTool = approvalPayload.tool_name;
@@ -4630,9 +4924,40 @@ function addPendingAttachments(files) {
       kind,
       careContext: "general",
       previewUrl: kind === "image" || kind === "video" ? URL.createObjectURL(file) : null,
+      uploadState: "queued",
+      uploadProgress: 0,
+      uploadError: "",
     });
   }
   render();
+}
+
+function hasFileTransfer(event) {
+  return Array.from(event.dataTransfer?.types || []).includes("Files");
+}
+
+function setAttachmentDragActive(active) {
+  if (state.dragActive === Boolean(active)) {
+    return;
+  }
+  state.dragActive = Boolean(active);
+  render();
+}
+
+function handleAttachmentDrop(event) {
+  if (!hasFileTransfer(event)) {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  setAttachmentDragActive(false);
+  const files = Array.from(event.dataTransfer?.files || []);
+  if (!files.length) {
+    return;
+  }
+  addPendingAttachments(files);
+  resizeComposer();
+  updateStatus("ready", "Attached", `${files.length} file${files.length === 1 ? "" : "s"} queued for local review.`);
 }
 
 async function onSubmit(event) {
@@ -4721,6 +5046,27 @@ function attachEventHandlers() {
   elements.attachmentButton.addEventListener("click", () => {
     elements.fileInput.click();
   });
+  elements.composer.addEventListener("dragenter", (event) => {
+    if (!hasFileTransfer(event)) {
+      return;
+    }
+    event.preventDefault();
+    setAttachmentDragActive(true);
+  });
+  elements.composer.addEventListener("dragover", (event) => {
+    if (!hasFileTransfer(event)) {
+      return;
+    }
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setAttachmentDragActive(true);
+  });
+  elements.composer.addEventListener("dragleave", (event) => {
+    if (!elements.composer.contains(event.relatedTarget)) {
+      setAttachmentDragActive(false);
+    }
+  });
+  elements.composer.addEventListener("drop", handleAttachmentDrop);
   elements.cameraButton.addEventListener("click", () => {
     openCameraPanel().catch((error) => {
       addSystemMessage(error.message || "Unable to open the local camera.");

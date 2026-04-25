@@ -1833,6 +1833,33 @@ a {
   white-space: nowrap;
 }
 
+.attachment-progress {
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.attachment-progress span {
+  display: block;
+  height: 100%;
+  min-width: 8%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(240, 194, 184, 0.48), rgba(109, 207, 144, 0.72));
+  transition: width 160ms ease;
+}
+
+.attachment-draft.is-failed .attachment-progress span {
+  background: rgba(255, 115, 115, 0.72);
+}
+
+.attachment-status-copy {
+  margin: 0;
+  color: rgba(232, 227, 240, 0.48);
+  font-size: 0.74rem;
+  line-height: 1.35;
+}
+
 .attachment-draft select {
   width: 100%;
   margin-top: 6px;
@@ -1860,6 +1887,34 @@ a {
   gap: 10px;
   border-top: 1px solid var(--line);
   background: rgba(8, 10, 15, 0.88);
+}
+
+.composer.is-dragging {
+  background:
+    radial-gradient(circle at 50% 0%, rgba(240, 194, 184, 0.13), transparent 36%),
+    rgba(8, 10, 15, 0.94);
+}
+
+.composer.is-dragging .composer-shell {
+  border-color: rgba(240, 194, 184, 0.28);
+  box-shadow:
+    0 0 0 1px rgba(240, 194, 184, 0.12),
+    0 22px 64px rgba(8, 5, 17, 0.38);
+}
+
+.composer.is-dragging .composer-shell::before {
+  content: "Drop files for local review";
+  position: absolute;
+  inset: 10px;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  border: 1px dashed rgba(240, 194, 184, 0.34);
+  border-radius: 18px;
+  background: rgba(20, 17, 31, 0.86);
+  color: rgba(247, 216, 208, 0.96);
+  font-weight: 750;
+  pointer-events: none;
 }
 
 .attachment-strip {
@@ -2095,6 +2150,7 @@ a {
 }
 
 .composer-shell {
+  position: relative;
   display: grid;
   grid-template-columns: auto 1fr auto;
   align-items: end;
@@ -3210,6 +3266,11 @@ body::before {
   letter-spacing: -0.04em;
 }
 
+.artifact-file-badge-files {
+  background: #6dcf90;
+  color: #172216;
+}
+
 .artifact-tab-plus {
   color: rgba(232, 227, 240, 0.34);
   font-size: 1.2rem;
@@ -3519,6 +3580,224 @@ body::before {
 .artifact-canvas-body ul,
 .artifact-canvas-body ol {
   margin: 0;
+}
+
+.artifact-files-scroll {
+  background:
+    radial-gradient(circle at 18% 0%, rgba(109, 207, 144, 0.06), transparent 28%),
+    radial-gradient(circle at 86% 12%, rgba(240, 194, 184, 0.06), transparent 24%),
+    #211e31;
+}
+
+.artifact-files-workspace,
+.artifact-files-empty {
+  width: min(780px, 100%);
+  margin: 0 auto;
+  display: grid;
+  gap: 18px;
+}
+
+.artifact-files-empty {
+  min-height: 420px;
+  place-content: center;
+  padding: 28px;
+  border: 1px dashed rgba(232, 227, 240, 0.16);
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.artifact-files-empty span,
+.artifact-files-header span,
+.artifact-file-hero-copy span {
+  color: rgba(240, 194, 184, 0.8);
+  font-size: 0.76rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.artifact-files-empty h3,
+.artifact-files-header h3 {
+  margin: 8px 0;
+  color: var(--text);
+  font-size: clamp(1.55rem, 2.6vw, 2.5rem);
+  line-height: 0.98;
+  letter-spacing: -0.075em;
+}
+
+.artifact-files-empty p,
+.artifact-files-header p,
+.artifact-file-hero-copy p,
+.artifact-file-row p,
+.artifact-files-link-note {
+  margin: 0;
+  color: rgba(232, 227, 240, 0.66);
+  line-height: 1.52;
+}
+
+.artifact-files-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.artifact-files-header strong {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 11px;
+  border: 1px solid rgba(232, 227, 240, 0.1);
+  border-radius: 999px;
+  color: rgba(232, 227, 240, 0.72);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.artifact-file-hero {
+  overflow: hidden;
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(250px, 0.75fr);
+  border: 1px solid rgba(232, 227, 240, 0.11);
+  border-radius: 24px;
+  background: rgba(48, 43, 68, 0.8);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.035),
+    0 24px 54px rgba(8, 5, 17, 0.24);
+}
+
+.artifact-file-hero-media {
+  width: 100%;
+  min-height: 360px;
+  height: 100%;
+  object-fit: cover;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.artifact-file-hero-placeholder,
+.artifact-file-thumb-placeholder {
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  background:
+    linear-gradient(135deg, rgba(238, 106, 100, 0.18), rgba(255, 255, 255, 0.03)),
+    rgba(0, 0, 0, 0.18);
+  color: rgba(232, 227, 240, 0.78);
+}
+
+.artifact-file-hero-placeholder {
+  min-height: 360px;
+  padding: 28px;
+}
+
+.artifact-file-hero-placeholder span,
+.artifact-file-thumb-placeholder span {
+  display: inline-grid;
+  place-items: center;
+  min-width: 58px;
+  min-height: 58px;
+  padding: 0 10px;
+  border-radius: 16px;
+  background: rgba(238, 106, 100, 0.82);
+  color: white;
+  font-weight: 850;
+}
+
+.artifact-file-hero-placeholder a,
+.artifact-file-hero-copy a,
+.artifact-file-thumb-placeholder a {
+  color: #f7d8d0;
+  text-decoration: none;
+}
+
+.artifact-file-hero-placeholder small {
+  color: rgba(232, 227, 240, 0.52);
+}
+
+.artifact-file-hero-copy {
+  display: grid;
+  align-content: center;
+  gap: 12px;
+  padding: 28px;
+}
+
+.artifact-file-hero-copy h4 {
+  margin: 0;
+  color: var(--text);
+  font-size: clamp(1.5rem, 2.4vw, 2.35rem);
+  line-height: 1;
+  letter-spacing: -0.07em;
+  overflow-wrap: anywhere;
+}
+
+.artifact-file-hero-copy .artifact-open {
+  width: fit-content;
+  text-decoration: none;
+}
+
+.artifact-file-rail {
+  display: grid;
+  gap: 10px;
+}
+
+.artifact-file-row {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  padding: 10px;
+  border: 1px solid rgba(232, 227, 240, 0.08);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.032);
+}
+
+.artifact-file-thumb,
+.artifact-file-thumb-placeholder {
+  width: 76px;
+  height: 62px;
+  border-radius: 12px;
+  object-fit: cover;
+  overflow: hidden;
+}
+
+.artifact-file-thumb-placeholder span {
+  min-width: 38px;
+  min-height: 34px;
+  border-radius: 10px;
+  font-size: 0.7rem;
+}
+
+.artifact-file-thumb-placeholder small,
+.artifact-file-thumb-placeholder a {
+  display: none;
+}
+
+.artifact-file-row strong,
+.artifact-file-row span {
+  display: block;
+}
+
+.artifact-file-row strong {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.artifact-file-row span {
+  margin-top: 3px;
+  color: rgba(232, 227, 240, 0.52);
+  font-size: 0.78rem;
+}
+
+.artifact-file-row p {
+  margin-top: 5px;
+  font-size: 0.82rem;
+}
+
+.artifact-files-link-note {
+  padding: 12px 14px;
+  border: 1px solid rgba(240, 194, 184, 0.12);
+  border-radius: 16px;
+  background: rgba(240, 194, 184, 0.06);
+  font-size: 0.86rem;
 }
 
 @media (max-width: 1500px) {
@@ -4121,6 +4400,35 @@ body::before {
     min-height: 460px;
     padding: 22px 20px 26px;
     border-radius: 16px;
+  }
+
+  .artifact-files-header {
+    display: grid;
+    align-items: start;
+  }
+
+  .artifact-file-hero {
+    grid-template-columns: 1fr;
+    border-radius: 18px;
+  }
+
+  .artifact-file-hero-media,
+  .artifact-file-hero-placeholder {
+    min-height: 260px;
+  }
+
+  .artifact-file-hero-copy {
+    padding: 20px;
+  }
+
+  .artifact-file-row {
+    grid-template-columns: 64px minmax(0, 1fr);
+  }
+
+  .artifact-file-thumb,
+  .artifact-file-thumb-placeholder {
+    width: 64px;
+    height: 56px;
   }
 }
 

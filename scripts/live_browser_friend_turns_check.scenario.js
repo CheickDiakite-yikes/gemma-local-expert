@@ -101,6 +101,12 @@ async (page) => {
   if (decorativeTopbarButtons !== 0) {
     throw new Error(`Expected decorative topbar controls not to be buttons, found ${decorativeTopbarButtons}`);
   }
+  const artifactPanel = page.locator("[data-artifact-panel]");
+  await assertTextMatches(
+    page.locator("#composer-model-pill"),
+    /Mock local|Mock \+ OCR|Fallback local|Local model/i,
+    "honest runtime capability pill",
+  );
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.locator("#status-button").click();
@@ -157,7 +163,7 @@ async (page) => {
   await page.locator("#file-input").setInputFiles("data/test-assets/field_supply_board.png");
   await assertTextMatches(
     page.locator("#attachment-strip"),
-    /field_supply_board\.png[\s\S]*Local OCR after send/i,
+    /field_supply_board\.png[\s\S]*Local OCR after send[\s\S]*Queued for local review/i,
     "image attachment draft shows local OCR route",
   );
   await page.locator("[data-remove-attachment]").click();
@@ -165,6 +171,23 @@ async (page) => {
     async () => (await page.locator(".attachment-draft").count()) === 0,
     "attachment draft can be removed",
   );
+  await page.locator("#file-input").setInputFiles("data/test-assets/field_supply_board.png");
+  await assertTextMatches(
+    page.locator("#attachment-strip"),
+    /field_supply_board\.png[\s\S]*Queued for local review/i,
+    "image attachment can be re-queued",
+  );
+  await sendTurn("Describe this attached supply board as local workspace context.");
+  await artifactPanel.waitFor({ state: "visible", timeout: 30000 });
+  await assertTextMatches(
+    artifactPanel,
+    /Files[\s\S]*Workspace files[\s\S]*field_supply_board\.png[\s\S]*Local OCR route/i,
+    "artifact pane file workspace for image upload",
+  );
+  await page.screenshot({
+    path: "output/playwright/friend-turns/artifact-files-ui.png",
+    fullPage: false,
+  });
 
   await sendTurn("What does local-first mean in this product, in plain English?");
   let reply = await latestAssistantText();
@@ -198,7 +221,6 @@ async (page) => {
     /Field Assistant Architecture Report/i,
     "report canvas title",
   );
-  const artifactPanel = page.locator("[data-artifact-panel]");
   await artifactPanel.waitFor({ state: "visible", timeout: 30000 });
   await assertTextMatches(
     artifactPanel,
