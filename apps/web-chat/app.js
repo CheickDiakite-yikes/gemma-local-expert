@@ -25,6 +25,7 @@ const state = {
   canvasSelection: null,
   artifactZoomActual: false,
   artifactMode: "summary",
+  artifactSelectedAssetId: null,
   processFeed: [],
   statusDetail: "Ready for the next turn.",
   camera: {
@@ -2818,7 +2819,7 @@ function artifactTextPreviewMarkup(asset, documentPreviewType, previewLabel) {
   `;
 }
 
-function artifactFilePreviewMarkup(asset, { hero = false } = {}) {
+function artifactFilePreviewMarkup(asset, { hero = false, rail = false } = {}) {
   const href = escapeHtml(asset.content_url || "#");
   const name = escapeHtml(asset.display_name || "Attachment");
   const mediaType = escapeHtml(asset.media_type || asset.kind || "file");
@@ -2856,14 +2857,16 @@ function artifactFilePreviewMarkup(asset, { hero = false } = {}) {
   return `
     <div class="${hero ? "artifact-file-hero-placeholder" : "artifact-file-thumb-placeholder"}">
       <span>${escapeHtml(artifactAssetKindLabel(asset).slice(0, 4).toUpperCase())}</span>
-      ${asset.content_url ? `<a href="${href}" target="_blank" rel="noreferrer">Open locally</a>` : ""}
+      ${asset.content_url && !rail ? `<a href="${href}" target="_blank" rel="noreferrer">Open locally</a>` : ""}
       <small>${mediaType}${size}</small>
     </div>
   `;
 }
 
 function renderArtifactFilesSurface({ assets, approval, title }) {
-  const primary = assets[0];
+  const selectedAsset =
+    assets.find((asset) => asset.id && asset.id === state.artifactSelectedAssetId) || assets[0];
+  const primary = selectedAsset;
   const fileCount = assets.length;
   if (!primary) {
     return `
@@ -2900,14 +2903,20 @@ function renderArtifactFilesSurface({ assets, approval, title }) {
           ${assets
             .map(
               (asset) => `
-                <article class="artifact-file-row">
-                  ${artifactFilePreviewMarkup(asset)}
+                <button
+                  class="artifact-file-row${asset.id === primary.id ? " is-active" : ""}"
+                  data-artifact-asset-id="${escapeHtml(asset.id || "")}"
+                  type="button"
+                  aria-pressed="${String(asset.id === primary.id)}"
+                  aria-label="${escapeHtml(`Preview ${asset.display_name || "attachment"}`)}"
+                >
+                  ${artifactFilePreviewMarkup(asset, { rail: true })}
                   <div>
                     <strong>${escapeHtml(clip(asset.display_name || "Attachment", 42))}</strong>
                     <span>${escapeHtml(artifactAssetKindLabel(asset))} • ${escapeHtml(artifactAssetRouteLabel(asset))}</span>
                     ${asset.analysis_summary ? `<p>${escapeHtml(clipCopy(asset.analysis_summary, 150))}</p>` : ""}
                   </div>
-                </article>
+                </button>
               `,
             )
             .join("")}
@@ -2951,7 +2960,14 @@ function renderArtifactPanel() {
     }
     state.artifactMode = "summary";
     state.mobileArtifactOpen = false;
+    state.artifactSelectedAssetId = null;
     return;
+  }
+  if (
+    state.artifactSelectedAssetId &&
+    !workspaceAssets.some((asset) => asset.id === state.artifactSelectedAssetId)
+  ) {
+    state.artifactSelectedAssetId = null;
   }
 
   const payload = approval ? approvalEffectivePayload(approval) : {};
@@ -2965,10 +2981,13 @@ function renderArtifactPanel() {
           ? "summary"
           : "files";
   state.artifactMode = mode;
+  const selectedWorkspaceAsset =
+    workspaceAssets.find((asset) => asset.id && asset.id === state.artifactSelectedAssetId) ||
+    workspaceAssets[0];
   const title = String(
-    approval
+    approval && mode !== "files"
       ? payload?.title || approvalHeadingText(approval, payload) || "Untitled workspace"
-      : workspaceAssets[0]?.display_name || "Workspace files",
+      : selectedWorkspaceAsset?.display_name || "Workspace files",
   ).trim();
   const previewContent = approval ? approvalPreviewContent(approval, payload) : "";
   const previewSummary = approval ? approvalPayloadExcerpt(approval, payload) : "";
@@ -3054,10 +3073,18 @@ function wireArtifactPanelActions(approval) {
   const closeButton = elements.artifactPanel.querySelector("[data-artifact-close]");
   const openButtons = elements.artifactPanel.querySelectorAll("[data-artifact-open]");
   const modeButtons = elements.artifactPanel.querySelectorAll("[data-artifact-mode]");
+  const assetButtons = elements.artifactPanel.querySelectorAll("[data-artifact-asset-id]");
   for (const modeButton of modeButtons) {
     modeButton.addEventListener("click", () => {
       const requestedMode = modeButton.dataset.artifactMode;
       state.artifactMode = ["summary", "canvas", "files"].includes(requestedMode) ? requestedMode : "summary";
+      renderArtifactPanel();
+    });
+  }
+  for (const assetButton of assetButtons) {
+    assetButton.addEventListener("click", () => {
+      state.artifactSelectedAssetId = assetButton.dataset.artifactAssetId || null;
+      state.artifactMode = "files";
       renderArtifactPanel();
     });
   }

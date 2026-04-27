@@ -192,6 +192,38 @@ async (page) => {
     /Village Visit Notes[\s\S]*Confirm translator phone credit[\s\S]*Field constraints/i,
     "artifact pane renders readable markdown preview body",
   );
+  await artifactPanel.getByRole("button", { name: "Preview field_supply_board.png" }).click();
+  await waitForTextMatches(
+    artifactPanel.locator(".artifact-files-header"),
+    /field_supply_board\.png[\s\S]*Local OCR route/i,
+    "artifact file rail switches image into primary preview",
+  );
+  await assertTextMatches(
+    artifactPanel.locator(".artifact-toolbar strong"),
+    /field_supply_board\.png/i,
+    "artifact toolbar tracks image primary selection",
+  );
+  await waitUntil(
+    async () =>
+      /field_supply_board\.png/i.test(await artifactPanel.locator(".artifact-file-row.is-active").innerText()),
+    "image rail item becomes active",
+  );
+  await artifactPanel.getByRole("button", { name: "Preview village_visit_notes.md" }).click();
+  await waitForTextMatches(
+    artifactPanel.locator(".artifact-files-header"),
+    /village_visit_notes\.md[\s\S]*Native Markdown preview/i,
+    "artifact file rail switches markdown back into primary preview",
+  );
+  await assertTextMatches(
+    artifactPanel.locator(".artifact-toolbar strong"),
+    /village_visit_notes\.md/i,
+    "artifact toolbar tracks markdown primary selection",
+  );
+  await waitForTextMatches(
+    artifactPanel,
+    /Village Visit Notes[\s\S]*Confirm translator phone credit[\s\S]*Field constraints/i,
+    "markdown preview body remains readable after switching back",
+  );
   await page.screenshot({
     path: "output/playwright/friend-turns/artifact-files-ui.png",
     fullPage: false,
