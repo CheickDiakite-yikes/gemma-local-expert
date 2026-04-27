@@ -2864,8 +2864,11 @@ function artifactFilePreviewMarkup(asset, { hero = false, rail = false } = {}) {
 }
 
 function renderArtifactFilesSurface({ assets, approval, title }) {
-  const selectedAsset =
-    assets.find((asset) => asset.id && asset.id === state.artifactSelectedAssetId) || assets[0];
+  const selectedIndex = Math.max(
+    0,
+    assets.findIndex((asset) => asset.id && asset.id === state.artifactSelectedAssetId),
+  );
+  const selectedAsset = assets[selectedIndex] || assets[0];
   const primary = selectedAsset;
   const fileCount = assets.length;
   if (!primary) {
@@ -2888,7 +2891,19 @@ function renderArtifactFilesSurface({ assets, approval, title }) {
             <h3>${escapeHtml(primary.display_name || title || "Attached file")}</h3>
             <p>${escapeHtml(artifactAssetRouteLabel(primary))} • ${escapeHtml(primary.media_type || primary.kind || "file")}${primary.byte_size ? ` • ${escapeHtml(formatBytes(primary.byte_size))}` : ""}</p>
           </div>
-          <strong>${fileCount} file${fileCount === 1 ? "" : "s"}</strong>
+          <div class="artifact-files-header-actions">
+            <strong>${selectedIndex + 1}/${fileCount}</strong>
+            ${
+              fileCount > 1
+                ? `
+                  <div class="artifact-files-nav" aria-label="File preview navigation">
+                    <button data-artifact-file-step="-1" type="button" aria-label="Previous file">← Prev</button>
+                    <button data-artifact-file-step="1" type="button" aria-label="Next file">Next →</button>
+                  </div>
+                `
+                : ""
+            }
+          </div>
         </header>
         <article class="artifact-file-hero">
           ${artifactFilePreviewMarkup(primary, { hero: true })}
@@ -3074,6 +3089,7 @@ function wireArtifactPanelActions(approval) {
   const openButtons = elements.artifactPanel.querySelectorAll("[data-artifact-open]");
   const modeButtons = elements.artifactPanel.querySelectorAll("[data-artifact-mode]");
   const assetButtons = elements.artifactPanel.querySelectorAll("[data-artifact-asset-id]");
+  const fileStepButtons = elements.artifactPanel.querySelectorAll("[data-artifact-file-step]");
   for (const modeButton of modeButtons) {
     modeButton.addEventListener("click", () => {
       const requestedMode = modeButton.dataset.artifactMode;
@@ -3084,6 +3100,23 @@ function wireArtifactPanelActions(approval) {
   for (const assetButton of assetButtons) {
     assetButton.addEventListener("click", () => {
       state.artifactSelectedAssetId = assetButton.dataset.artifactAssetId || null;
+      state.artifactMode = "files";
+      renderArtifactPanel();
+    });
+  }
+  for (const stepButton of fileStepButtons) {
+    stepButton.addEventListener("click", () => {
+      const assets = activeWorkspaceAssets();
+      if (assets.length < 2) {
+        return;
+      }
+      const currentIndex = Math.max(
+        0,
+        assets.findIndex((asset) => asset.id && asset.id === state.artifactSelectedAssetId),
+      );
+      const step = Number(stepButton.dataset.artifactFileStep || 0);
+      const nextIndex = (currentIndex + step + assets.length) % assets.length;
+      state.artifactSelectedAssetId = assets[nextIndex]?.id || null;
       state.artifactMode = "files";
       renderArtifactPanel();
     });

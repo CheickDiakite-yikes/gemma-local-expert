@@ -192,6 +192,28 @@ async (page) => {
     /Village Visit Notes[\s\S]*Confirm translator phone credit[\s\S]*Field constraints/i,
     "artifact pane renders readable markdown preview body",
   );
+  await artifactPanel.getByRole("button", { name: "Next file" }).click();
+  await waitForTextMatches(
+    artifactPanel.locator(".artifact-files-header"),
+    /field_supply_board\.png[\s\S]*Local OCR route/i,
+    "artifact next control switches image into primary preview",
+  );
+  await assertTextMatches(
+    artifactPanel.locator(".artifact-toolbar strong"),
+    /field_supply_board\.png/i,
+    "artifact toolbar tracks next-control selection",
+  );
+  await artifactPanel.getByRole("button", { name: "Previous file" }).click();
+  await waitForTextMatches(
+    artifactPanel.locator(".artifact-files-header"),
+    /village_visit_notes\.md[\s\S]*Native Markdown preview/i,
+    "artifact previous control switches markdown into primary preview",
+  );
+  await waitForTextMatches(
+    artifactPanel,
+    /Village Visit Notes[\s\S]*Confirm translator phone credit[\s\S]*Field constraints/i,
+    "markdown preview body remains readable after previous control",
+  );
   await artifactPanel.getByRole("button", { name: "Preview field_supply_board.png" }).click();
   await waitForTextMatches(
     artifactPanel.locator(".artifact-files-header"),
