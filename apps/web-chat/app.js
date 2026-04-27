@@ -19,6 +19,7 @@ const state = {
   approvalPanels: new Map(),
   messagePanels: new Map(),
   runPanels: new Map(),
+  assetTextPreviews: new Map(),
   capabilities: null,
   medicalSessions: new Map(),
   canvasSelection: null,
@@ -1590,14 +1591,22 @@ function formatBytes(byteSize) {
 }
 
 function attachmentRouteCopy(attachment) {
+  const loweredName = String(attachment.displayName || "").toLowerCase();
+  const mediaType = String(attachment.mediaType || "").toLowerCase();
   if (attachment.kind === "image") {
     return attachment.careContext === "medical" ? "Medical route after send" : "Local OCR after send";
   }
   if (attachment.kind === "video") {
     return "Video sampling after send";
   }
-  if (String(attachment.displayName || "").toLowerCase().endsWith(".pdf")) {
-    return "PDF context after send";
+  if (mediaType.includes("pdf") || loweredName.endsWith(".pdf")) {
+    return "PDF preview after send";
+  }
+  if (mediaType.includes("markdown") || loweredName.endsWith(".md")) {
+    return "Markdown preview after send";
+  }
+  if (mediaType.startsWith("text/") || loweredName.endsWith(".txt")) {
+    return "Text preview after send";
   }
   return "Local file attached";
 }
@@ -2691,13 +2700,122 @@ function artifactAssetKindLabel(asset) {
 }
 
 function artifactAssetRouteLabel(asset) {
+  const mediaType = String(asset.media_type || "").toLowerCase();
+  const displayName = String(asset.display_name || "").toLowerCase();
   if (asset.kind === "image") {
     return asset.care_context === "medical" ? "Medical review route" : "Local OCR route";
   }
   if (asset.kind === "video") {
     return "Video sampling route";
   }
+  if (mediaType.includes("pdf") || displayName.endsWith(".pdf")) {
+    return "Native PDF preview";
+  }
+  if (mediaType.includes("markdown") || displayName.endsWith(".md")) {
+    return "Native Markdown preview";
+  }
+  if (mediaType.startsWith("text/") || displayName.endsWith(".txt")) {
+    return "Native text preview";
+  }
   return "Local file context";
+}
+
+function artifactDocumentPreviewType(asset) {
+  const mediaType = String(asset?.media_type || "").toLowerCase();
+  const displayName = String(asset?.display_name || "").toLowerCase();
+  if (mediaType.includes("pdf") || displayName.endsWith(".pdf")) {
+    return "pdf";
+  }
+  if (mediaType.includes("markdown") || displayName.endsWith(".md")) {
+    return "markdown";
+  }
+  if (mediaType.startsWith("text/") || displayName.endsWith(".txt")) {
+    return "text";
+  }
+  return "";
+}
+
+function assetPreviewCacheKey(asset) {
+  return asset?.id || asset?.content_url || asset?.display_name || "";
+}
+
+function scheduleArtifactTextPreview(asset, documentPreviewType) {
+  if (!asset?.content_url || !["markdown", "text"].includes(documentPreviewType)) {
+    return;
+  }
+  const cacheKey = assetPreviewCacheKey(asset);
+  if (!cacheKey) {
+    return;
+  }
+  const cached = state.assetTextPreviews.get(cacheKey);
+  if (cached?.status === "loading" || cached?.status === "ready") {
+    return;
+  }
+  state.assetTextPreviews.set(cacheKey, { status: "loading", text: "" });
+  fetch(asset.content_url, { headers: { Accept: "text/plain,*/*" } })
+    .then((response) => {
+      if (!response.ok) {
+        throw new Error(`Preview request failed with ${response.status}`);
+      }
+      return response.text();
+    })
+    .then((text) => {
+      const previewLimit = 12000;
+      state.assetTextPreviews.set(cacheKey, {
+        status: "ready",
+        text: text.slice(0, previewLimit),
+        truncated: text.length > previewLimit,
+      });
+      renderArtifactPanel();
+    })
+    .catch(() => {
+      state.assetTextPreviews.set(cacheKey, { status: "error", text: "" });
+      renderArtifactPanel();
+    });
+}
+
+function artifactTextPreviewMarkup(asset, documentPreviewType, previewLabel) {
+  const cacheKey = assetPreviewCacheKey(asset);
+  const cached = cacheKey ? state.assetTextPreviews.get(cacheKey) : null;
+  scheduleArtifactTextPreview(asset, documentPreviewType);
+
+  if (cached?.status === "ready") {
+    const text = String(cached.text || "").trim();
+    const bodyMarkup = text
+      ? documentPreviewType === "markdown"
+        ? renderMarkdownBlocks(text)
+        : `<pre class="artifact-document-text-pre">${escapeHtml(text)}</pre>`
+      : `<p>No readable text was found in this file.</p>`;
+    return `
+      <div class="artifact-document-preview is-${escapeHtml(documentPreviewType)} is-inline">
+        <article class="artifact-document-paper">
+          <div class="artifact-document-paper-topline">
+            <span>${escapeHtml(artifactAssetKindLabel(asset))}</span>
+            <span>${escapeHtml(formatBytes(asset.byte_size))}</span>
+          </div>
+          <section class="artifact-document-body rich-text">
+            ${bodyMarkup}
+            ${cached.truncated ? `<p class="artifact-document-truncated">Preview truncated for speed. Open the file for the full document.</p>` : ""}
+          </section>
+        </article>
+        <div class="artifact-document-preview-label">${escapeHtml(previewLabel)}</div>
+      </div>
+    `;
+  }
+
+  const statusCopy =
+    cached?.status === "error"
+      ? "Preview unavailable. Open the file to inspect it locally."
+      : "Loading local text preview...";
+  return `
+    <div class="artifact-document-preview is-${escapeHtml(documentPreviewType)} is-inline is-loading">
+      <article class="artifact-document-paper">
+        <span class="artifact-document-loader" aria-hidden="true"></span>
+        <p>${escapeHtml(statusCopy)}</p>
+      </article>
+      <div class="artifact-document-preview-label">${escapeHtml(previewLabel)}</div>
+    </div>
+  `;
 }
 
 function artifactFilePreviewMarkup(asset, { hero = false } = {}) {
@@ -2710,6 +2828,30 @@ function artifactFilePreviewMarkup(asset, { hero = false } = {}) {
   }
   if (asset.kind === "video" && asset.preview_url) {
     return `<video class="${hero ? "artifact-file-hero-media" : "artifact-file-thumb"}" src="${escapeHtml(asset.preview_url)}" controls playsinline preload="metadata"></video>`;
+  }
+  const documentPreviewType = artifactDocumentPreviewType(asset);
+  if (hero && documentPreviewType && asset.content_url) {
+    const previewLabel =
+      documentPreviewType === "pdf"
+        ? "Native PDF preview"
+        : documentPreviewType === "markdown"
+          ? "Native Markdown preview"
+          : "Native text preview";
+    if (["markdown", "text"].includes(documentPreviewType)) {
+      return artifactTextPreviewMarkup(asset, documentPreviewType, previewLabel);
+    }
+    return `
+      <div class="artifact-document-preview is-${escapeHtml(documentPreviewType)}">
+        <iframe
+          class="artifact-file-document-frame"
+          src="${href}"
+          title="${name} preview"
+          loading="lazy"
+          ${documentPreviewType === "pdf" ? "" : "sandbox"}
+        ></iframe>
+        <div class="artifact-document-preview-label">${escapeHtml(previewLabel)}</div>
+      </div>
+    `;
   }
   return `
     <div class="${hero ? "artifact-file-hero-placeholder" : "artifact-file-thumb-placeholder"}">
@@ -2914,7 +3056,8 @@ function wireArtifactPanelActions(approval) {
   const modeButtons = elements.artifactPanel.querySelectorAll("[data-artifact-mode]");
   for (const modeButton of modeButtons) {
     modeButton.addEventListener("click", () => {
-      state.artifactMode = modeButton.dataset.artifactMode === "canvas" ? "canvas" : "summary";
+      const requestedMode = modeButton.dataset.artifactMode;
+      state.artifactMode = ["summary", "canvas", "files"].includes(requestedMode) ? requestedMode : "summary";
       renderArtifactPanel();
     });
   }

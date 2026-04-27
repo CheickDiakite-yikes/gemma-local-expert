@@ -171,18 +171,26 @@ async (page) => {
     async () => (await page.locator(".attachment-draft").count()) === 0,
     "attachment draft can be removed",
   );
-  await page.locator("#file-input").setInputFiles("data/test-assets/field_supply_board.png");
+  await page.locator("#file-input").setInputFiles([
+    "data/test-assets/field_supply_board.png",
+    "data/test-assets/village_visit_notes.md",
+  ]);
   await assertTextMatches(
     page.locator("#attachment-strip"),
-    /field_supply_board\.png[\s\S]*Queued for local review/i,
-    "image attachment can be re-queued",
+    /field_supply_board\.png[\s\S]*Queued for local review[\s\S]*village_visit_notes\.md[\s\S]*Markdown preview after send/i,
+    "mixed attachments can be queued",
   );
-  await sendTurn("Describe this attached supply board as local workspace context.");
+  await sendTurn("Describe these attached supply board and field notes as local workspace context.");
   await artifactPanel.waitFor({ state: "visible", timeout: 30000 });
   await assertTextMatches(
     artifactPanel,
-    /Files[\s\S]*Workspace files[\s\S]*field_supply_board\.png[\s\S]*Local OCR route/i,
-    "artifact pane file workspace for image upload",
+    /Files[\s\S]*Workspace files[\s\S]*village_visit_notes\.md[\s\S]*Native Markdown preview[\s\S]*field_supply_board\.png[\s\S]*Local OCR route/i,
+    "artifact pane file workspace for mixed uploads",
+  );
+  await waitForTextMatches(
+    artifactPanel,
+    /Village Visit Notes[\s\S]*Confirm translator phone credit[\s\S]*Field constraints/i,
+    "artifact pane renders readable markdown preview body",
   );
   await page.screenshot({
     path: "output/playwright/friend-turns/artifact-files-ui.png",
@@ -236,6 +244,12 @@ async (page) => {
     artifactPanel.locator("[data-artifact-open]"),
     /Focus/i,
     "artifact focus action is honestly labeled",
+  );
+  await artifactPanel.locator('[data-artifact-mode="files"]').click();
+  await assertTextMatches(
+    artifactPanel,
+    /Workspace files[\s\S]*Village Visit Notes[\s\S]*field_supply_board\.png/i,
+    "artifact files tab remains reachable after canvas appears",
   );
   await artifactPanel.locator('[data-artifact-mode="canvas"]').click();
   await assertTextMatches(
