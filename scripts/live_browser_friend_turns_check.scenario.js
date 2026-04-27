@@ -116,6 +116,27 @@ async (page) => {
       (await page.locator("#status-button").getAttribute("aria-expanded")) === "true",
     "mobile status menu opens with expanded state",
   );
+  const statusMenuBounds = await page.locator("#status-menu").evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return {
+      bottom: rect.bottom,
+      left: rect.left,
+      right: rect.right,
+      top: rect.top,
+      viewportHeight: window.innerHeight,
+      viewportWidth: window.innerWidth,
+    };
+  });
+  if (
+    statusMenuBounds.left < 0 ||
+    statusMenuBounds.right > statusMenuBounds.viewportWidth ||
+    statusMenuBounds.top < 0 ||
+    statusMenuBounds.bottom > statusMenuBounds.viewportHeight
+  ) {
+    throw new Error(
+      `Expected mobile status menu to stay inside viewport, got ${JSON.stringify(statusMenuBounds)}`,
+    );
+  }
   await page.keyboard.press("Escape");
   await waitUntil(
     async () =>
