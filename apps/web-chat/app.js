@@ -4,7 +4,9 @@ const state = {
   currentMode: "general",
   streaming: false,
   mobileSidebarOpen: false,
+  sidebarCollapsed: false,
   mobileArtifactOpen: false,
+  artifactPanelCollapsed: false,
   dragActive: false,
   statusMenuOpen: false,
   draftMessages: [],
@@ -2946,6 +2948,10 @@ function isArtifactDrawerLayout() {
   return window.innerWidth <= 1500;
 }
 
+function isSidebarDrawerLayout() {
+  return window.innerWidth <= 1080;
+}
+
 function setMobileArtifactOpen(open, { renderPanel = true } = {}) {
   state.mobileArtifactOpen = Boolean(open);
   if (renderPanel) {
@@ -2961,8 +2967,14 @@ function renderArtifactPanel() {
   const approval = latestArtifactApproval();
   const workspaceAssets = activeWorkspaceAssets();
   const hasArtifact = Boolean(approval?.id || workspaceAssets.length);
-  elements.appShell.classList.toggle("has-artifact", hasArtifact);
-  elements.artifactPanel.hidden = !hasArtifact;
+  const drawerLayout = isArtifactDrawerLayout();
+  if (drawerLayout && state.artifactPanelCollapsed) {
+    state.artifactPanelCollapsed = false;
+  }
+  const panelVisible = hasArtifact && (!state.artifactPanelCollapsed || drawerLayout);
+  elements.appShell.classList.toggle("has-artifact", panelVisible);
+  elements.appShell.classList.toggle("has-artifact-available", hasArtifact);
+  elements.artifactPanel.hidden = !panelVisible;
   if (elements.artifactToggle) {
     elements.artifactToggle.hidden = !hasArtifact;
   }
@@ -3009,7 +3021,7 @@ function renderArtifactPanel() {
   const statusLabel = approval ? approvalStatusLabel(approval.status || "pending") : "Attached";
   const kind = approval ? artifactFileKind(approval) : artifactAssetKindLabel(workspaceAssets[0]);
   const edits = approval ? documentEditsForApproval(approval.id) : [];
-  const drawerOpen = isArtifactDrawerLayout() && state.mobileArtifactOpen;
+  const drawerOpen = drawerLayout && state.mobileArtifactOpen;
   const zoomLabel = state.artifactZoomActual ? "Zoom to fit" : "Actual size";
   const zoomTitle = state.artifactZoomActual
     ? "Fit the preview back inside the artifact pane"
@@ -3019,8 +3031,9 @@ function renderArtifactPanel() {
   elements.artifactPanel.classList.toggle("is-canvas-mode", mode === "canvas");
   elements.artifactPanel.classList.toggle("is-mobile-open", drawerOpen);
   if (elements.artifactToggle) {
-    elements.artifactToggle.classList.toggle("is-active", drawerOpen);
-    elements.artifactToggle.setAttribute("aria-expanded", String(drawerOpen));
+    const expanded = drawerLayout ? drawerOpen : panelVisible;
+    elements.artifactToggle.classList.toggle("is-active", expanded);
+    elements.artifactToggle.setAttribute("aria-expanded", String(expanded));
   }
   const contentMarkup = previewContent
     ? renderMarkdownBlocks(previewContent)
@@ -3131,7 +3144,12 @@ function wireArtifactPanelActions(approval) {
     closeButton.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      setMobileArtifactOpen(false);
+      if (isArtifactDrawerLayout()) {
+        setMobileArtifactOpen(false);
+      } else {
+        state.artifactPanelCollapsed = true;
+        renderArtifactPanel();
+      }
     });
   }
   for (const openButton of openButtons) {
@@ -4996,6 +5014,7 @@ function handleStreamEvent(event) {
       syncRunFromEvent(event.conversation_id, assistantMessage, event.payload);
     }
     state.approvals.set(approvalPayload.id, approvalPayload);
+    state.artifactPanelCollapsed = false;
     state.artifactMode = "summary";
     assistantMessage.approval = approvalPayload;
     assistantMessage.workProduct = null;
@@ -5058,17 +5077,36 @@ function closeSidebar() {
   state.mobileSidebarOpen = false;
   elements.sidebar.classList.remove("is-open");
   elements.backdrop.classList.remove("is-open");
-  elements.sidebarToggle.setAttribute("aria-expanded", "false");
+  applySidebarState();
 }
 
 function openSidebar() {
   state.mobileSidebarOpen = true;
   elements.sidebar.classList.add("is-open");
   elements.backdrop.classList.add("is-open");
-  elements.sidebarToggle.setAttribute("aria-expanded", "true");
+  applySidebarState();
+}
+
+function applySidebarState() {
+  const drawerLayout = isSidebarDrawerLayout();
+  elements.appShell.classList.toggle("is-sidebar-collapsed", !drawerLayout && state.sidebarCollapsed);
+  if (drawerLayout) {
+    elements.sidebar.classList.toggle("is-open", state.mobileSidebarOpen);
+    elements.backdrop.classList.toggle("is-open", state.mobileSidebarOpen);
+  } else {
+    elements.sidebar.classList.remove("is-open");
+    elements.backdrop.classList.remove("is-open");
+  }
+  const expanded = drawerLayout ? state.mobileSidebarOpen : !state.sidebarCollapsed;
+  elements.sidebarToggle.setAttribute("aria-expanded", String(expanded));
 }
 
 function toggleSidebar() {
+  if (!isSidebarDrawerLayout()) {
+    state.sidebarCollapsed = !state.sidebarCollapsed;
+    applySidebarState();
+    return;
+  }
   if (state.mobileSidebarOpen) {
     closeSidebar();
   } else {
@@ -5108,6 +5146,8 @@ function updateResponsiveChrome() {
   elements.promptInput.placeholder = window.innerWidth <= 640 ? "Ask locally" : "Ask the local assistant";
   if (window.innerWidth > 1080 && state.mobileSidebarOpen) {
     closeSidebar();
+  } else {
+    applySidebarState();
   }
   if (!isArtifactDrawerLayout() && state.mobileArtifactOpen) {
     setMobileArtifactOpen(false);
@@ -5200,6 +5240,7 @@ function attachEventHandlers() {
     state.draftMessages = [];
     state.processFeed = [];
     state.canvasSelection = null;
+    state.artifactPanelCollapsed = false;
     clearPendingAttachments();
     closeCameraPanel();
     updateStatus("ready", "Ready", "Ready for a new conversation.");
@@ -5222,7 +5263,12 @@ function attachEventHandlers() {
   elements.backdrop.addEventListener("click", closeSidebar);
   if (elements.artifactToggle) {
     elements.artifactToggle.addEventListener("click", () => {
-      setMobileArtifactOpen(!state.mobileArtifactOpen);
+      if (isArtifactDrawerLayout()) {
+        setMobileArtifactOpen(!state.mobileArtifactOpen);
+        return;
+      }
+      state.artifactPanelCollapsed = !state.artifactPanelCollapsed;
+      renderArtifactPanel();
     });
   }
   elements.statusButton.addEventListener("click", (event) => {

@@ -97,10 +97,20 @@ async (page) => {
   await page.goto(`${baseUrl}/chat/`, { waitUntil: "domcontentloaded" });
   await page.setViewportSize({ width: 2048, height: 1208 });
   await page.locator("#composer-input").waitFor({ state: "visible", timeout: 30000 });
-  const decorativeTopbarButtons = await page.locator(".topbar-actions button").count();
-  if (decorativeTopbarButtons !== 0) {
-    throw new Error(`Expected decorative topbar controls not to be buttons, found ${decorativeTopbarButtons}`);
+  const decorativeChromeCount = await page.locator(".desktop-chrome, .topbar-actions, .project-tools").count();
+  if (decorativeChromeCount !== 0) {
+    throw new Error(`Expected no decorative chrome controls, found ${decorativeChromeCount}`);
   }
+  await page.locator("#sidebar-toggle").click();
+  await waitUntil(
+    async () => /is-sidebar-collapsed/.test(await page.locator(".app-shell").getAttribute("class")),
+    "desktop sidebar collapses",
+  );
+  await page.locator("#sidebar-toggle").click();
+  await waitUntil(
+    async () => !/is-sidebar-collapsed/.test(await page.locator(".app-shell").getAttribute("class")),
+    "desktop sidebar expands",
+  );
   const artifactPanel = page.locator("[data-artifact-panel]");
   await assertTextMatches(
     page.locator("#composer-model-pill"),
@@ -109,6 +119,38 @@ async (page) => {
   );
 
   await page.setViewportSize({ width: 390, height: 844 });
+  await waitUntil(
+    async () =>
+      !/is-open/.test(await page.locator("#sidebar").getAttribute("class")) &&
+      (await page.locator("#sidebar-toggle").getAttribute("aria-expanded")) === "false",
+    "mobile viewport starts with sidebar closed",
+  );
+  await waitUntil(
+    async () =>
+      await page.locator("#sidebar").evaluate((element) => element.getBoundingClientRect().right <= 1),
+    "mobile sidebar is visually offscreen",
+  );
+  await page.locator("#empty-state").waitFor({ state: "visible", timeout: 30000 });
+  await assertTextMatches(
+    page.locator("#empty-state"),
+    /Ask, review, or act locally\./i,
+    "mobile empty state headline",
+  );
+  const emptyStateOverflow = await page.evaluate(() => ({
+    documentWidth: document.documentElement.scrollWidth,
+    promptWidth: document.querySelector(".empty-state-prompts")?.scrollWidth || 0,
+    viewportWidth: window.innerWidth,
+  }));
+  if (
+    emptyStateOverflow.documentWidth > emptyStateOverflow.viewportWidth + 1 ||
+    emptyStateOverflow.promptWidth > emptyStateOverflow.viewportWidth + 1
+  ) {
+    throw new Error(`Expected mobile empty state not to overflow, got ${JSON.stringify(emptyStateOverflow)}`);
+  }
+  await page.screenshot({
+    path: "output/playwright/friend-turns/empty-mobile-ui.png",
+    fullPage: false,
+  });
   await page.locator("#status-button").click();
   await waitUntil(
     async () =>
@@ -309,6 +351,20 @@ async (page) => {
     artifactPanel,
     /Field Assistant Architecture Report[\s\S]*Local workspace preview/i,
     "right artifact workspace preview",
+  );
+  await page.locator("#artifact-toggle").click();
+  await waitUntil(
+    async () =>
+      (await artifactPanel.isHidden()) &&
+      (await page.locator("#artifact-toggle").getAttribute("aria-expanded")) === "false",
+    "desktop artifact preview collapses",
+  );
+  await page.locator("#artifact-toggle").click();
+  await waitUntil(
+    async () =>
+      (await artifactPanel.isVisible()) &&
+      (await page.locator("#artifact-toggle").getAttribute("aria-expanded")) === "true",
+    "desktop artifact preview expands",
   );
   await assertTextMatches(
     artifactPanel.locator("[data-artifact-zoom]"),

@@ -643,7 +643,9 @@ a {
 }
 
 .empty-state-frame {
-  width: min(680px, 100%);
+  width: min(680px, calc(100vw - 20px));
+  max-width: 100%;
+  box-sizing: border-box;
   padding: 20px 18px;
   background: transparent;
   border-radius: 0;
@@ -651,6 +653,7 @@ a {
   box-shadow: none;
   display: grid;
   gap: 12px;
+  overflow: hidden;
 }
 
 .empty-state.is-hidden {
@@ -673,22 +676,31 @@ a {
 }
 
 .empty-state-prompts {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(9.5rem, 100%), 1fr));
   justify-content: center;
   gap: 8px;
+  width: 100%;
+  max-width: 100%;
 }
 
 .empty-state-prompts span {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  min-width: 0;
   min-height: 34px;
+  width: 100%;
+  box-sizing: border-box;
   padding: 0 12px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.028);
   border: 1px solid rgba(255, 255, 255, 0.06);
   color: var(--text-muted);
   font-size: 0.78rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .conversation-messages {
@@ -4670,6 +4682,37 @@ body::before {
     padding: 0 24px;
   }
 
+  .artifact-type-card {
+    gap: 12px;
+    padding: 16px;
+  }
+
+  .artifact-type-card header strong,
+  .artifact-page-hero h3 {
+    max-width: 100%;
+    font-size: clamp(1.08rem, 7vw, 1.42rem);
+    line-height: 1.03;
+    letter-spacing: -0.055em;
+    overflow-wrap: anywhere;
+  }
+
+  .artifact-type-card li,
+  .artifact-checklist-preview li,
+  .artifact-page-body li {
+    min-width: 0;
+    font-size: 0.88rem;
+    line-height: 1.42;
+    overflow-wrap: anywhere;
+  }
+
+  .artifact-checklist-preview {
+    gap: 8px;
+  }
+
+  .artifact-page-hero {
+    gap: 14px;
+  }
+
   .artifact-canvas-workspace-header {
     display: grid;
     align-items: start;
@@ -5195,5 +5238,156 @@ body::before {
   .artifact-message-envelope,
   .artifact-task-board {
     padding: 13px;
+  }
+}
+
+/* Product chrome cleanup: every visible control should do real work. */
+.artifact-toggle:not([hidden]) {
+  display: inline-grid;
+}
+
+#sidebar-toggle {
+  display: inline-grid;
+  place-items: center;
+}
+
+@media (min-width: 1081px) {
+  #sidebar-toggle {
+    display: inline-grid;
+  }
+
+  .app-shell.is-sidebar-collapsed {
+    grid-template-columns: 0 minmax(0, 1fr);
+  }
+
+  .app-shell.is-sidebar-collapsed.has-artifact {
+    grid-template-columns: 0 minmax(560px, 1fr) minmax(520px, 41vw);
+  }
+
+  .app-shell.is-sidebar-collapsed .sidebar {
+    width: 0;
+    min-width: 0;
+    padding-inline: 0;
+    border-right: 0;
+    overflow: hidden;
+    pointer-events: none;
+  }
+
+  .app-shell.is-sidebar-collapsed .chat-header {
+    border-left: 1px solid rgba(232, 227, 240, 0.07);
+  }
+}
+
+@media (max-width: 1080px) {
+  .empty-state {
+    width: 100%;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .empty-state-frame {
+    box-sizing: border-box;
+    width: min(100%, calc(100vw - 20px));
+    max-width: calc(100vw - 20px);
+    overflow: hidden;
+  }
+
+  .empty-state h3 {
+    max-width: min(15ch, 100%);
+    font-size: clamp(1.62rem, 8.4vw, 2.2rem);
+    line-height: 1;
+    overflow-wrap: anywhere;
+  }
+
+  .empty-state-frame > p:not(.eyebrow) {
+    max-width: 28ch;
+  }
+
+  .empty-state-prompts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(9.5rem, 100%), 1fr));
+    width: 100%;
+    max-width: min(100%, calc(100vw - 20px));
+    flex-wrap: initial;
+    overflow-x: hidden;
+    gap: 8px;
+  }
+
+  .empty-state-prompts span {
+    justify-content: center;
+    min-width: 0;
+    width: 100%;
+    box-sizing: border-box;
+    padding-inline: 10px;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+@media (max-width: 640px) {
+  .artifact-toggle:not([hidden]) {
+    display: inline-grid;
+  }
+
+  .header-actions {
+    gap: 7px;
+  }
+
+  .empty-state {
+    min-height: calc(100dvh - 230px);
+    width: 100%;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .empty-state-frame {
+    box-sizing: border-box;
+    width: min(100%, calc(100vw - 20px));
+    max-width: calc(100vw - 20px);
+    padding: 0;
+    overflow: hidden;
+  }
+
+  .empty-state h3 {
+    max-width: min(15ch, 100%);
+    font-size: clamp(1.62rem, 8.4vw, 2.08rem);
+    line-height: 1;
+    overflow-wrap: anywhere;
+  }
+
+  .empty-state-frame > p:not(.eyebrow) {
+    max-width: 26ch;
+    font-size: 0.9rem;
+    line-height: 1.4;
+  }
+
+  .empty-state-prompts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(9.5rem, 100%), 1fr));
+    width: 100%;
+    max-width: min(100%, calc(100vw - 20px));
+    flex-wrap: initial;
+    overflow-x: hidden;
+    gap: 8px;
+    padding-bottom: 2px;
+    scrollbar-width: none;
+  }
+
+  .empty-state-prompts span {
+    justify-content: center;
+    min-width: 0;
+    width: 100%;
+    box-sizing: border-box;
+    padding-inline: 10px;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .empty-state-prompts::-webkit-scrollbar {
+    display: none;
   }
 }
