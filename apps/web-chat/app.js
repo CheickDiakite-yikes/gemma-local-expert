@@ -2401,7 +2401,7 @@ function renderApprovalCanvas(approval) {
           data-approval-field="content"
           aria-label="${escapeHtml(approvalCanvasFieldLabel(approval))} content"
           name="approval_content"
-          rows="12"
+          rows="6"
           placeholder="${escapeHtml(approvalCanvasPlaceholder(approval))}"
         >${escapeHtml(canvasContent)}</textarea>
       </section>
@@ -3839,8 +3839,9 @@ function refreshApprovalCardState(container, approval, collected = undefined) {
 function resizeApprovalTextareas(container) {
   for (const textarea of container.querySelectorAll(".approval-editor textarea")) {
     const inCanvas = Boolean(textarea.closest(".approval-editor-canvas"));
-    const minHeight = textarea.dataset.approvalJson !== undefined ? 132 : inCanvas ? 320 : 96;
-    const maxHeight = textarea.dataset.approvalJson !== undefined ? 320 : inCanvas ? (window.innerWidth <= 640 ? 520 : 760) : window.innerWidth <= 640 ? 220 : 280;
+    const compactCanvas = inCanvas && window.innerWidth <= 640;
+    const minHeight = textarea.dataset.approvalJson !== undefined ? 132 : compactCanvas ? 148 : inCanvas ? 320 : 96;
+    const maxHeight = textarea.dataset.approvalJson !== undefined ? 320 : inCanvas ? (compactCanvas ? 360 : 760) : window.innerWidth <= 640 ? 220 : 280;
     textarea.style.height = "auto";
     const nextHeight = Math.min(Math.max(textarea.scrollHeight, minHeight), maxHeight);
     textarea.style.height = `${nextHeight}px`;

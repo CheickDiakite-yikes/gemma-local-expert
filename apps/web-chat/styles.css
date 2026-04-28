@@ -1709,7 +1709,7 @@ a {
   }
 
   .approval-canvas-textarea {
-    min-height: min(48vh, 420px);
+    min-height: clamp(160px, 28vh, 280px);
     font-size: 1rem;
     line-height: 1.62;
   }
@@ -5072,6 +5072,13 @@ body::before {
   .approval-canvas-collapsed-preview p {
     font-size: 0.86rem;
     line-height: 1.45;
+  }
+
+  .approval-canvas-textarea {
+    min-height: 148px;
+    max-height: 360px;
+    font-size: 0.95rem;
+    line-height: 1.5;
   }
 
   .composer {
