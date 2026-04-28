@@ -2776,43 +2776,6 @@ body::before {
   display: none;
 }
 
-.desktop-chrome {
-  display: grid;
-  grid-template-columns: auto auto auto 1fr auto auto auto;
-  align-items: center;
-  gap: 12px;
-  min-height: 44px;
-  color: rgba(232, 227, 240, 0.36);
-}
-
-.traffic-dot {
-  width: 13px;
-  height: 13px;
-  border-radius: 999px;
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
-}
-
-.traffic-dot-red {
-  background: #ff655d;
-}
-
-.traffic-dot-yellow {
-  background: #f4c64f;
-}
-
-.traffic-dot-green {
-  background: #67cc67;
-}
-
-.chrome-icon {
-  display: inline-grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  color: rgba(232, 227, 240, 0.36);
-  font-size: 1.1rem;
-}
-
 .sidebar {
   gap: 22px;
   padding: 0 14px 14px;
@@ -2881,12 +2844,6 @@ body::before {
   justify-content: space-between;
   gap: 12px;
   padding-top: 16px;
-}
-
-.project-tools {
-  display: inline-flex;
-  gap: 14px;
-  color: rgba(232, 227, 240, 0.34);
 }
 
 .project-root {
@@ -4093,10 +4050,6 @@ body::before {
     overflow-x: hidden;
   }
 
-  .desktop-chrome {
-    min-height: 34px;
-  }
-
   .sidebar {
     width: min(88vw, 382px);
     padding-inline: 14px;
@@ -4193,18 +4146,11 @@ body::before {
   border-top: 1px solid rgba(232, 227, 240, 0.07);
 }
 
-.topbar-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 18px;
-  margin-right: 8px;
-}
-
-.topbar-icon {
+.artifact-toggle {
   appearance: none;
   width: 32px;
   height: 32px;
-  display: inline-grid;
+  display: none;
   place-items: center;
   border: 1px solid transparent;
   border-radius: 10px;
@@ -4215,20 +4161,11 @@ body::before {
   font-size: 1.02rem;
 }
 
-.topbar-icon:hover,
-.topbar-icon-active {
+.artifact-toggle:hover,
+.artifact-toggle.is-active {
   border-color: rgba(232, 227, 240, 0.08);
   background: rgba(255, 255, 255, 0.055);
   color: rgba(232, 227, 240, 0.86);
-}
-
-.topbar-actions .topbar-icon {
-  cursor: default;
-  pointer-events: none;
-}
-
-.artifact-toggle {
-  display: none;
 }
 
 .artifact-toggle.is-active {
@@ -4588,10 +4525,6 @@ body::before {
   .artifact-close {
     display: inline-flex;
     align-items: center;
-  }
-
-  .topbar-actions {
-    display: none;
   }
 
   .status-wrap {
@@ -5044,8 +4977,7 @@ body::before {
   }
 
   #sidebar-toggle,
-  .artifact-toggle,
-  .topbar-icon {
+  .artifact-toggle {
     width: 34px;
     height: 34px;
     border-radius: 10px;
@@ -5189,10 +5121,6 @@ body::before {
     width: min(82vw, 302px);
     gap: 12px;
     padding: calc(10px + env(safe-area-inset-top)) 10px calc(12px + env(safe-area-inset-bottom));
-  }
-
-  .sidebar .desktop-chrome {
-    display: none;
   }
 
   .sidebar-command,

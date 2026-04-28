@@ -97,7 +97,7 @@ async (page) => {
   await page.goto(`${baseUrl}/chat/`, { waitUntil: "domcontentloaded" });
   await page.setViewportSize({ width: 2048, height: 1208 });
   await page.locator("#composer-input").waitFor({ state: "visible", timeout: 30000 });
-  const decorativeChromeCount = await page.locator(".desktop-chrome, .topbar-actions, .project-tools").count();
+  const decorativeChromeCount = await page.locator(".desktop-chrome, .topbar-actions, .topbar-icon, .project-tools").count();
   if (decorativeChromeCount !== 0) {
     throw new Error(`Expected no decorative chrome controls, found ${decorativeChromeCount}`);
   }
