@@ -669,6 +669,25 @@ async (page) => {
     async () => /is-mobile-open/.test(await artifactPanel.getAttribute("class")),
     "mobile checklist artifact drawer opens",
   );
+  await waitUntil(
+    async () =>
+      await artifactPanel.locator(".artifact-type-card").evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.left >= -1 && rect.right <= window.innerWidth + 1;
+      }),
+    "mobile checklist artifact card stays inside viewport",
+  );
+  const mobileArtifactOverflow = await page.evaluate(() => ({
+    documentWidth: document.documentElement.scrollWidth,
+    paneWidth: document.querySelector("[data-artifact-panel]")?.scrollWidth || 0,
+    viewportWidth: window.innerWidth,
+  }));
+  if (
+    mobileArtifactOverflow.documentWidth > mobileArtifactOverflow.viewportWidth + 1 ||
+    mobileArtifactOverflow.paneWidth > mobileArtifactOverflow.viewportWidth + 1
+  ) {
+    throw new Error(`Expected mobile artifact drawer not to overflow, got ${JSON.stringify(mobileArtifactOverflow)}`);
+  }
   await page.waitForTimeout(250);
   await page.screenshot({
     path: "output/playwright/friend-turns/checklist-artifact-mobile-ui.png",

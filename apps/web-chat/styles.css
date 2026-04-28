@@ -3403,6 +3403,7 @@ body::before {
 .artifact-preview-scroll {
   min-height: 0;
   overflow: auto;
+  overflow-x: hidden;
   padding: 34px 36px 48px;
   background: #211e31;
 }
@@ -3417,6 +3418,7 @@ body::before {
 }
 
 .artifact-page {
+  box-sizing: border-box;
   width: min(740px, 100%);
   margin: 0 auto 30px;
   overflow: hidden;
@@ -3458,6 +3460,8 @@ body::before {
   font-size: clamp(2rem, 3.4vw, 3.6rem);
   line-height: 0.95;
   letter-spacing: -0.085em;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 
 .artifact-page-hero p {
@@ -4396,6 +4400,7 @@ body::before {
 }
 
 .artifact-type-card {
+  box-sizing: border-box;
   width: min(760px, 100%);
   margin: 0 auto 24px;
   display: grid;
@@ -4433,6 +4438,8 @@ body::before {
   font-size: clamp(1.45rem, 2.5vw, 2.5rem);
   line-height: 0.98;
   letter-spacing: -0.075em;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 
 .artifact-type-card p,
@@ -4693,7 +4700,23 @@ body::before {
     font-size: clamp(1.08rem, 7vw, 1.42rem);
     line-height: 1.03;
     letter-spacing: -0.055em;
-    overflow-wrap: anywhere;
+    overflow-wrap: normal;
+    word-break: normal;
+    hyphens: auto;
+  }
+
+  .artifact-type-card header strong {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 4;
+  }
+
+  .artifact-page-hero h3 {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 5;
   }
 
   .artifact-type-card li,
@@ -5231,8 +5254,10 @@ body::before {
   }
 
   .artifact-type-card header strong {
-    max-width: 15ch;
-    font-size: clamp(1.26rem, 8vw, 1.8rem);
+    max-width: 100%;
+    font-size: clamp(1.08rem, 6.2vw, 1.48rem);
+    line-height: 1.06;
+    letter-spacing: -0.052em;
   }
 
   .artifact-message-envelope,

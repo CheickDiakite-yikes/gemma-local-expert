@@ -1136,6 +1136,10 @@ function clipCopy(text, size = 180) {
   return normalized.length > size ? `${normalized.slice(0, size - 1).trimEnd()}...` : normalized;
 }
 
+function artifactPreviewTitle(title, size = 74) {
+  return clipCopy(stripMarkdownToText(title), size);
+}
+
 function approvalMeaningfulLines(text) {
   return String(text || "")
     .replace(/\r\n?/g, "\n")
@@ -2489,6 +2493,9 @@ function artifactChecklistItems(content, limit = 7) {
 function renderArtifactTypePreview({ approval, payload, title, kind, statusLabel, previewContent }) {
   const content = previewContent || payload?.details || approvalPayloadExcerpt(approval, payload);
   const lines = artifactPreviewLines(content, 5);
+  const displayTitle = artifactPreviewTitle(title);
+  const escapedFullTitle = escapeHtml(title);
+  const escapedDisplayTitle = escapeHtml(displayTitle);
   const lineMarkup = lines
     .map((line) => `<li>${escapeHtml(clipCopy(line, 120))}</li>`)
     .join("");
@@ -2504,7 +2511,7 @@ function renderArtifactTypePreview({ approval, payload, title, kind, statusLabel
         <article class="artifact-type-card artifact-type-checklist">
           <header>
             <span>${escapeHtml(kind)}</span>
-            <strong>${escapeHtml(title)}</strong>
+            <strong title="${escapedFullTitle}">${escapedDisplayTitle}</strong>
           </header>
           ${metaMarkup}
           <ol class="artifact-checklist-preview">
@@ -2528,7 +2535,7 @@ function renderArtifactTypePreview({ approval, payload, title, kind, statusLabel
         <article class="artifact-type-card artifact-type-message">
           <header>
             <span>Message draft</span>
-            <strong>${escapeHtml(title)}</strong>
+            <strong title="${escapedFullTitle}">${escapedDisplayTitle}</strong>
           </header>
           <div class="artifact-message-envelope">
             <span>Drafted locally</span>
@@ -2543,7 +2550,7 @@ function renderArtifactTypePreview({ approval, payload, title, kind, statusLabel
         <article class="artifact-type-card artifact-type-task">
           <header>
             <span>Task</span>
-            <strong>${escapeHtml(title)}</strong>
+            <strong title="${escapedFullTitle}">${escapedDisplayTitle}</strong>
           </header>
           <div class="artifact-task-board">
             <span>${escapeHtml(statusLabel)}</span>
@@ -2557,7 +2564,7 @@ function renderArtifactTypePreview({ approval, payload, title, kind, statusLabel
         <article class="artifact-type-card artifact-type-observation">
           <header>
             <span>Observation</span>
-            <strong>${escapeHtml(title)}</strong>
+            <strong title="${escapedFullTitle}">${escapedDisplayTitle}</strong>
           </header>
           <blockquote>${escapeHtml(clipCopy(lines.join(" ") || approvalPayloadExcerpt(approval, payload), 320))}</blockquote>
         </article>
@@ -2571,7 +2578,7 @@ function renderArtifactTypePreview({ approval, payload, title, kind, statusLabel
         <article class="artifact-type-card artifact-type-export">
           <header>
             <span>Markdown export</span>
-            <strong>${escapeHtml(title)}</strong>
+            <strong title="${escapedFullTitle}">${escapedDisplayTitle}</strong>
           </header>
           <div class="artifact-export-grid">
             <span>${headingCount || "Ready"} sections</span>
@@ -2586,7 +2593,7 @@ function renderArtifactTypePreview({ approval, payload, title, kind, statusLabel
         <article class="artifact-type-card artifact-type-generic">
           <header>
             <span>${escapeHtml(kind)}</span>
-            <strong>${escapeHtml(title)}</strong>
+            <strong title="${escapedFullTitle}">${escapedDisplayTitle}</strong>
           </header>
           ${lineMarkup ? `<ul>${lineMarkup}</ul>` : `<p>${escapeHtml(approvalPayloadExcerpt(approval, payload) || "Ready for local review.")}</p>`}
         </article>
@@ -2596,13 +2603,14 @@ function renderArtifactTypePreview({ approval, payload, title, kind, statusLabel
 
 function renderArtifactSummarySurface({ approval, payload, title, kind, statusLabel, contentMarkup, editMarkup, previewContent }) {
   const typePreview = renderArtifactTypePreview({ approval, payload, title, kind, statusLabel, previewContent });
+  const displayTitle = artifactPreviewTitle(title);
   return `
     <div class="artifact-preview-scroll" data-artifact-mode-panel="summary">
       ${typePreview}
       <article class="artifact-page artifact-cover-page">
         <div class="artifact-page-hero artifact-cover-hero">
           <span>${escapeHtml(kind)}</span>
-          <h3>${escapeHtml(title)}</h3>
+          <h3 title="${escapeHtml(title)}">${escapeHtml(displayTitle)}</h3>
           <p>${escapeHtml(approvalReasonCopy(approval))}</p>
         </div>
         <footer class="artifact-page-footer">
