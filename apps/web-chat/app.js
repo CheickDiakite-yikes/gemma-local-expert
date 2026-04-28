@@ -28,6 +28,7 @@ const state = {
   artifactZoomActual: false,
   artifactMode: "summary",
   artifactSelectedAssetId: null,
+  artifactDrawerLayout: false,
   processFeed: [],
   statusDetail: "Ready for the next turn.",
   camera: {
@@ -3849,6 +3850,10 @@ function resizeApprovalTextareas(container) {
   }
 }
 
+function resizeVisibleApprovalTextareas() {
+  resizeApprovalTextareas(document);
+}
+
 function wireApprovalActions(container, approval) {
   const editor = container.querySelector(`[data-approval-editor="${approval.id}"]`);
   if (editor) {
@@ -5158,11 +5163,22 @@ function updateResponsiveChrome() {
   } else {
     applySidebarState();
   }
-  if (!isArtifactDrawerLayout() && state.mobileArtifactOpen) {
+  const artifactDrawerLayout = isArtifactDrawerLayout();
+  if (artifactDrawerLayout && !state.artifactDrawerLayout) {
+    state.mobileArtifactOpen = false;
+  }
+  state.artifactDrawerLayout = artifactDrawerLayout;
+  if (!artifactDrawerLayout && state.mobileArtifactOpen) {
     setMobileArtifactOpen(false);
   } else {
     renderArtifactPanel();
   }
+}
+
+function handleWindowResize() {
+  updateResponsiveChrome();
+  resizeComposer();
+  resizeVisibleApprovalTextareas();
 }
 
 function addPendingAttachments(files) {
@@ -5391,7 +5407,7 @@ function attachEventHandlers() {
     clearCameraRecording();
     clearMonitorFrames();
   });
-  window.addEventListener("resize", updateResponsiveChrome);
+  window.addEventListener("resize", handleWindowResize);
 }
 
 async function bootstrap() {

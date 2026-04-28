@@ -663,6 +663,44 @@ async (page) => {
     "rich checklist artifact preview",
   );
   await page.setViewportSize({ width: 390, height: 844 });
+  await waitUntil(
+    async () => !/is-mobile-open/.test(await artifactPanel.getAttribute("class")),
+    "mobile artifact drawer starts closed after desktop-to-phone resize",
+  );
+  await waitUntil(
+    async () =>
+      await artifactPanel.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.left >= window.innerWidth - 1 || rect.right <= 1;
+      }),
+    "mobile artifact drawer is visually offscreen before toggle",
+  );
+  await checklistCanvas.evaluate((element) => element.scrollIntoView({ block: "center" }));
+  const mobileChecklistEditorMetrics = await checklistCanvas
+    .locator('[data-approval-field="content"]')
+    .evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return {
+        bottom: rect.bottom,
+        height: rect.height,
+        top: rect.top,
+        viewportHeight: window.innerHeight,
+      };
+    });
+  if (
+    mobileChecklistEditorMetrics.height < 130 ||
+    mobileChecklistEditorMetrics.height > 190 ||
+    mobileChecklistEditorMetrics.top < -1 ||
+    mobileChecklistEditorMetrics.bottom > mobileChecklistEditorMetrics.viewportHeight + 1
+  ) {
+    throw new Error(
+      `Expected compact mobile inline checklist canvas, got ${JSON.stringify(mobileChecklistEditorMetrics)}`,
+    );
+  }
+  await page.screenshot({
+    path: "output/playwright/friend-turns/checklist-inline-mobile-ui.png",
+    fullPage: false,
+  });
   await page.locator("#artifact-toggle").waitFor({ state: "visible", timeout: 30000 });
   await page.locator("#artifact-toggle").click();
   await waitUntil(
