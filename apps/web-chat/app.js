@@ -5306,8 +5306,14 @@ function attachEventHandlers() {
       runSidebarCommand(commandButton.dataset.sidebarCommand);
     });
   }
-  for (const promptButton of document.querySelectorAll("[data-empty-prompt]")) {
+  const emptyPromptButtons = document.querySelectorAll("[data-empty-prompt]");
+  for (const promptButton of emptyPromptButtons) {
     promptButton.addEventListener("click", () => {
+      for (const siblingPrompt of emptyPromptButtons) {
+        const isSelected = siblingPrompt === promptButton;
+        siblingPrompt.classList.toggle("is-used", isSelected);
+        siblingPrompt.setAttribute("aria-pressed", isSelected ? "true" : "false");
+      }
       elements.promptInput.value = promptButton.dataset.emptyPrompt || promptButton.textContent.trim();
       resizeComposer();
       elements.promptInput.focus();

@@ -157,6 +157,13 @@ async (page) => {
     /Prepare a concise checklist from local material\./i,
     "empty-state prompt fills composer",
   );
+  await waitUntil(
+    async () =>
+      (await page
+        .locator('[data-empty-prompt="Prepare a concise checklist from local material."]')
+        .getAttribute("aria-pressed")) === "true",
+    "empty-state prompt marks selected",
+  );
   await page.locator("#composer-input").fill("");
   await page.locator("#status-button").click();
   await waitUntil(
