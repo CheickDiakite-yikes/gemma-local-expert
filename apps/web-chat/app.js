@@ -2368,15 +2368,14 @@ function renderApprovalCanvas(approval) {
         </div>
         <label class="approval-canvas-heading">
           <span class="visually-hidden">${escapeHtml(approvalCanvasTitleLabel(approval))}</span>
-          <input
+          <textarea
             class="approval-canvas-title-input"
             data-approval-field="title"
             aria-label="${escapeHtml(approvalCanvasTitleLabel(approval))}"
             name="approval_title"
-            type="text"
+            rows="2"
             placeholder="Untitled ${escapeHtml(approvalSurfaceNoun(approval.tool_name))}"
-            value="${escapeHtml(payload.title || "")}"
-          />
+          >${escapeHtml(payload.title || "")}</textarea>
         </label>
       </div>
       ${groundingNotice ? `<p class="approval-grounding-note">${escapeHtml(groundingNotice)}</p>` : ""}
@@ -3846,11 +3845,34 @@ function refreshApprovalCardState(container, approval, collected = undefined) {
 }
 
 function resizeApprovalTextareas(container) {
-  for (const textarea of container.querySelectorAll(".approval-editor textarea")) {
+  for (const textarea of container.querySelectorAll(".approval-editor textarea, .approval-canvas-title-input")) {
+    const titleField = textarea.dataset.approvalField === "title";
     const inCanvas = Boolean(textarea.closest(".approval-editor-canvas"));
     const compactCanvas = inCanvas && window.innerWidth <= 640;
-    const minHeight = textarea.dataset.approvalJson !== undefined ? 132 : compactCanvas ? 148 : inCanvas ? 320 : 96;
-    const maxHeight = textarea.dataset.approvalJson !== undefined ? 320 : inCanvas ? (compactCanvas ? 360 : 760) : window.innerWidth <= 640 ? 220 : 280;
+    const minHeight = titleField
+      ? window.innerWidth <= 640
+        ? 48
+        : 56
+      : textarea.dataset.approvalJson !== undefined
+        ? 132
+        : compactCanvas
+          ? 148
+          : inCanvas
+            ? 320
+            : 96;
+    const maxHeight = titleField
+      ? window.innerWidth <= 640
+        ? 76
+        : 98
+      : textarea.dataset.approvalJson !== undefined
+        ? 320
+        : inCanvas
+          ? compactCanvas
+            ? 360
+            : 760
+          : window.innerWidth <= 640
+            ? 220
+            : 280;
     textarea.style.height = "auto";
     const nextHeight = Math.min(Math.max(textarea.scrollHeight, minHeight), maxHeight);
     textarea.style.height = `${nextHeight}px`;

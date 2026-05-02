@@ -1160,6 +1160,8 @@ a {
   font-size: clamp(1.35rem, 2.6vw, 1.92rem);
   line-height: 1.08;
   font-weight: 650;
+  resize: none;
+  overflow: hidden;
 }
 
 .approval-canvas-title-input:focus {
@@ -4096,7 +4098,6 @@ body::before {
     min-width: 0;
     max-width: 100%;
     overflow: hidden;
-    text-overflow: ellipsis;
     font-size: clamp(1.12rem, 4vw, 1.46rem);
   }
 
