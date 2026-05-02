@@ -306,6 +306,12 @@ a {
 
 @media (hover: none), (pointer: coarse) {
   .conversation-row-delete {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .conversation-row-shell.is-active .conversation-row-delete,
+  .conversation-row-shell:focus-within .conversation-row-delete {
     opacity: 1;
     pointer-events: auto;
   }
