@@ -5306,6 +5306,14 @@ function attachEventHandlers() {
       runSidebarCommand(commandButton.dataset.sidebarCommand);
     });
   }
+  for (const promptButton of document.querySelectorAll("[data-empty-prompt]")) {
+    promptButton.addEventListener("click", () => {
+      elements.promptInput.value = promptButton.dataset.emptyPrompt || promptButton.textContent.trim();
+      resizeComposer();
+      elements.promptInput.focus();
+      updateStatus("ready", "Prompt ready", "Suggestion copied into the composer.");
+    });
+  }
   elements.promptInput.addEventListener("input", resizeComposer);
   elements.promptInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey) {

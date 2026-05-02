@@ -8,8 +8,8 @@
     />
     <title>Field Assistant Chat</title>
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
-    <link rel="stylesheet" href="./styles.css?v=20260502e" />
-    <script defer src="./app.js?v=20260502e"></script>
+    <link rel="stylesheet" href="./styles.css?v=20260502f" />
+    <script defer src="./app.js?v=20260502f"></script>
   </head>
   <body>
     <div class="app-shell">
@@ -142,10 +142,10 @@
                 <p class="eyebrow">Local-first assistant</p>
                 <h3>Ask, review, or act locally.</h3>
                 <p>Try a how-to, attach an image, or prepare a checklist from local material.</p>
-                <div class="empty-state-prompts" aria-hidden="true">
-                  <span>Teach me how to…</span>
-                  <span>Review this image</span>
-                  <span>Prepare a checklist</span>
+                <div class="empty-state-prompts" aria-label="Suggested prompts">
+                  <button class="empty-state-prompt" type="button" data-empty-prompt="Teach me how to prepare for a field visit.">Teach me how to…</button>
+                  <button class="empty-state-prompt" type="button" data-empty-prompt="Review this image and describe what matters locally.">Review this image</button>
+                  <button class="empty-state-prompt" type="button" data-empty-prompt="Prepare a concise checklist from local material.">Prepare a checklist</button>
                 </div>
               </div>
             </div>

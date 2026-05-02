@@ -151,6 +151,13 @@ async (page) => {
     path: "output/playwright/friend-turns/empty-mobile-ui.png",
     fullPage: false,
   });
+  await page.locator('[data-empty-prompt="Prepare a concise checklist from local material."]').click();
+  await assertInputValueMatches(
+    page.locator("#composer-input"),
+    /Prepare a concise checklist from local material\./i,
+    "empty-state prompt fills composer",
+  );
+  await page.locator("#composer-input").fill("");
   await page.locator("#status-button").click();
   await waitUntil(
     async () =>
