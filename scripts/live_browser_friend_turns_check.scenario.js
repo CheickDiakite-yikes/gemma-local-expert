@@ -250,6 +250,10 @@ async (page) => {
     /Files[\s\S]*Workspace files[\s\S]*village_visit_notes\.md[\s\S]*Native Markdown preview[\s\S]*field_supply_board\.png[\s\S]*Local OCR route/i,
     "artifact pane file workspace for mixed uploads",
   );
+  const artifactDeadControlCount = await artifactPanel.locator(".artifact-tab-plus").count();
+  if (artifactDeadControlCount !== 0) {
+    throw new Error(`Expected artifact tabs to avoid decorative plus controls, found ${artifactDeadControlCount}`);
+  }
   await waitForTextMatches(
     artifactPanel,
     /Village Visit Notes[\s\S]*Confirm translator phone credit[\s\S]*Field constraints/i,

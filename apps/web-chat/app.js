@@ -3097,7 +3097,6 @@ function renderArtifactPanel() {
     <header class="artifact-header">
       <div class="artifact-tabs" aria-label="Artifact navigation">
         ${tabMarkup}
-        <span class="artifact-tab-plus" aria-hidden="true">＋</span>
       </div>
       <div class="artifact-toolbar">
         <strong>${escapeHtml(clip(title, 42))}</strong>

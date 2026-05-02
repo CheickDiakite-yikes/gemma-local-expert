@@ -3325,11 +3325,6 @@ body::before {
   color: #172216;
 }
 
-.artifact-tab-plus {
-  color: rgba(232, 227, 240, 0.34);
-  font-size: 1.2rem;
-}
-
 .artifact-toolbar strong {
   min-width: 0;
   flex: 1 1 auto;
@@ -4579,7 +4574,7 @@ body::before {
 
   .artifact-tabs,
   .artifact-toolbar {
-    min-height: 50px;
+    min-height: 46px;
     gap: 9px;
     padding: 0 14px;
   }
