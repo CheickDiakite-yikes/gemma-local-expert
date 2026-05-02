@@ -2356,7 +2356,11 @@ function renderApprovalCanvas(approval) {
               aria-controls="${escapeHtml(editorId)}"
               aria-expanded="${String(!canvasCollapsed)}"
               title="${escapeHtml(collapseLabel)}"
-            >${escapeHtml(collapseLabel)}</button>
+              aria-label="${escapeHtml(collapseLabel)}"
+            >
+              <span class="approval-canvas-label-full">${escapeHtml(collapseLabel)}</span>
+              <span class="approval-canvas-label-short">${canvasCollapsed ? "Edit" : "Tuck away"}</span>
+            </button>
             <button class="approval-editor-reset" data-approval-reset type="button"${isDirty ? "" : " disabled"}>Revert</button>
             <button class="approval-action reject" data-approval-action="reject" data-approval-id="${approval.id}" type="button">Dismiss</button>
             <button class="approval-action approve" data-approval-action="approve" data-approval-id="${approval.id}" type="button">${escapeHtml(approvalPrimaryActionLabel(approval))}</button>
@@ -2389,7 +2393,11 @@ function renderApprovalCanvas(approval) {
           aria-controls="${escapeHtml(editorId)}"
           aria-expanded="false"
           title="Expand canvas to edit"
-        >Expand to edit</button>
+          aria-label="Expand canvas to edit"
+        >
+          <span class="approval-canvas-label-full">Expand to edit</span>
+          <span class="approval-canvas-label-short">Edit draft</span>
+        </button>
       </section>
       <section
         class="approval-editor approval-editor-canvas"
