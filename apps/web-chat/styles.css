@@ -2251,6 +2251,22 @@ a {
   background: rgba(255, 255, 255, 0.022);
 }
 
+.composer-tool-button {
+  width: auto;
+  min-width: 40px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+
+.composer-tool-label {
+  color: rgba(232, 227, 240, 0.66);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
 .send-button {
   min-width: 40px;
   width: 40px;
@@ -5137,6 +5153,21 @@ body::before {
     width: 34px;
     height: 34px;
     min-width: 34px;
+  }
+
+  .composer-tool-button {
+    width: auto;
+    min-width: 34px;
+    padding-inline: 9px;
+    gap: 5px;
+  }
+
+  .composer-tool-label {
+    font-size: 0.7rem;
+  }
+
+  #voice-button .composer-tool-label {
+    display: none;
   }
 
   .composer-status-line {

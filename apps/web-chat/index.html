@@ -8,8 +8,8 @@
     />
     <title>Field Assistant Chat</title>
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
-    <link rel="stylesheet" href="./styles.css?v=20260502b" />
-    <script defer src="./app.js?v=20260502b"></script>
+    <link rel="stylesheet" href="./styles.css?v=20260502c" />
+    <script defer src="./app.js?v=20260502c"></script>
   </head>
   <body>
     <div class="app-shell">
@@ -247,12 +247,14 @@
               ></textarea>
               <div class="composer-control-bar">
               <div class="composer-utilities">
-                <button class="icon-button composer-icon" id="attachment-button" type="button" aria-label="Attachments">
-                  ＋
+                <button class="icon-button composer-icon composer-tool-button" id="attachment-button" type="button" aria-label="Attach files">
+                  <span aria-hidden="true">＋</span>
+                  <span class="composer-tool-label">Attach</span>
                 </button>
                 <span class="composer-mode-pill" aria-hidden="true">⌾ Auto-review⌄</span>
-                <button class="icon-button composer-icon" id="camera-button" type="button" aria-label="Camera capture">
-                  ◌
+                <button class="icon-button composer-icon composer-tool-button" id="camera-button" type="button" aria-label="Camera capture">
+                  <span aria-hidden="true">◌</span>
+                  <span class="composer-tool-label">Camera</span>
                 </button>
               </div>
               <div class="composer-actions">
@@ -264,7 +266,8 @@
                   aria-label="Voice capture coming later"
                   title="Voice capture coming later"
                 >
-                  ◉
+                  <span aria-hidden="true">◉</span>
+                  <span class="composer-tool-label">Voice</span>
                 </button>
                 <button class="send-button" id="send-button" type="submit" aria-label="Send">
                   ↗
